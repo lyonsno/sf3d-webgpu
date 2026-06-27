@@ -41,7 +41,7 @@ async function init() {
     const gpu = await initGPU();
     device = gpu.device;
 
-    const adapterInfo = await gpu.adapter.requestAdapterInfo();
+    const adapterInfo = gpu.adapter.info || (gpu.adapter.requestAdapterInfo ? await gpu.adapter.requestAdapterInfo() : {});
     setStatus(`WebGPU ready: ${adapterInfo.description || adapterInfo.device || 'GPU'}. Loading weights...`);
     console.log('Adapter limits:', {
       maxBufferSize: gpu.adapter.limits.maxBufferSize,
