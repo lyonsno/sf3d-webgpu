@@ -3,7 +3,7 @@
 
 Produces a binary file with the same format as moge-webgpu/sharp-webgpu:
   Header (16 bytes): magic + version + num_tensors + header_size
-  Tensor table (96 bytes each): name + dtype + ndim + shape + offset + size
+  Tensor table (160 bytes each): name + dtype + ndim + shape + offset + size
   Weight data: packed tensors with 16-byte alignment
 
 Usage:
@@ -168,7 +168,7 @@ def convert_weights(model_path, output_path, dtype="fp16", manifest_path=None):
 
         # Tensor table
         for t in tensors:
-            # Name (64 bytes, null-padded)
+            # Name (128 bytes, null-padded)
             name_bytes = t["name"].encode("ascii")[:NAME_SIZE]
             f.write(name_bytes.ljust(NAME_SIZE, b"\0"))
 

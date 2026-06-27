@@ -24,7 +24,6 @@ import { createStorageBuffer, createEmptyBuffer } from './gpu.js';
 import linearWGSL from '../shaders/linear.wgsl?raw';
 import layerNormWGSL from '../shaders/layernorm_vit.wgsl?raw';
 import crossAttentionWGSL from '../shaders/cross_attention.wgsl?raw';
-import attentionWGSL from '../shaders/attention.wgsl?raw';
 import gegluWGSL from '../shaders/geglu.wgsl?raw';
 import groupnormWGSL from '../shaders/groupnorm.wgsl?raw';
 
@@ -68,9 +67,6 @@ export class TwoStreamBackbone {
     this.pipelines.crossAttnScores = make(crossAttentionWGSL, 'computeCrossScores');
     this.pipelines.crossAttnSoftmax = make(crossAttentionWGSL, 'softmaxCross');
     this.pipelines.crossAttnApply = make(crossAttentionWGSL, 'applyCrossAttn');
-    this.pipelines.selfAttnScores = make(attentionWGSL, 'computeScores');
-    this.pipelines.selfAttnSoftmax = make(attentionWGSL, 'softmax');
-    this.pipelines.selfAttnApply = make(attentionWGSL, 'applyAttn');
     this.pipelines.geglu = make(gegluWGSL, 'geglu_main');
 
     // GroupNorm stats + normalize
