@@ -188,8 +188,74 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   // 4. Two-stream backbone (GPU)
   report('Running two-stream backbone...');
 
-  // Backbone needs tokenizer embeddings on the weights object
-  weights.backbone.tokenizer_embeddings_buf = weights.tokenizer.embeddings;
+  // Rearrange tokenizer embeddings from [3, 1024, 96, 96] to [1024, 27648]
+  // PyTorch does: rearrange("Np Ct Hp Wp -> Ct (Np Hp Wp)")
+  // Source [p,c,h,w] at p*C*H*W + c*H*W + h*W + w
+  // Dest [c, p*H*W + h*W + w] at c*3*H*W + p*H*W + h*W + w
+  if (!weights.backbone._rearrangedEmbeddings) {
+    const C = 1024, Np = 3, H = 96, W = 96;
+    const total = Np * C * H * W;
+    const rearrangeEncoder = device.createCommandEncoder();
+
+    if (!pipelines._rearrangePipeline) {
+      pipelines._rearrangePipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: {
+          module: device.createShaderModule({
+            code: `
+              struct P { Np: u32, C: u32, H: u32, W: u32, numWgX: u32 }
+              @group(0) @binding(0) var<uniform> p: P;
+              @group(0) @binding(1) var<storage, read> src: array<f32>;
+              @group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+              @compute @workgroup_size(256)
+              fn main(@builtin(workgroup_id) wgid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+                let idx = (wgid.x + wgid.y * p.numWgX) * 256u + lid.x;
+                let total = p.Np * p.C * p.H * p.W;
+                if (idx >= total) { return; }
+                // idx iterates over destination [C, Np*H*W]
+                let c = idx / (p.Np * p.H * p.W);
+                let s = idx % (p.Np * p.H * p.W);
+                let plane = s / (p.H * p.W);
+                let hw = s % (p.H * p.W);
+                // source layout: [Np, C, H, W]
+                let srcIdx = plane * p.C * p.H * p.W + c * p.H * p.W + hw;
+                dst[idx] = src[srcIdx];
+              }
+            `,
+          }),
+          entryPoint: 'main',
+        },
+      });
+    }
+
+    const totalWG = Math.ceil(total / 256);
+    const wgX = Math.min(totalWG, 65535);
+    const wgY = Math.ceil(totalWG / 65535);
+    const params = device.createBuffer({
+      size: 20, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, mappedAtCreation: true,
+    });
+    new Uint32Array(params.getMappedRange()).set([Np, C, H, W, wgX]);
+    params.unmap();
+
+    const rearrangedBuf = createEmptyBuffer(device, total * 4);
+    const bg = device.createBindGroup({
+      layout: pipelines._rearrangePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: params } },
+        { binding: 1, resource: { buffer: weights.tokenizer.embeddings } },
+        { binding: 2, resource: { buffer: rearrangedBuf } },
+      ],
+    });
+    const pass = rearrangeEncoder.beginComputePass();
+    pass.setPipeline(pipelines._rearrangePipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+    device.queue.submit([rearrangeEncoder.finish()]);
+
+    weights.backbone._rearrangedEmbeddings = rearrangedBuf;
+  }
+  weights.backbone.tokenizer_embeddings_buf = weights.backbone._rearrangedEmbeddings;
 
   // Diagnostic: check tokenizer embeddings
   {
