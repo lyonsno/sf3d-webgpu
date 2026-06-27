@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.DS_Store
+public/weights.bin
+public/weights.json
+*.pyc
+__pycache__/
+.venv/

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SF3D WebGPU — Single-Image 3D Mesh Generation</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 2rem; }
+    h1 { margin-bottom: 0.5rem; font-size: 1.8rem; }
+    .subtitle { color: #888; margin-bottom: 2rem; font-size: 0.9rem; }
+    #drop-zone { width: 512px; height: 512px; border: 2px dashed #555; border-radius: 12px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: border-color 0.2s; position: relative; overflow: hidden; }
+    #drop-zone:hover, #drop-zone.dragover { border-color: #6c63ff; }
+    #drop-zone img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    #drop-zone .placeholder { text-align: center; color: #666; }
+    #status { margin-top: 1rem; font-size: 0.9rem; color: #aaa; min-height: 1.5em; }
+    #progress-bar { width: 512px; height: 4px; background: #333; border-radius: 2px; margin-top: 0.5rem; overflow: hidden; }
+    #progress-fill { height: 100%; background: #6c63ff; width: 0%; transition: width 0.3s; }
+    .controls { margin-top: 1rem; display: flex; gap: 1rem; }
+    button { background: #6c63ff; color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    button:hover { background: #5a52d5; }
+    button:disabled { background: #444; cursor: not-allowed; }
+    #output { margin-top: 2rem; }
+    canvas { border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>SF3D WebGPU</h1>
+  <p class="subtitle">Single-image 3D mesh generation — Stable Fast 3D running entirely in WebGPU compute shaders</p>
+
+  <div id="drop-zone">
+    <div class="placeholder">
+      <p>Drop an image here</p>
+      <p style="font-size: 0.8rem; margin-top: 0.5rem;">or click to select</p>
+    </div>
+  </div>
+
+  <div id="progress-bar"><div id="progress-fill"></div></div>
+  <div id="status">Initializing WebGPU...</div>
+
+  <div class="controls">
+    <button id="run-btn" disabled>Generate 3D Mesh</button>
+    <button id="download-btn" disabled>Download GLB</button>
+  </div>
+
+  <div id="output"></div>
+
+  <input type="file" id="file-input" accept="image/*" style="display: none;">
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
