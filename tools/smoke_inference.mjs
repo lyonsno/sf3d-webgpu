@@ -11,11 +11,51 @@
 import puppeteer from 'puppeteer-core';
 import path from 'path';
 import fs from 'fs';
+import { spawn } from 'child_process';
+import http from 'http';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const URL = 'http://localhost:5177';
 const DEFAULT_IMAGE = path.join(process.env.HOME, '.local/state/gpu-greenroom/outputs/b4fe3aa9e629/input.png');
-const REPORT_PATH = '/tmp/sf3d-inference-smoke-report.txt';
+const REPORT_PATH = process.argv.includes('--report')
+  ? process.argv[process.argv.indexOf('--report') + 1]
+  : '/tmp/sf3d-inference-smoke-report.txt';
+
+// Auto-start vite dev server if not running
+async function ensureViteServer() {
+  const ports = [5177, 5176, 5178];
+  for (const port of ports) {
+    try {
+      await new Promise((resolve, reject) => {
+        const req = http.get(`http://localhost:${port}/`, (res) => { res.resume(); resolve(port); });
+        req.on('error', reject);
+        req.setTimeout(1000, () => { req.destroy(); reject(new Error('timeout')); });
+      });
+      return { port, serverProcess: null };
+    } catch {}
+  }
+  // Start vite
+  console.log('Starting vite dev server...');
+  const proc = spawn('npx', ['vite', '--port', '5177'], {
+    cwd: path.dirname(new URL(import.meta.url).pathname).replace(/\/tools$/, ''),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: false,
+  });
+  // Wait for server to be ready
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Vite startup timeout')), 30000);
+    proc.stdout.on('data', (data) => {
+      const str = data.toString();
+      if (str.includes('ready') || str.includes('Local:')) {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+    proc.on('error', (err) => { clearTimeout(timeout); reject(err); });
+  });
+  return { port: 5177, serverProcess: proc };
+}
+
+let serverProcess = null;
 
 const imagePath = process.argv.includes('--image')
   ? process.argv[process.argv.indexOf('--image') + 1]
@@ -25,6 +65,10 @@ if (!fs.existsSync(imagePath)) {
   console.error(`Test image not found: ${imagePath}`);
   process.exit(1);
 }
+
+const { port, serverProcess: sp } = await ensureViteServer();
+serverProcess = sp;
+const URL = `http://localhost:${port}`;
 
 console.log(`\n=== SF3D WebGPU Inference Smoke ===`);
 console.log(`Image: ${imagePath}`);
@@ -176,5 +220,10 @@ const reportText = report.join('\n');
 fs.writeFileSync(REPORT_PATH, reportText);
 console.log(`\nReport written to: ${REPORT_PATH}`);
 console.log(`\n${reportText}`);
+
+// Clean up vite server if we started it
+if (serverProcess) {
+  serverProcess.kill();
+}
 
 process.exit(errors.length > 0 || pageErrors.length > 0 ? 1 : 0);
