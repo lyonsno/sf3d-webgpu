@@ -5,7 +5,7 @@
  *   - Separate Q/K/V projections (not fused QKV)
  *   - AdaNorm modulation: each layer has norm1_modulation and norm2_modulation
  *     that take camera embeddings and produce scale/shift for LayerNorm outputs
- *   - SwiGLU FFN in DINOv2-large (not standard GELU MLP)
+ *   - Standard GELU MLP (verified from checkpoint config: use_swiglu_ffn=False)
  *   - Final layernorm after encoder
  *   - Output is last_hidden_state permuted to [N_v, C, N_t] tokens (no intermediate extraction)
  *
@@ -20,6 +20,7 @@ import attentionWGSL from '../shaders/attention.wgsl?raw';
 import linearWGSL from '../shaders/linear.wgsl?raw';
 import linearGeluWGSL from '../shaders/linear_gelu.wgsl?raw';
 import layerscaleWGSL from '../shaders/layerscale.wgsl?raw';
+import activationsWGSL from '../shaders/activations.wgsl?raw';
 
 const MAX_WG = 65535;
 const WG_SIZE = 256;
@@ -75,6 +76,7 @@ export class SF3DImageTokenizer {
     this.pipelines.linear = make(linearWGSL, 'main');
     this.pipelines.linearGelu = make(linearGeluWGSL, 'main');
     this.pipelines.layerScale = make(layerscaleWGSL, 'main');
+    this.pipelines.activation = make(activationsWGSL, 'activation_main');
 
     // Inline add shader
     this.pipelines.add = make(`
@@ -176,14 +178,18 @@ export class SF3DImageTokenizer {
     // 1. Patch embedding
     this._dispatchPatchEmbed(encoder, imageBuf, weights, tokenBufA, tokenH, tokenW);
 
+    // Compute SiLU(cameraEmbed) once — PyTorch: linear2(silu(condition))
+    const siluCameraEmbedBuf = createEmptyBuffer(device, 768 * 4);
+    this._dispatchSiLU(encoder, cameraEmbedBuf, siluCameraEmbedBuf, 768);
+
     let currentTokens = tokenBufA;
 
     // 2. Run 24 transformer blocks with modulated attention
     for (let l = 0; l < VIT_CONFIG.numLayers; l++) {
       const block = weights.blocks[l];
 
-      // Compute modulation for norm1: linear(cameraEmbed) → [2*D]
-      this._dispatchLinear(encoder, cameraEmbedBuf, modBuf, block.norm1Mod.weight, block.norm1Mod.bias, 1, 768, 2 * D);
+      // Compute modulation for norm1: linear(silu(cameraEmbed)) → [2*D]
+      this._dispatchLinear(encoder, siluCameraEmbedBuf, modBuf, block.norm1Mod.weight, block.norm1Mod.bias, 1, 768, 2 * D);
 
       // Modulated LayerNorm1
       this._dispatchModulatedLN(encoder, currentTokens, normBuf, block.norm1, modBuf, N);
@@ -206,8 +212,8 @@ export class SF3DImageTokenizer {
       this._dispatchLayerScaleResidual(encoder, projBuf, currentTokens, attnOut, block.layerScale1, T, D);
       currentTokens = attnOut;
 
-      // Compute modulation for norm2
-      this._dispatchLinear(encoder, cameraEmbedBuf, modBuf, block.norm2Mod.weight, block.norm2Mod.bias, 1, 768, 2 * D);
+      // Compute modulation for norm2: linear(silu(cameraEmbed)) → [2*D]
+      this._dispatchLinear(encoder, siluCameraEmbedBuf, modBuf, block.norm2Mod.weight, block.norm2Mod.bias, 1, 768, 2 * D);
 
       // Modulated LayerNorm2
       this._dispatchModulatedLN(encoder, currentTokens, normBuf, block.norm2, modBuf, N);
@@ -468,6 +474,28 @@ export class SF3DImageTokenizer {
 
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.pipelines.linearGelu);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+  }
+  _dispatchSiLU(encoder, input, output, count) {
+    const totalWG = ceilDiv(count, WG_SIZE);
+    const [wgX, wgY] = splitWG(totalWG);
+    const params = this._cachedUniform(new Uint32Array([count, 1, wgX])); // op=1 is SiLU
+    const dummyBuf = createEmptyBuffer(this.device, 4);
+
+    const bg = this.device.createBindGroup({
+      layout: this.pipelines.activation.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: params } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 2, resource: { buffer: dummyBuf } },
+        { binding: 3, resource: { buffer: output } },
+      ],
+    });
+
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipelines.activation);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(wgX, wgY);
     pass.end();

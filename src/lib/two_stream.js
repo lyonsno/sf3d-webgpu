@@ -315,7 +315,7 @@ export class TwoStreamBackbone {
     return zOutBuf;
   }
 
-  // --- Cross-attention dispatch ---
+  // --- Cross-attention dispatch (tiled over Q to fit WebGPU buffer limits) ---
   _dispatchCrossAttention(encoder, qInputBuf, kvInputBuf, attnWeights, N_q, N_kv, D) {
     const device = this.device;
     const numHeads = CONFIG.numHeads;
@@ -330,78 +330,94 @@ export class TwoStreamBackbone {
     this._dispatchLinearNoBias(encoder, kvInputBuf, kBuf, attnWeights.wk, N_kv, D, D);
     this._dispatchLinearNoBias(encoder, kvInputBuf, vBuf, attnWeights.wv, N_kv, D, D);
 
-    // Attention scores
-    const scoreBuf = createEmptyBuffer(device, numHeads * N_q * N_kv * 4);
-    {
-      const total = numHeads * N_q * N_kv;
-      const totalWG = ceilDiv(total, WG_SIZE);
-      const [wgX, wgY] = splitWG(totalWG);
-      const params = this._cachedUniform(new Uint32Array([N_q, N_kv, headDim, numHeads, wgX]));
-      const bg = device.createBindGroup({
-        layout: this.pipelines.crossAttnScores.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer: qBuf } },
-          { binding: 2, resource: { buffer: kBuf } },
-          { binding: 3, resource: { buffer: vBuf } },
-          { binding: 4, resource: { buffer: scoreBuf } },
-          { binding: 5, resource: { buffer: createEmptyBuffer(device, 4) } }, // dummy output
-        ],
-      });
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(this.pipelines.crossAttnScores);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(wgX, wgY);
-      pass.end();
-    }
-
-    // Softmax
-    {
-      const totalRows = numHeads * N_q;
-      const totalWG = ceilDiv(totalRows, WG_SIZE);
-      const [wgX, wgY] = splitWG(totalWG);
-      const params = this._cachedUniform(new Uint32Array([N_q, N_kv, headDim, numHeads, wgX]));
-      const bg = device.createBindGroup({
-        layout: this.pipelines.crossAttnSoftmax.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer: qBuf } },
-          { binding: 2, resource: { buffer: kBuf } },
-          { binding: 3, resource: { buffer: vBuf } },
-          { binding: 4, resource: { buffer: scoreBuf } },
-          { binding: 5, resource: { buffer: createEmptyBuffer(device, 4) } },
-        ],
-      });
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(this.pipelines.crossAttnSoftmax);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(wgX, wgY);
-      pass.end();
-    }
-
-    // Apply attention
+    // Tile Q to keep score buffer under WebGPU maxBufferSize (~256MB safe target).
+    // Score buffer per tile = numHeads × tileQ × N_kv × 4 bytes.
+    // With TILE_Q=256, worst case (N_kv=27648): 16 × 256 × 27648 × 4 = ~440MB.
+    // Use 128 for extra safety margin: 16 × 128 × 27648 × 4 = ~220MB.
+    const TILE_Q = 128;
+    const scoreBufSize = numHeads * TILE_Q * N_kv * 4;
+    const scoreBuf = createEmptyBuffer(device, scoreBufSize);
+    const tileAttnOutBuf = createEmptyBuffer(device, TILE_Q * D * 4);
     const attnOutBuf = createEmptyBuffer(device, N_q * D * 4);
-    {
-      const total = N_q * numHeads * headDim;
-      const totalWG = ceilDiv(total, WG_SIZE);
-      const [wgX, wgY] = splitWG(totalWG);
-      const params = this._cachedUniform(new Uint32Array([N_q, N_kv, headDim, numHeads, wgX]));
-      const bg = device.createBindGroup({
-        layout: this.pipelines.crossAttnApply.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer: qBuf } },
-          { binding: 2, resource: { buffer: kBuf } },
-          { binding: 3, resource: { buffer: vBuf } },
-          { binding: 4, resource: { buffer: scoreBuf } },
-          { binding: 5, resource: { buffer: attnOutBuf } },
-        ],
-      });
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(this.pipelines.crossAttnApply);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(wgX, wgY);
-      pass.end();
+
+    for (let qStart = 0; qStart < N_q; qStart += TILE_Q) {
+      const tileQ = Math.min(TILE_Q, N_q - qStart);
+      const qOffsetBytes = qStart * D * 4;
+
+      // Scores: pass tileQ as N_q to the shader, offset Q buffer
+      {
+        const total = numHeads * tileQ * N_kv;
+        const totalWG = ceilDiv(total, WG_SIZE);
+        const [wgX, wgY] = splitWG(totalWG);
+        const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
+        const bg = device.createBindGroup({
+          layout: this.pipelines.crossAttnScores.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: params } },
+            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+            { binding: 2, resource: { buffer: kBuf } },
+            { binding: 3, resource: { buffer: vBuf } },
+            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N_kv * 4 } },
+            { binding: 5, resource: { buffer: tileAttnOutBuf, size: tileQ * D * 4 } },
+          ],
+        });
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.pipelines.crossAttnScores);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+      }
+
+      // Softmax
+      {
+        const totalRows = numHeads * tileQ;
+        const totalWG = ceilDiv(totalRows, WG_SIZE);
+        const [wgX, wgY] = splitWG(totalWG);
+        const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
+        const bg = device.createBindGroup({
+          layout: this.pipelines.crossAttnSoftmax.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: params } },
+            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+            { binding: 2, resource: { buffer: kBuf } },
+            { binding: 3, resource: { buffer: vBuf } },
+            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N_kv * 4 } },
+            { binding: 5, resource: { buffer: tileAttnOutBuf, size: tileQ * D * 4 } },
+          ],
+        });
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.pipelines.crossAttnSoftmax);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+      }
+
+      // Apply attention for this tile
+      {
+        const total = tileQ * numHeads * headDim;
+        const totalWG = ceilDiv(total, WG_SIZE);
+        const [wgX, wgY] = splitWG(totalWG);
+        const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
+        const bg = device.createBindGroup({
+          layout: this.pipelines.crossAttnApply.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: params } },
+            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+            { binding: 2, resource: { buffer: kBuf } },
+            { binding: 3, resource: { buffer: vBuf } },
+            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N_kv * 4 } },
+            { binding: 5, resource: { buffer: tileAttnOutBuf, size: tileQ * D * 4 } },
+          ],
+        });
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.pipelines.crossAttnApply);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+      }
+
+      // Copy tile output to the right offset in the full output buffer
+      encoder.copyBufferToBuffer(tileAttnOutBuf, 0, attnOutBuf, qOffsetBytes, tileQ * D * 4);
     }
 
     // Output projection
@@ -412,11 +428,12 @@ export class TwoStreamBackbone {
     return projOutBuf;
   }
 
-  // --- Self-attention dispatch (reuse existing attention shader) ---
+  // --- Self-attention dispatch (tiled over Q to fit WebGPU buffer limits) ---
   _dispatchSelfAttention(encoder, inputBuf, attnWeights, N, D) {
     const device = this.device;
     const numHeads = CONFIG.numHeads;
     const headDim = CONFIG.headDim;
+    const scale = 1.0 / Math.sqrt(headDim);
 
     const qBuf = createEmptyBuffer(device, N * D * 4);
     const kBuf = createEmptyBuffer(device, N * D * 4);
@@ -426,76 +443,94 @@ export class TwoStreamBackbone {
     this._dispatchLinearNoBias(encoder, inputBuf, kBuf, attnWeights.wk, N, D, D);
     this._dispatchLinearNoBias(encoder, inputBuf, vBuf, attnWeights.wv, N, D, D);
 
-    // Scores
-    const scoreBuf = createEmptyBuffer(device, numHeads * N * N * 4);
-    {
-      const total = numHeads * N * N;
-      const totalWG = ceilDiv(total, WG_SIZE);
-      const [wgX, wgY] = splitWG(totalWG);
-      const scale = 1.0 / Math.sqrt(headDim);
-      const paramsData = new ArrayBuffer(24);
-      const v = new DataView(paramsData);
-      v.setUint32(0, N, true); v.setUint32(4, D, true);
-      v.setUint32(8, numHeads, true); v.setUint32(12, headDim, true);
-      v.setFloat32(16, scale, true); v.setUint32(20, wgX, true);
-      const params = this._cachedUniform(new Uint8Array(paramsData));
-
-      const bg = device.createBindGroup({
-        layout: this.pipelines.selfAttnScores.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer: qBuf } },
-          { binding: 2, resource: { buffer: kBuf } },
-          { binding: 3, resource: { buffer: scoreBuf } },
-        ],
-      });
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(this.pipelines.selfAttnScores);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(wgX, wgY);
-      pass.end();
-    }
-
-    // Softmax
-    {
-      const totalRows = numHeads * N;
-      const totalWG = ceilDiv(totalRows, WG_SIZE);
-      const [wgX, wgY] = splitWG(totalWG);
-      const params = this._cachedUniform(new Uint32Array([N, numHeads, wgX]));
-      const bg = device.createBindGroup({
-        layout: this.pipelines.selfAttnSoftmax.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer: scoreBuf } },
-        ],
-      });
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(this.pipelines.selfAttnSoftmax);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(wgX, wgY);
-      pass.end();
-    }
-
-    // Apply
+    // Self-attention score buffer = numHeads × N × N × 4 bytes.
+    // For N=3089: ~612MB, may exceed WebGPU maxBufferSize on some GPUs.
+    // Tile over Q rows to stay within limits.
+    const TILE_Q = 128;
+    const scoreTileSize = numHeads * TILE_Q * N * 4;
+    const scoreBuf = createEmptyBuffer(device, scoreTileSize);
     const attnOutBuf = createEmptyBuffer(device, N * D * 4);
-    {
-      const totalWG = ceilDiv(N * D, WG_SIZE);
-      const [wgX, wgY] = splitWG(totalWG);
-      const params = this._cachedUniform(new Uint32Array([N, D, numHeads, headDim, wgX]));
-      const bg = device.createBindGroup({
-        layout: this.pipelines.selfAttnApply.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer: scoreBuf } },
-          { binding: 2, resource: { buffer: vBuf } },
-          { binding: 3, resource: { buffer: attnOutBuf } },
-        ],
-      });
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(this.pipelines.selfAttnApply);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(wgX, wgY);
-      pass.end();
+
+    for (let qStart = 0; qStart < N; qStart += TILE_Q) {
+      const tileQ = Math.min(TILE_Q, N - qStart);
+      const qOffsetBytes = qStart * D * 4;
+
+      // The self-attention shader uses a different param layout than cross-attention.
+      // It expects: [N, D, numHeads, headDim, scale, numWgX] where N is the full
+      // sequence length for K indexing. We need to use cross-attention shaders instead
+      // for tiled self-attention, since they separate N_q and N_kv.
+
+      // Scores
+      {
+        const total = numHeads * tileQ * N;
+        const totalWG = ceilDiv(total, WG_SIZE);
+        const [wgX, wgY] = splitWG(totalWG);
+        const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
+        const bg = device.createBindGroup({
+          layout: this.pipelines.crossAttnScores.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: params } },
+            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+            { binding: 2, resource: { buffer: kBuf } },
+            { binding: 3, resource: { buffer: vBuf } },
+            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N * 4 } },
+            { binding: 5, resource: { buffer: attnOutBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+          ],
+        });
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.pipelines.crossAttnScores);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+      }
+
+      // Softmax
+      {
+        const totalRows = numHeads * tileQ;
+        const totalWG = ceilDiv(totalRows, WG_SIZE);
+        const [wgX, wgY] = splitWG(totalWG);
+        const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
+        const bg = device.createBindGroup({
+          layout: this.pipelines.crossAttnSoftmax.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: params } },
+            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+            { binding: 2, resource: { buffer: kBuf } },
+            { binding: 3, resource: { buffer: vBuf } },
+            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N * 4 } },
+            { binding: 5, resource: { buffer: attnOutBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+          ],
+        });
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.pipelines.crossAttnSoftmax);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+      }
+
+      // Apply
+      {
+        const total = tileQ * numHeads * headDim;
+        const totalWG = ceilDiv(total, WG_SIZE);
+        const [wgX, wgY] = splitWG(totalWG);
+        const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
+        const bg = device.createBindGroup({
+          layout: this.pipelines.crossAttnApply.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: params } },
+            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+            { binding: 2, resource: { buffer: kBuf } },
+            { binding: 3, resource: { buffer: vBuf } },
+            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N * 4 } },
+            { binding: 5, resource: { buffer: attnOutBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
+          ],
+        });
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.pipelines.crossAttnApply);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+      }
     }
 
     // Output projection
@@ -569,8 +604,9 @@ export class TwoStreamBackbone {
   }
 
   _dispatchLinearNoBias(encoder, input, output, weight, rows, inDim, outDim) {
-    // Use a zero bias buffer
-    if (!this._zeroBias) {
+    // Use a zero bias buffer, reallocating if a larger outDim is needed
+    if (!this._zeroBias || this._zeroBiasSize < outDim) {
+      this._zeroBiasSize = outDim;
       this._zeroBias = createStorageBuffer(this.device, new Float32Array(outDim));
     }
     this._dispatchLinear(encoder, input, output, weight, this._zeroBias, rows, inDim, outDim);

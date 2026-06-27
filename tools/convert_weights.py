@@ -30,8 +30,8 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 MAGIC = 0x33445346  # "SF3D" in little-endian
 VERSION = 1
-ENTRY_SIZE = 96
-NAME_SIZE = 64
+ENTRY_SIZE = 160
+NAME_SIZE = 128
 ALIGN = 16
 
 # Skip these prefixes — not needed for WebGPU inference

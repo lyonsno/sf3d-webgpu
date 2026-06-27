@@ -3,8 +3,8 @@
  *
  * Binary format (from convert_weights.py):
  *   Header: 4 (magic) + 4 (version) + 4 (num_tensors) + 4 (header_size) = 16 bytes
- *   Tensor table: num_tensors × 96 bytes each
- *     64 bytes: name (null-padded ASCII)
+ *   Tensor table: num_tensors × 160 bytes each
+ *     128 bytes: name (null-padded ASCII)
  *     4 bytes: dtype (0=fp32, 1=fp16)
  *     4 bytes: ndim
  *     16 bytes: shape (4 x u32)
@@ -16,7 +16,7 @@
 import { createStorageBuffer } from './gpu.js';
 
 const MAGIC = 0x33445346; // "SF3D" in little-endian
-const ENTRY_SIZE = 96;
+const ENTRY_SIZE = 160;
 
 function parseHeader(buffer) {
   const view = new DataView(buffer);
@@ -33,19 +33,19 @@ function parseHeader(buffer) {
   const tensors = new Map();
   for (let i = 0; i < numTensors; i++) {
     const off = 16 + i * ENTRY_SIZE;
-    const nameBytes = new Uint8Array(buffer, off, 64);
+    const nameBytes = new Uint8Array(buffer, off, 128);
     let nameEnd = nameBytes.indexOf(0);
-    if (nameEnd === -1) nameEnd = 64;
+    if (nameEnd === -1) nameEnd = 128;
     const name = new TextDecoder().decode(nameBytes.slice(0, nameEnd));
 
-    const dtype = view.getUint32(off + 64, true);
-    const ndim = view.getUint32(off + 68, true);
+    const dtype = view.getUint32(off + 128, true);
+    const ndim = view.getUint32(off + 132, true);
     const shape = [];
     for (let d = 0; d < ndim; d++) {
-      shape.push(view.getUint32(off + 72 + d * 4, true));
+      shape.push(view.getUint32(off + 136 + d * 4, true));
     }
-    const dataOffset = view.getUint32(off + 88, true);
-    const size = view.getUint32(off + 92, true);
+    const dataOffset = view.getUint32(off + 152, true);
+    const size = view.getUint32(off + 156, true);
     tensors.set(name, { dtype, shape, offset: dataOffset + headerSize, size });
   }
 
