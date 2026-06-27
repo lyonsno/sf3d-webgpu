@@ -184,8 +184,33 @@ export function dispatchActivation(device, encoder, inputA, inputB, count, op) {
 export function dispatchGroupNorm(device, encoder, inputBuf, scaleBuf, biasBuf, params) {
   const { C, H, W, numGroups, eps = 1e-5 } = params;
 
-  const statsPipeline = getOrCreatePipeline(device, 'gn_stats', groupnormWGSL, 'groupnorm_stats');
-  const normPipeline = getOrCreatePipeline(device, 'gn_norm', groupnormWGSL, 'groupnorm_normalize');
+  // Use explicit shared layout for both GroupNorm entry points
+  if (!pipelineCache.has('gn_layout')) {
+    const gnLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    });
+    const gnPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [gnLayout] });
+    const gnModule = device.createShaderModule({ code: groupnormWGSL });
+    pipelineCache.set('gn_layout', gnLayout);
+    pipelineCache.set('gn_stats', device.createComputePipeline({
+      layout: gnPipelineLayout,
+      compute: { module: gnModule, entryPoint: 'groupnorm_stats' },
+    }));
+    pipelineCache.set('gn_norm', device.createComputePipeline({
+      layout: gnPipelineLayout,
+      compute: { module: gnModule, entryPoint: 'groupnorm_normalize' },
+    }));
+  }
+  const statsPipeline = pipelineCache.get('gn_stats');
+  const normPipeline = pipelineCache.get('gn_norm');
+  const gnLayout = pipelineCache.get('gn_layout');
 
   // Uniform: C, H, W, numGroups, eps (f32), numWorkgroupsX (u32)
   const normTotalWG = ceil(C * H * W, 256);
@@ -204,7 +229,7 @@ export function dispatchGroupNorm(device, encoder, inputBuf, scaleBuf, biasBuf, 
 
   // Pass 1: compute stats
   const statsBindGroup = device.createBindGroup({
-    layout: statsPipeline.getBindGroupLayout(0),
+    layout: gnLayout,
     entries: [
       { binding: 0, resource: { buffer: uniformBuf } },
       { binding: 1, resource: { buffer: inputBuf } },
@@ -223,7 +248,7 @@ export function dispatchGroupNorm(device, encoder, inputBuf, scaleBuf, biasBuf, 
 
   // Pass 2: normalize
   const normBindGroup = device.createBindGroup({
-    layout: normPipeline.getBindGroupLayout(0),
+    layout: gnLayout,
     entries: [
       { binding: 0, resource: { buffer: uniformBuf } },
       { binding: 1, resource: { buffer: inputBuf } },

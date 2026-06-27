@@ -159,16 +159,66 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
   device.queue.submit([encoder2.finish()]);
 
+  // Diagnostic: DINOv2 output
+  {
+    const d2Sample = await readBuffer(device, dinov2Result.tokensBuf, Math.min(4096, dinov2Result.N * 1024 * 4));
+    let min = Infinity, max = -Infinity, nan = 0, zero = 0;
+    for (let i = 0; i < d2Sample.length; i++) {
+      if (isNaN(d2Sample[i])) { nan++; continue; }
+      if (d2Sample[i] === 0) zero++;
+      if (d2Sample[i] < min) min = d2Sample[i];
+      if (d2Sample[i] > max) max = d2Sample[i];
+    }
+    console.log(`DINOv2 output diagnostic (first 1024 f32): min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${d2Sample.length}`);
+  }
+
+  // Diagnostic: camera embedding
+  {
+    const camSample = await readBuffer(device, cameraEmbedBuf, 768 * 4);
+    let min = Infinity, max = -Infinity, nan = 0, zero = 0;
+    for (let i = 0; i < camSample.length; i++) {
+      if (isNaN(camSample[i])) { nan++; continue; }
+      if (camSample[i] === 0) zero++;
+      if (camSample[i] < min) min = camSample[i];
+      if (camSample[i] > max) max = camSample[i];
+    }
+    console.log(`Camera embedding diagnostic: min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${camSample.length}`);
+  }
+
   // 4. Two-stream backbone (GPU)
   report('Running two-stream backbone...');
-  const encoder3 = device.createCommandEncoder();
 
   // Backbone needs tokenizer embeddings on the weights object
   weights.backbone.tokenizer_embeddings_buf = weights.tokenizer.embeddings;
 
+  // Diagnostic: check tokenizer embeddings
+  {
+    const embSample = await readBuffer(device, weights.tokenizer.embeddings, Math.min(4096, 28311552 * 4));
+    let min = Infinity, max = -Infinity, nan = 0, zero = 0;
+    for (let i = 0; i < embSample.length; i++) {
+      if (isNaN(embSample[i])) { nan++; continue; }
+      if (embSample[i] === 0) zero++;
+      if (embSample[i] < min) min = embSample[i];
+      if (embSample[i] > max) max = embSample[i];
+    }
+    console.log(`Tokenizer embeddings diagnostic: min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${embSample.length}`);
+  }
+
+  // Push error scope to catch validation errors during backbone dispatch
+  device.pushErrorScope('validation');
+
+  const encoder3 = device.createCommandEncoder();
+
   const backboneResult = pipelines.twoStream.forward(
     encoder3, dinov2Result.tokensBuf, dinov2Result.N, weights.backbone);
   device.queue.submit([encoder3.finish()]);
+
+  const bbError = await device.popErrorScope();
+  if (bbError) {
+    console.error(`Backbone validation error: ${bbError.message}`);
+  } else {
+    console.log('Backbone: no validation errors');
+  }
 
   // 5. PixelShuffle post-processing (GPU)
   report('Running post-processor...');
@@ -176,6 +226,36 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const triplaneResult = dispatchPostProcessor(
     device, encoder4, backboneResult.buffer, weights.postProcessor);
   device.queue.submit([encoder4.finish()]);
+
+  // Ensure GPU work is done before reading
+  await device.queue.onSubmittedWorkDone();
+
+  // Diagnostic: check backbone output
+  {
+    const bbTotal = backboneResult.C * backboneResult.N * 4;
+    const bbSample = await readBuffer(device, backboneResult.buffer, Math.min(40960, bbTotal));
+    let min = Infinity, max = -Infinity, nan = 0, zero = 0;
+    for (let i = 0; i < bbSample.length; i++) {
+      if (isNaN(bbSample[i])) { nan++; continue; }
+      if (bbSample[i] === 0) zero++;
+      if (bbSample[i] < min) min = bbSample[i];
+      if (bbSample[i] > max) max = bbSample[i];
+    }
+    console.log(`Backbone output diagnostic (first ${bbSample.length} f32): min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${bbSample.length}`);
+  }
+
+  // Diagnostic: check triplane features after post-processor
+  {
+    const tpSample = await readBuffer(device, triplaneResult.buffer, Math.min(4096, triplaneResult.C * triplaneResult.H * triplaneResult.W * 4));
+    let min = Infinity, max = -Infinity, nan = 0, zero = 0;
+    for (let i = 0; i < tpSample.length; i++) {
+      if (isNaN(tpSample[i])) { nan++; continue; }
+      if (tpSample[i] === 0) zero++;
+      if (tpSample[i] < min) min = tpSample[i];
+      if (tpSample[i] > max) max = tpSample[i];
+    }
+    console.log(`Triplane features diagnostic (first 1024 f32): min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${tpSample.length}`);
+  }
 
   // 6. Triplane query + decoder (GPU)
   report('Querying triplane and decoding...');
@@ -200,6 +280,16 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   report('Reading back SDF values...');
   const densityCPU = await readBuffer(device, decoded.density, tetData.numVertices * 4);
   const sdf = new Float32Array(densityCPU);
+
+  // Diagnostic: check raw density values
+  let minD = Infinity, maxD = -Infinity, nanCount = 0, zeroCount = 0;
+  for (let i = 0; i < sdf.length; i++) {
+    if (isNaN(sdf[i])) { nanCount++; continue; }
+    if (sdf[i] === 0) zeroCount++;
+    if (sdf[i] < minD) minD = sdf[i];
+    if (sdf[i] > maxD) maxD = sdf[i];
+  }
+  console.log(`SDF diagnostic: min=${minD}, max=${maxD}, NaN=${nanCount}, zero=${zeroCount}, total=${sdf.length}`);
 
   // Subtract threshold: sdf = density - threshold
   for (let i = 0; i < sdf.length; i++) {

@@ -153,8 +153,8 @@ export class SF3DImageTokenizer {
     const D = VIT_CONFIG.dim;
     const ps = VIT_CONFIG.patchSize;
     const imgSize = 512;
-    const tokenH = imgSize / ps; // 36 (512/14 = 36.57, but DINOv2 does 36)
-    const tokenW = imgSize / ps;
+    const tokenH = Math.floor(imgSize / ps); // 36 (512/14 = 36.57, DINOv2 uses floor)
+    const tokenW = Math.floor(imgSize / ps);
     // Actually 512/14 = 36.57... DINOv2 uses floor: tokenH = tokenW = 36
     // numPatches = 36*36 = 1296, N = 1297 (with CLS)
     const numPatches = tokenH * tokenW;

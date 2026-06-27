@@ -39,11 +39,15 @@ export async function initGPU() {
 /**
  * Create a storage buffer initialized with data.
  */
-export function createStorageBuffer(device, data, usage = 0) {
+export function createStorageBuffer(device, data, usage = 0, label = '') {
+  if (data.byteLength % 4 !== 0) {
+    console.warn(`createStorageBuffer: non-4-aligned size ${data.byteLength} (label: ${label})`);
+  }
   const buffer = device.createBuffer({
-    size: data.byteLength,
+    size: Math.ceil(data.byteLength / 4) * 4, // ensure 4-byte alignment
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | usage,
     mappedAtCreation: true,
+    label: label || `storage_${data.byteLength}`,
   });
   new (data.constructor)(buffer.getMappedRange()).set(data);
   buffer.unmap();
@@ -53,11 +57,15 @@ export function createStorageBuffer(device, data, usage = 0) {
 /**
  * Create an empty storage buffer.
  */
-export function createEmptyBuffer(device, size, usage = 0) {
+export function createEmptyBuffer(device, size, usage = 0, label = '') {
+  if (size % 4 !== 0) {
+    console.warn(`createEmptyBuffer: non-4-aligned size ${size} (label: ${label})`);
+  }
   return device.createBuffer({
-    size,
+    size: Math.ceil(size / 4) * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | usage,
     mappedAtCreation: false,
+    label: label || `empty_${size}`,
   });
 }
 

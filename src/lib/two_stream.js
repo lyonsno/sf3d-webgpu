@@ -64,14 +64,54 @@ export class TwoStreamBackbone {
 
     this.pipelines.linear = make(linearWGSL, 'main');
     this.pipelines.layerNorm = make(layerNormWGSL, 'main');
-    this.pipelines.crossAttnScores = make(crossAttentionWGSL, 'computeCrossScores');
-    this.pipelines.crossAttnSoftmax = make(crossAttentionWGSL, 'softmaxCross');
-    this.pipelines.crossAttnApply = make(crossAttentionWGSL, 'applyCrossAttn');
+    // Cross-attention pipelines share an explicit layout so all 6 bindings are available
+    // to all three entry points (auto-layout would omit unused bindings per entry point)
+    const crossAttnLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    });
+    const crossAttnPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [crossAttnLayout] });
+    this._crossAttnLayout = crossAttnLayout;
+
+    const crossAttnModule = device.createShaderModule({ code: crossAttentionWGSL });
+    const makeCA = (entry) => device.createComputePipeline({
+      layout: crossAttnPipelineLayout,
+      compute: { module: crossAttnModule, entryPoint: entry },
+    });
+    this.pipelines.crossAttnScores = makeCA('computeCrossScores');
+    this.pipelines.crossAttnSoftmax = makeCA('softmaxCross');
+    this.pipelines.crossAttnApply = makeCA('applyCrossAttn');
     this.pipelines.geglu = make(gegluWGSL, 'geglu_main');
 
-    // GroupNorm stats + normalize
-    this.pipelines.gnStats = make(groupnormWGSL, 'groupnorm_stats');
-    this.pipelines.gnNorm = make(groupnormWGSL, 'groupnorm_normalize');
+    // GroupNorm pipelines — explicit shared layout for both entry points
+    const gnLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    });
+    const gnPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [gnLayout] });
+    this._gnLayout = gnLayout;
+
+    const gnModule = device.createShaderModule({ code: groupnormWGSL });
+    this.pipelines.gnStats = device.createComputePipeline({
+      layout: gnPipelineLayout,
+      compute: { module: gnModule, entryPoint: 'groupnorm_stats' },
+    });
+    this.pipelines.gnNorm = device.createComputePipeline({
+      layout: gnPipelineLayout,
+      compute: { module: gnModule, entryPoint: 'groupnorm_normalize' },
+    });
 
     // Element-wise add
     this.pipelines.add = make(`
@@ -347,7 +387,7 @@ export class TwoStreamBackbone {
         const [wgX, wgY] = splitWG(totalWG);
         const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
         const bg = device.createBindGroup({
-          layout: this.pipelines.crossAttnScores.getBindGroupLayout(0),
+          layout: this._crossAttnLayout,
           entries: [
             { binding: 0, resource: { buffer: params } },
             { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
@@ -371,7 +411,7 @@ export class TwoStreamBackbone {
         const [wgX, wgY] = splitWG(totalWG);
         const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
         const bg = device.createBindGroup({
-          layout: this.pipelines.crossAttnSoftmax.getBindGroupLayout(0),
+          layout: this._crossAttnLayout,
           entries: [
             { binding: 0, resource: { buffer: params } },
             { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
@@ -395,7 +435,7 @@ export class TwoStreamBackbone {
         const [wgX, wgY] = splitWG(totalWG);
         const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
         const bg = device.createBindGroup({
-          layout: this.pipelines.crossAttnApply.getBindGroupLayout(0),
+          layout: this._crossAttnLayout,
           entries: [
             { binding: 0, resource: { buffer: params } },
             { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
@@ -463,7 +503,7 @@ export class TwoStreamBackbone {
         const [wgX, wgY] = splitWG(totalWG);
         const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
         const bg = device.createBindGroup({
-          layout: this.pipelines.crossAttnScores.getBindGroupLayout(0),
+          layout: this._crossAttnLayout,
           entries: [
             { binding: 0, resource: { buffer: params } },
             { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
@@ -487,7 +527,7 @@ export class TwoStreamBackbone {
         const [wgX, wgY] = splitWG(totalWG);
         const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
         const bg = device.createBindGroup({
-          layout: this.pipelines.crossAttnSoftmax.getBindGroupLayout(0),
+          layout: this._crossAttnLayout,
           entries: [
             { binding: 0, resource: { buffer: params } },
             { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
@@ -511,7 +551,7 @@ export class TwoStreamBackbone {
         const [wgX, wgY] = splitWG(totalWG);
         const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
         const bg = device.createBindGroup({
-          layout: this.pipelines.crossAttnApply.getBindGroupLayout(0),
+          layout: this._crossAttnLayout,
           entries: [
             { binding: 0, resource: { buffer: params } },
             { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
@@ -646,9 +686,9 @@ export class TwoStreamBackbone {
     const statsBuf = createEmptyBuffer(device, numGroups * 2 * 4);
     const outputBuf = createEmptyBuffer(device, total * 4);
 
-    // Stats pass
+    // Stats pass — all bindings via shared explicit layout
     const statsBG = device.createBindGroup({
-      layout: this.pipelines.gnStats.getBindGroupLayout(0),
+      layout: this._gnLayout,
       entries: [
         { binding: 0, resource: { buffer: uniformBuf } },
         { binding: 1, resource: { buffer: input } },
@@ -664,9 +704,9 @@ export class TwoStreamBackbone {
     pass.dispatchWorkgroups(ceilDiv(numGroups, WG_SIZE));
     pass.end();
 
-    // Normalize pass
+    // Normalize pass — all bindings via shared explicit layout
     const normBG = device.createBindGroup({
-      layout: this.pipelines.gnNorm.getBindGroupLayout(0),
+      layout: this._gnLayout,
       entries: [
         { binding: 0, resource: { buffer: uniformBuf } },
         { binding: 1, resource: { buffer: input } },
