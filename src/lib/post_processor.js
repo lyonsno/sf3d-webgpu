@@ -77,7 +77,7 @@ export function dispatchPostProcessor(device, encoder, triplanesBuf, weights) {
       const curOutC = isLast ? lastConvOut : inChannels;
 
       const convResult = dispatchConv2d(device, encoder, current.buffer,
-        weights.convs[i].weight, weights.convs[i].bias, {
+        weights.convLayers[i].weight, weights.convLayers[i].bias, {
           inC: current.outC,
           inH: current.outH,
           inW: current.outW,

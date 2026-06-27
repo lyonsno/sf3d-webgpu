@@ -204,8 +204,8 @@ export class TriplaneDecoder {
     const headsToRun = heads || ['density', 'features', 'perturb_normal', 'vertex_offset'];
 
     for (const headName of headsToRun) {
-      const headWeights = weights.heads[headName];
-      results[headName] = this._dispatchMLPHead(encoder, featuresBuf, headWeights, N, headName);
+      const headLayers = weights.heads[headName];
+      results[headName] = this._dispatchMLPHead(encoder, featuresBuf, headLayers, N, headName);
     }
 
     return results;
@@ -361,14 +361,20 @@ export class TriplaneDecoder {
   }
 
   // --- Run one MLP head ---
-  _dispatchMLPHead(encoder, inputBuf, headWeights, N, headName) {
+  _dispatchMLPHead(encoder, inputBuf, headLayers, N, headName) {
     const { inChannels, nNeurons } = DECODER_CONFIG;
+
+    // Head architecture: headLayers is an array of { weight, bias } from the weight loader.
+    // All hidden layers output nNeurons (64), final layer outputs head-specific channels.
+    const HEAD_OUT_CHANNELS = { density: 1, features: 3, perturb_normal: 3, vertex_offset: 3 };
+    const outChannels = HEAD_OUT_CHANNELS[headName];
+
     let current = inputBuf;
     let currentDim = inChannels;
 
-    // Hidden layers: Linear + SiLU
-    for (let i = 0; i < headWeights.layers.length - 1; i++) {
-      const layer = headWeights.layers[i];
+    // Hidden layers: Linear + SiLU (all but the last layer)
+    for (let i = 0; i < headLayers.length - 1; i++) {
+      const layer = headLayers[i];
       const outBuf = createEmptyBuffer(this.device, N * nNeurons * 4);
       this._dispatchLinear(encoder, current, outBuf, layer.weight, layer.bias, N, currentDim, nNeurons);
 
@@ -379,8 +385,7 @@ export class TriplaneDecoder {
     }
 
     // Final layer: Linear (no activation yet)
-    const lastLayer = headWeights.layers[headWeights.layers.length - 1];
-    const outChannels = lastLayer.outDim;
+    const lastLayer = headLayers[headLayers.length - 1];
     const rawOutBuf = createEmptyBuffer(this.device, N * outChannels * 4);
     this._dispatchLinear(encoder, current, rawOutBuf, lastLayer.weight, lastLayer.bias, N, currentDim, outChannels);
 
