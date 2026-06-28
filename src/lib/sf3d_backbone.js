@@ -272,8 +272,11 @@ export class SF3DImageTokenizer {
     const totalWG = ceilDiv(numTokens * D, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
 
+    // imgH/imgW must be the ACTUAL image size (512), not tokenH*ps (504)
+    // because the image buffer is [3, 512, 512] and channel offsets use imgH*imgW
+    const imgSize = VIT_CONFIG.patchSize === 14 ? 512 : tokenH * ps; // TODO: pass actual image size
     const params = this._cachedUniform(new Uint32Array([
-      tokenH * ps, tokenW * ps, ps, tokenH, tokenW, 3, D, numTokens, wgX,
+      imgSize, imgSize, ps, tokenH, tokenW, 3, D, numTokens, wgX,
     ]));
 
     const bg = device.createBindGroup({
