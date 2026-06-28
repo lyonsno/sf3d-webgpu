@@ -161,7 +161,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   // Diagnostic: DINOv2 output
   {
-    const d2Sample = await readBuffer(device, dinov2Result.tokensBuf, Math.min(4096, dinov2Result.N * 1024 * 4));
+    const d2Sample = await readBuffer(device, dinov2Result.tokensBuf, dinov2Result.N * 1024 * 4);
     let min = Infinity, max = -Infinity, nan = 0, zero = 0;
     for (let i = 0; i < d2Sample.length; i++) {
       if (isNaN(d2Sample[i])) { nan++; continue; }
@@ -286,6 +286,31 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     console.log('Backbone: no validation errors');
   }
 
+  // Stage-by-stage backbone block diagnostics
+  if (pipelines.twoStream._diagnosticBuffers) {
+    for (const [name, buf] of Object.entries(pipelines.twoStream._diagnosticBuffers)) {
+      // Use actual buffer size: GPUBuffer.size
+      const actualSize = buf.size;
+      const sample = await readBuffer(device, buf, actualSize);
+      let min = Infinity, max = -Infinity, nan = 0;
+      for (let i = 0; i < sample.length; i++) {
+        if (isNaN(sample[i])) { nan++; continue; }
+        if (sample[i] < min) min = sample[i];
+        if (sample[i] > max) max = sample[i];
+      }
+      console.log(`Backbone ${name}: min=${min.toFixed(4)}, max=${max.toFixed(4)}, NaN=${nan}/${sample.length}`);
+    }
+  }
+
+  // Stage-by-stage backbone diagnostics (compare with PyTorch reference)
+  // PyTorch reference (chair image):
+  //   after GroupNorm:      min=-2.50, max=2.51, std=0.45
+  //   after proj_triplane:  min=-6.64, max=6.94, std=0.43
+  //   block 0 triplane:     min=-7.64, max=9.77, std=0.59
+  //   block 3 triplane:     min=-10.09, max=16.46, std=0.85
+  //   proj_out (permuted):  min=-5.68, max=5.44, std=0.36
+  //   final (with residual): min=-5.67, max=5.45, std=0.36
+
   // 5. PixelShuffle post-processing (GPU)
   report('Running post-processor...');
   const encoder4 = device.createCommandEncoder();
@@ -299,7 +324,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   // Diagnostic: check backbone output
   {
     const bbTotal = backboneResult.C * backboneResult.N * 4;
-    const bbSample = await readBuffer(device, backboneResult.buffer, Math.min(40960, bbTotal));
+    const bbSample = await readBuffer(device, backboneResult.buffer, bbTotal);
     let min = Infinity, max = -Infinity, nan = 0, zero = 0;
     for (let i = 0; i < bbSample.length; i++) {
       if (isNaN(bbSample[i])) { nan++; continue; }

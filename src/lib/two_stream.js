@@ -240,6 +240,9 @@ export class TwoStreamBackbone {
     let currentLatent = latentBuf;
     let currentTriplane = triProjBuf;
 
+    // Track intermediate buffers for diagnostics
+    this._diagnosticBuffers = {};
+
     for (let b = 0; b < CONFIG.numBlocks; b++) {
       const block = weights.mainBlocks[b];
 
@@ -256,6 +259,20 @@ export class TwoStreamBackbone {
       // fuse_block_out: fuse(triplane ← latent)
       currentTriplane = this._dispatchFuseBlock(encoder, currentTriplane, currentLatent,
         block.fuseBlockOut, N_tri, N_latent, D);
+
+      // Save refs for diagnostics
+      this._diagnosticBuffers[`block${b}_latent`] = currentLatent;
+      this._diagnosticBuffers[`block${b}_triplane`] = currentTriplane;
+
+      // Also save the triplane projection and GroupNorm output from first block
+      if (b === 0) {
+        this._diagnosticBuffers['gnOutBuf'] = gnOutBuf;
+        this._diagnosticBuffers['triPermBuf'] = triPermBuf;
+        this._diagnosticBuffers['triProjBuf'] = triProjBuf;
+        this._diagnosticBuffers['imgProjBuf'] = imgProjBuf;
+        this._diagnosticBuffers['latentProjBuf'] = latentProjBuf;
+        this._diagnosticBuffers['latentBuf'] = latentBuf;
+      }
     }
 
     // 4. Project out and add residual
