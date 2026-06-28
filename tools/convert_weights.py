@@ -119,26 +119,30 @@ def convert_weights(model_path, output_path, dtype="fp16", manifest_path=None):
             arr = arr.T.copy()
 
         # Interpolate DINOv2 position embeddings from pretrained grid to 36x36
+        # Must match PyTorch's interpolate_pos_encoding() exactly
         if name == "image_tokenizer.model.embeddings.position_embeddings":
-            # Shape: [1, 1+num_pretrained_patches, D] e.g. [1, 1370, 1024]
-            # Pretrained: 37x37 = 1369 patches + 1 CLS = 1370
-            # Target: 36x36 = 1296 patches + 1 CLS = 1297
             target_h, target_w = 36, 36
             D = arr.shape[-1]
-            cls_pos = arr[0, 0:1, :]  # [1, D] — CLS position
+            cls_pos = arr[0, 0:1, :]  # [1, D]
             patch_pos = arr[0, 1:, :]  # [num_pretrained, D]
             num_pretrained = patch_pos.shape[0]
             pretrained_size = int(np.sqrt(num_pretrained))
             print(f"  Interpolating pos embed: [{pretrained_size}x{pretrained_size}] -> [{target_h}x{target_w}]")
-            # Reshape to [D, H, W] for scipy interpolation
-            patch_pos_2d = patch_pos.T.reshape(D, pretrained_size, pretrained_size)
-            from scipy.ndimage import zoom
-            scale_h = target_h / pretrained_size
-            scale_w = target_w / pretrained_size
-            # Bicubic interpolation (order=3) per channel
-            interpolated = zoom(patch_pos_2d, (1, scale_h, scale_w), order=3)
+
+            # Use PyTorch's F.interpolate to match exactly
+            import torch.nn.functional as F
+            patch_pos_t = torch.from_numpy(patch_pos).float()
+            # Reshape to [1, D, H, W] for F.interpolate
+            patch_pos_2d = patch_pos_t.T.reshape(1, D, pretrained_size, pretrained_size)
+            # Match DINOv2's interpolate_pos_encoding: bicubic, align_corners=False
+            interpolated = F.interpolate(
+                patch_pos_2d,
+                size=(target_h, target_w),
+                mode="bicubic",
+                align_corners=False,
+            )
             # Reshape back to [target_h*target_w, D]
-            interpolated = interpolated.reshape(D, -1).T  # [1296, D]
+            interpolated = interpolated.reshape(D, -1).T.numpy()  # [1296, D]
             arr = np.concatenate([cls_pos, interpolated], axis=0)[np.newaxis]  # [1, 1297, D]
             print(f"  New pos embed shape: {arr.shape}")
 
