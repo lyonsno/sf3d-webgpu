@@ -19,6 +19,7 @@ const runBtn = document.getElementById('run-btn');
 const downloadBtn = document.getElementById('download-btn');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
+const demoBtn = document.getElementById('demo-btn');
 
 let device = null;
 let pipelines = null;
@@ -70,6 +71,7 @@ async function init() {
     window._sf3d_device = device;
     window._sf3d_weights = weights;
     window._sf3d_pipelines = pipelines;
+    demoBtn.disabled = false;
 
   } catch (e) {
     setStatus(`Error: ${e.message}`);
@@ -110,6 +112,20 @@ function handleFile(file) {
   reader.readAsDataURL(file);
 }
 
+// --- Demo image ---
+demoBtn.addEventListener('click', async () => {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    inputImage = img;
+    dropZone.innerHTML = '';
+    dropZone.appendChild(img);
+    setStatus('Demo image loaded. Click "Generate 3D Mesh" to run.');
+    runBtn.disabled = !weights;
+  };
+  img.src = 'demo_chair.png';
+});
+
 // --- Inference ---
 runBtn.addEventListener('click', async () => {
   if (!inputImage || !weights || !pipelines) return;
@@ -127,6 +143,7 @@ runBtn.addEventListener('click', async () => {
     setProgress(100);
     downloadBtn.disabled = false;
     runBtn.disabled = false;
+    window._lastMeshResult = lastMesh;
   } catch (err) {
     console.error('Inference failed:', err);
     setStatus(`Error: ${err.message}`);

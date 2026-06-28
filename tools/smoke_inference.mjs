@@ -189,6 +189,33 @@ try {
   await page.screenshot({ path: '/tmp/sf3d-inference-smoke.png', fullPage: true });
   console.log('Screenshot: /tmp/sf3d-inference-smoke.png');
 
+  // Extract mesh OBJ for comparison
+  try {
+    const meshData = await page.evaluate(() => {
+      if (window._lastMeshResult) {
+        const m = window._lastMeshResult;
+        return { numVerts: m.numVertices, numFaces: m.numFaces,
+          verts: Array.from(m.vertices.slice(0, 15)), // first 5 vertices (x,y,z)
+          bounds: (() => {
+            let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
+            for(let i=0;i<m.numVertices;i++){
+              const x=m.vertices[i*3],y=m.vertices[i*3+1],z=m.vertices[i*3+2];
+              if(x<xmin)xmin=x;if(x>xmax)xmax=x;
+              if(y<ymin)ymin=y;if(y>ymax)ymax=y;
+              if(z<zmin)zmin=z;if(z>zmax)zmax=z;
+            }
+            return {xmin,xmax,ymin,ymax,zmin,zmax};
+          })()
+        };
+      }
+      return null;
+    });
+    if (meshData) {
+      console.log(`Mesh bounds: x=[${meshData.bounds.xmin.toFixed(4)}, ${meshData.bounds.xmax.toFixed(4)}] y=[${meshData.bounds.ymin.toFixed(4)}, ${meshData.bounds.ymax.toFixed(4)}] z=[${meshData.bounds.zmin.toFixed(4)}, ${meshData.bounds.zmax.toFixed(4)}]`);
+      console.log(`First 5 verts: ${meshData.verts.map(v => v.toFixed(6)).join(', ')}`);
+    }
+  } catch (e) { console.log(`Could not extract mesh: ${e.message}`); }
+
   // Extract density array for comparison
   try {
     const density = await page.evaluate(() => {

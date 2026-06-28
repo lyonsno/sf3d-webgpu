@@ -578,6 +578,19 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const vertexOffsetCPU = await readBuffer(device, decoded.vertex_offset, tetData.numVertices * 3 * 4);
   const vertexOffsets = new Float32Array(vertexOffsetCPU);
 
+  // Diagnostic: vertex offset statistics
+  {
+    let oMin = Infinity, oMax = -Infinity, oNan = 0;
+    for (let i = 0; i < vertexOffsets.length; i++) {
+      if (isNaN(vertexOffsets[i])) { oNan++; continue; }
+      if (vertexOffsets[i] < oMin) oMin = vertexOffsets[i];
+      if (vertexOffsets[i] > oMax) oMax = vertexOffsets[i];
+    }
+    console.log(`Vertex offsets: min=${oMin.toFixed(4)}, max=${oMax.toFixed(4)}, NaN=${oNan}, total=${vertexOffsets.length}`);
+    // After tanh and scale: range = tanh(offset) / 160
+    console.log(`After tanh/160: min=${(Math.tanh(oMin)/160).toFixed(6)}, max=${(Math.tanh(oMax)/160).toFixed(6)}`);
+  }
+
   // 7. Marching tetrahedra (CPU)
   report('Extracting mesh...');
   // Grid vertices need to be in model space with deformation applied
