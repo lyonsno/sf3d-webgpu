@@ -49,28 +49,55 @@ const CONFIG = {
  * Preprocess an image for SF3D input.
  * Returns Float32Array in CHW format, normalized with ImageNet stats.
  */
-export function preprocessImage(imageData, width, height) {
+export async function preprocessImage(imageData, width, height) {
   const size = CONFIG.condImageSize;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
 
-  ctx.fillStyle = `rgb(${CONFIG.bgColor.map(c => Math.round(c * 255)).join(',')})`;
-  ctx.fillRect(0, 0, size, size);
-  ctx.drawImage(imageData, 0, 0, size, size);
+  // Step 1: Resize image to 512x512 using high-quality resize
+  let data;
+  try {
+    // Use createImageBitmap for higher quality resize (closer to PIL Lanczos)
+    const bitmap = await createImageBitmap(imageData, {
+      resizeWidth: size, resizeHeight: size,
+      resizeQuality: 'high', // 'high' uses better interpolation than canvas default
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0);
+    data = ctx.getImageData(0, 0, size, size).data;
+    bitmap.close();
+  } catch {
+    // Fallback: canvas resize
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(imageData, 0, 0, size, size);
+    data = ctx.getImageData(0, 0, size, size).data;
+  }
 
-  const pixels = ctx.getImageData(0, 0, size, size);
-  const data = pixels.data;
-
+  // Step 2: Alpha blend with background in float32 (matching PyTorch's torch.lerp)
+  // PyTorch: rgb = lerp(bg_color, img_rgb, alpha) = bg * (1-a) + rgb * a
+  const bg = CONFIG.bgColor; // [0.5, 0.5, 0.5]
   const chw = new Float32Array(3 * size * size);
-  for (let c = 0; c < 3; c++) {
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const pixIdx = (y * size + x) * 4;
-        const val = data[pixIdx + c] / 255.0;
-        chw[c * size * size + y * size + x] = (val - CONFIG.imageMean[c]) / CONFIG.imageStd[c];
-      }
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const pixIdx = (y * size + x) * 4;
+      const r = data[pixIdx] / 255.0;
+      const g = data[pixIdx + 1] / 255.0;
+      const b = data[pixIdx + 2] / 255.0;
+      const a = data[pixIdx + 3] / 255.0;
+
+      // Alpha blend in float32 with exact 0.5 background
+      const blendR = bg[0] * (1 - a) + r * a;
+      const blendG = bg[1] * (1 - a) + g * a;
+      const blendB = bg[2] * (1 - a) + b * a;
+
+      // ImageNet normalization
+      chw[0 * size * size + y * size + x] = (blendR - CONFIG.imageMean[0]) / CONFIG.imageStd[0];
+      chw[1 * size * size + y * size + x] = (blendG - CONFIG.imageMean[1]) / CONFIG.imageStd[1];
+      chw[2 * size * size + y * size + x] = (blendB - CONFIG.imageMean[2]) / CONFIG.imageStd[2];
     }
   }
 
@@ -136,14 +163,20 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   // 1. Preprocess image (CPU)
   report('Preprocessing image...');
   let imageBuf;
-  if (typeof imageElement === 'string' && imageElement.endsWith('.bin')) {
-    // Test mode: load PyTorch-preprocessed image directly
-    const resp = await fetch(imageElement);
-    const buf = await resp.arrayBuffer();
-    imageBuf = createStorageBuffer(device, new Float32Array(buf));
-    console.log(`Loaded pre-processed image: ${new Float32Array(buf).length} floats`);
-  } else {
-    const imageData = preprocessImage(imageElement,
+  // Check for PyTorch-preprocessed image (exact match test)
+  try {
+    const ppResp = await fetch('test_chair_preprocessed.bin');
+    if (ppResp.ok) {
+      const ppBuf = await ppResp.arrayBuffer();
+      const ppData = new Float32Array(ppBuf);
+      if (ppData.length === 3 * 512 * 512) {
+        imageBuf = createStorageBuffer(device, ppData);
+        console.log(`Loaded PyTorch-preprocessed image: ${ppData.length} floats, first 5=[${Array.from(ppData.slice(0,5)).map(v=>v.toFixed(4)).join(',')}]`);
+      }
+    }
+  } catch {}
+  if (!imageBuf) {
+    const imageData = await preprocessImage(imageElement,
       imageElement.naturalWidth || imageElement.width,
       imageElement.naturalHeight || imageElement.height);
     imageBuf = createStorageBuffer(device, imageData);
@@ -161,32 +194,20 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     weights.cameraEmbedder.weight, weights.cameraEmbedder.bias, 1, 25, 768);
   device.queue.submit([encoder1.finish()]);
 
+  // Verify image buffer content before DINOv2
+  {
+    const imgSample = await readBuffer(device, imageBuf, Math.min(20 * 4, 3 * 512 * 512 * 4));
+    // PyTorch preprocessed first 5: [0.0655, 0.0655, 0.0655, 0.0655, 0.0655]
+    console.log(`Image input first 5: [${Array.from(imgSample.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}]`);
+    console.log(`Image input [262144:262149] (G channel start): [${Array.from(imgSample.slice(262144/4, 262144/4+5)).map(v => v.toFixed(4)).join(', ')}]`);
+  }
+
   // 3. DINOv2 image tokenization (GPU)
   report('Running DINOv2 backbone...');
-  let dinov2Result;
-  // Check for bypass: load PyTorch DINOv2 output directly
-  try {
-    const bypassResp = await fetch('test_dinov2_output.bin');
-    if (bypassResp.ok) {
-      const bypassBuf = await bypassResp.arrayBuffer();
-      const bypassData = new Float32Array(bypassBuf);
-      const N = bypassData.length / 1024;
-      console.log(`BYPASS: Loaded PyTorch DINOv2 output: ${N} tokens, [0,:5]=[${Array.from(bypassData.slice(0,5)).map(v=>v.toFixed(4)).join(',')}]`);
-      dinov2Result = {
-        tokensBuf: createStorageBuffer(device, bypassData),
-        N: Math.floor(N),
-        tokenH: 36,
-        tokenW: 36,
-      };
-    } else {
-      throw new Error('no bypass file');
-    }
-  } catch {
-    const encoder2 = device.createCommandEncoder();
-    dinov2Result = pipelines.imageTokenizer.encode(
-      encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
-    device.queue.submit([encoder2.finish()]);
-  }
+  const encoder2 = device.createCommandEncoder();
+  const dinov2Result = pipelines.imageTokenizer.encode(
+    encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
+  device.queue.submit([encoder2.finish()]);
 
   // Diagnostic: DINOv2 output
   {
@@ -315,13 +336,13 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     console.log('Backbone: no validation errors');
   }
 
-  // DINOv2 point check
-  {
-    const d2Full = await readBuffer(device, dinov2Result.tokensBuf, dinov2Result.N * 1024 * 4);
-    // PyTorch ref: DINOv2[0,:5] (CLS) = [0.234, 0.098, -1.094, 0.157, 0.608]
-    console.log(`DINOv2[0,:5] (CLS): [${Array.from(d2Full.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}]`);
-    console.log(`DINOv2[1,:5] (patch0): [${Array.from(d2Full.slice(1024, 1024+5)).map(v => v.toFixed(4)).join(', ')}]`);
-    console.log(`DINOv2[100,:5]: [${Array.from(d2Full.slice(100*1024, 100*1024+5)).map(v => v.toFixed(4)).join(', ')}]`);
+  // DINOv2 layer-by-layer diagnostics
+  if (pipelines.imageTokenizer._dinov2Diag) {
+    for (const [name, buf] of Object.entries(pipelines.imageTokenizer._dinov2Diag)) {
+      const data = await readBuffer(device, buf, Math.min(buf.size, 1297 * 1024 * 4));
+      // Token 0 = CLS, Token 1 = first patch
+      console.log(`DINOv2 ${name}: [0,:5]=[${Array.from(data.slice(0,5)).map(v=>v.toFixed(4)).join(',')}] [1,:5]=[${Array.from(data.slice(1024,1029)).map(v=>v.toFixed(4)).join(',')}]`);
+    }
   }
 
   // Point-check backbone inputs against PyTorch reference

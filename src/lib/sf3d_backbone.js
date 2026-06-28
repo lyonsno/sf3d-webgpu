@@ -178,6 +178,14 @@ export class SF3DImageTokenizer {
     // 1. Patch embedding
     this._dispatchPatchEmbed(encoder, imageBuf, weights, tokenBufA, tokenH, tokenW);
 
+    // Save patch embedding output for diagnostics
+    {
+      if (!this._dinov2Diag) this._dinov2Diag = {};
+      const diagBuf = createEmptyBuffer(device, T * 4);
+      encoder.copyBufferToBuffer(tokenBufA, 0, diagBuf, 0, T * 4);
+      this._dinov2Diag['patchEmbed'] = diagBuf;
+    }
+
     // Compute SiLU(cameraEmbed) once — PyTorch: linear2(silu(condition))
     const siluCameraEmbedBuf = createEmptyBuffer(device, 768 * 4);
     this._dispatchSiLU(encoder, cameraEmbedBuf, siluCameraEmbedBuf, 768);
@@ -228,6 +236,15 @@ export class SF3DImageTokenizer {
       const ffnOut = (currentTokens === tokenBufA) ? tokenBufB : tokenBufA;
       this._dispatchLayerScaleResidual(encoder, ffnOutBuf, currentTokens, ffnOut, block.layerScale2, T, D);
       currentTokens = ffnOut;
+
+      // Save diagnostic refs for first few blocks
+      if (l < 3 || l === 23) {
+        if (!this._dinov2Diag) this._dinov2Diag = {};
+        // Copy current state to a persistent buffer for readback
+        const diagBuf = createEmptyBuffer(device, T * 4);
+        encoder.copyBufferToBuffer(currentTokens, 0, diagBuf, 0, T * 4);
+        this._dinov2Diag[`block${l}`] = diagBuf;
+      }
     }
 
     // 3. Final LayerNorm
