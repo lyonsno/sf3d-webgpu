@@ -170,6 +170,22 @@ try {
   await page.screenshot({ path: '/tmp/sf3d-inference-smoke.png', fullPage: true });
   console.log('Screenshot: /tmp/sf3d-inference-smoke.png');
 
+  // Extract density array for comparison
+  try {
+    const density = await page.evaluate(() => {
+      if (window._lastDensity) return Array.from(window._lastDensity);
+      return null;
+    });
+    if (density) {
+      const densityBuf = Buffer.from(new Float32Array(density).buffer);
+      const densityPath = path.join(path.dirname(REPORT_PATH), 'webgpu_density.bin');
+      fs.writeFileSync(densityPath, densityBuf);
+      console.log(`Saved WebGPU density: ${density.length} values to ${densityPath}`);
+    }
+  } catch (e) {
+    console.log(`Could not extract density: ${e.message}`);
+  }
+
 } catch (err) {
   console.error(`\nSmoke failed: ${err.message}`);
   await page.screenshot({ path: '/tmp/sf3d-inference-smoke.png', fullPage: true }).catch(() => {});

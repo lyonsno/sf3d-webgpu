@@ -333,6 +333,12 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       if (bbSample[i] > max) max = bbSample[i];
     }
     console.log(`Backbone output diagnostic (first ${bbSample.length} f32): min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${bbSample.length}`);
+    // Point comparison with PyTorch
+    // PyTorch backbone[0, 0:5] = [-0.0785, -0.0825, -0.1648, -0.0960, -0.2965]
+    // PyTorch backbone[0, 48*96+48] = 0.1221
+    console.log(`Backbone [0,0:5]: [${Array.from(bbSample.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}]`);
+    console.log(`Backbone [0, 4656] (ch0 plane0 center): ${bbSample[4656].toFixed(6)}`);
+    console.log(`Backbone [0, 9216:9221] (ch0 plane1 first 5): [${Array.from(bbSample.slice(9216, 9221)).map(v => v.toFixed(4)).join(', ')}]`);
   }
 
   // Diagnostic: check triplane features after post-processor
@@ -346,6 +352,38 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       if (tpSample[i] > max) max = tpSample[i];
     }
     console.log(`Triplane features diagnostic (first 1024 f32): min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${tpSample.length}`);
+  }
+
+  // Compare triplane features with PyTorch reference
+  // PyTorch reference (chair image):
+  //   Plane 0 ch0 center row first 20: [13.04, 13.33, 16.92, 17.89, 19.20, ...]
+  //   Plane 0: min=-28.64, max=34.45, std=10.53
+  //   Plane 1: min=-36.33, max=39.11, std=12.02
+  //   Plane 2: min=-27.64, max=15.02, std=4.44
+  {
+    // Read the full triplane buffer
+    const fullTP = await readBuffer(device, triplaneResult.buffer, 3 * 40 * 384 * 384 * 4);
+    const tpArr = fullTP;
+
+    // Plane 0, ch 0, center row
+    const rowStart = 192 * 384;
+    console.log(`WebGPU plane0 ch0 center row (first 20): [${Array.from(tpArr.slice(rowStart, rowStart + 20)).map(v => v.toFixed(2)).join(', ')}]`);
+
+    // Per-plane stats
+    const planeSize = 40 * 384 * 384;
+    for (let p = 0; p < 3; p++) {
+      let pmin = Infinity, pmax = -Infinity, psum = 0, psum2 = 0;
+      for (let i = p * planeSize; i < (p + 1) * planeSize; i++) {
+        const v = tpArr[i];
+        if (v < pmin) pmin = v;
+        if (v > pmax) pmax = v;
+        psum += v;
+        psum2 += v * v;
+      }
+      const mean = psum / planeSize;
+      const std = Math.sqrt(psum2 / planeSize - mean * mean);
+      console.log(`WebGPU Plane ${p}: min=${pmin.toFixed(2)}, max=${pmax.toFixed(2)}, mean=${mean.toFixed(4)}, std=${std.toFixed(4)}`);
+    }
   }
 
   // 6. Triplane query + decoder (GPU)
@@ -381,6 +419,33 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     if (sdf[i] > maxD) maxD = sdf[i];
   }
   console.log(`SDF diagnostic: min=${minD}, max=${maxD}, NaN=${nanCount}, zero=${zeroCount}, total=${sdf.length}`);
+
+  // Point-check: compare with PyTorch at known inside vertices
+  const checkIndices = [136813, 150448, 150449, 150452];
+  console.log('Density point-check (PyTorch ref: 11.32, 13.83, 15.00, 11.35):');
+  for (const idx of checkIndices) {
+    console.log(`  vertex ${idx}: density=${sdf[idx].toFixed(4)}`);
+  }
+
+  // Find our inside vertices to compare spatial location
+  const insideIndices = [];
+  for (let i = 0; i < sdf.length; i++) {
+    if (sdf[i] > 10.0) insideIndices.push(i);
+  }
+  console.log(`WebGPU inside vertices (density > 10): ${insideIndices.length}`);
+  if (insideIndices.length > 0) {
+    // Show first 5 inside vertices with their positions
+    for (let j = 0; j < Math.min(5, insideIndices.length); j++) {
+      const idx = insideIndices[j];
+      const px = gridPositions[idx * 3], py = gridPositions[idx * 3 + 1], pz = gridPositions[idx * 3 + 2];
+      console.log(`  inside vertex ${idx}: pos=[${px.toFixed(4)}, ${py.toFixed(4)}, ${pz.toFixed(4)}], density=${sdf[idx].toFixed(4)}`);
+    }
+  }
+
+  // Save raw density for comparison
+  if (typeof window !== 'undefined') {
+    window._lastDensity = new Float32Array(sdf);
+  }
 
   // Subtract threshold: sdf = density - threshold
   for (let i = 0; i < sdf.length; i++) {

@@ -287,6 +287,10 @@ export class TwoStreamBackbone {
     // Add residual (original triplane embeddings)
     this._dispatchAdd(encoder, projOutPermBuf, weights.tokenizer_embeddings_buf, D * N_tri);
 
+    this._diagnosticBuffers['projOutBuf'] = projOutBuf;
+    this._diagnosticBuffers['projOutPermBuf'] = projOutPermBuf;
+    this._diagnosticBuffers['rearrangedEmb'] = weights.tokenizer_embeddings_buf;
+
     // Result: [1024, 27648] = [1024, 3*96*96] triplane features
     return { buffer: projOutPermBuf, C: D, N: N_tri, planeSize: CONFIG.planeSize };
   }
