@@ -226,39 +226,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   // 1. Preprocess image (CPU)
   report('Preprocessing image...');
-  let imageBuf;
-  // Check for PIL-resized RGBA test data (exact match verification)
-  try {
-    const ppResp = await fetch('test_resized_rgba.bin');
-    if (ppResp.ok) {
-      const ppBuf = await ppResp.arrayBuffer();
-      const rgba = new Float32Array(ppBuf);
-      if (rgba.length === 512 * 512 * 4) {
-        // Alpha blend + normalize in float32 (matching PyTorch exactly)
-        const bg = CONFIG.bgColor;
-        const chw = new Float32Array(3 * 512 * 512);
-        for (let y = 0; y < 512; y++) {
-          for (let x = 0; x < 512; x++) {
-            const off = (y * 512 + x) * 4;
-            const r = rgba[off], g = rgba[off+1], b = rgba[off+2];
-            const a = Math.max(0, Math.min(1, rgba[off+3]));
-            const bR = bg[0]*(1-a) + r*a, bG = bg[1]*(1-a) + g*a, bB = bg[2]*(1-a) + b*a;
-            chw[0*512*512 + y*512 + x] = (bR - CONFIG.imageMean[0]) / CONFIG.imageStd[0];
-            chw[1*512*512 + y*512 + x] = (bG - CONFIG.imageMean[1]) / CONFIG.imageStd[1];
-            chw[2*512*512 + y*512 + x] = (bB - CONFIG.imageMean[2]) / CONFIG.imageStd[2];
-          }
-        }
-        imageBuf = createStorageBuffer(device, chw);
-        console.log(`Loaded PIL-resized test image, first 5=[${Array.from(chw.slice(0,5)).map(v=>v.toFixed(4)).join(',')}]`);
-      }
-    }
-  } catch {}
-  if (!imageBuf) {
-    const imageData = await preprocessImage(imageElement,
-      imageElement.naturalWidth || imageElement.width,
-      imageElement.naturalHeight || imageElement.height);
-    imageBuf = createStorageBuffer(device, imageData);
-  }
+  const imageData = await preprocessImage(imageElement,
+    imageElement.naturalWidth || imageElement.width,
+    imageElement.naturalHeight || imageElement.height);
+  const imageBuf = createStorageBuffer(device, imageData);
 
   // 2. Camera embedding (GPU)
   report('Computing camera embedding...');
@@ -616,11 +587,9 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   report(`Mesh extracted: ${mesh.numVertices} vertices, ${mesh.numFaces} faces`);
 
-  // Scale mesh vertices from [0, 1] range to bbox
-  const meshVertices = scaleTensor(mesh.vertices, [0, 1], bbox);
-
+  // Mesh vertices are already in bbox space (from gridPositions which was pre-scaled)
   return {
-    vertices: meshVertices,
+    vertices: mesh.vertices,
     faces: mesh.faces,
     numVertices: mesh.numVertices,
     numFaces: mesh.numFaces,
