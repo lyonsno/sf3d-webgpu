@@ -66,6 +66,11 @@ async function init() {
     pipelines = initPipelines(device);
     setStatus(`Ready. Drop an image to generate a 3D mesh.`);
 
+    // Expose for test harness
+    window._sf3d_device = device;
+    window._sf3d_weights = weights;
+    window._sf3d_pipelines = pipelines;
+
   } catch (e) {
     setStatus(`Error: ${e.message}`);
     console.error(e);

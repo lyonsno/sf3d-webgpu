@@ -143,18 +143,37 @@ try {
   console.log('Waiting for weight loading and pipeline init...');
   await waitForStatus('Ready', 120000);
 
-  // Upload test image via file input
-  console.log(`\nUploading test image: ${imagePath}`);
-  const fileInput = await page.$('#file-input');
-  await fileInput.uploadFile(imagePath);
+  const usePreprocessed = process.argv.includes('--preprocessed');
 
-  // Wait for image to load
-  await new Promise(r => setTimeout(r, 1000));
-  console.log('Image uploaded.');
+  if (usePreprocessed) {
+    // Direct inference with PyTorch-preprocessed image
+    console.log('\nUsing PyTorch-preprocessed image (test_image_preprocessed.bin)...');
+    await page.evaluate(async () => {
+      const { initPipelines, runInference } = await import('/src/lib/inference.js');
+      // Access already-loaded weights and device from main.js globals
+      const device = window._sf3d_device || (await (await import('/src/lib/gpu.js')).initGPU()).device;
+      const weights = window._sf3d_weights;
+      const pipelines = window._sf3d_pipelines;
+      if (!weights || !pipelines) {
+        throw new Error('Weights or pipelines not loaded yet');
+      }
+      const result = await runInference(device, pipelines, weights, 'test_image_preprocessed.bin', console.log);
+      window._lastMeshResult = result;
+    });
+  } else {
+    // Upload test image via file input
+    console.log(`\nUploading test image: ${imagePath}`);
+    const fileInput = await page.$('#file-input');
+    await fileInput.uploadFile(imagePath);
 
-  // Click Generate
-  console.log('Clicking "Generate 3D Mesh"...\n');
-  await page.click('#run-btn');
+    // Wait for image to load
+    await new Promise(r => setTimeout(r, 1000));
+    console.log('Image uploaded.');
+
+    // Click Generate
+    console.log('Clicking "Generate 3D Mesh"...\n');
+    await page.click('#run-btn');
+  }
 
   // Wait for inference to complete or fail (up to 5 min)
   const finalStatus = await waitForStatus('Done in', 300000).catch(async (err) => {

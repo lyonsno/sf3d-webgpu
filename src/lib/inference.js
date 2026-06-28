@@ -135,10 +135,19 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   // 1. Preprocess image (CPU)
   report('Preprocessing image...');
-  const imageData = preprocessImage(imageElement,
-    imageElement.naturalWidth || imageElement.width,
-    imageElement.naturalHeight || imageElement.height);
-  const imageBuf = createStorageBuffer(device, imageData);
+  let imageBuf;
+  if (typeof imageElement === 'string' && imageElement.endsWith('.bin')) {
+    // Test mode: load PyTorch-preprocessed image directly
+    const resp = await fetch(imageElement);
+    const buf = await resp.arrayBuffer();
+    imageBuf = createStorageBuffer(device, new Float32Array(buf));
+    console.log(`Loaded pre-processed image: ${new Float32Array(buf).length} floats`);
+  } else {
+    const imageData = preprocessImage(imageElement,
+      imageElement.naturalWidth || imageElement.width,
+      imageElement.naturalHeight || imageElement.height);
+    imageBuf = createStorageBuffer(device, imageData);
+  }
 
   // 2. Camera embedding (GPU)
   report('Computing camera embedding...');
@@ -154,10 +163,30 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   // 3. DINOv2 image tokenization (GPU)
   report('Running DINOv2 backbone...');
-  const encoder2 = device.createCommandEncoder();
-  const dinov2Result = pipelines.imageTokenizer.encode(
-    encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
-  device.queue.submit([encoder2.finish()]);
+  let dinov2Result;
+  // Check for bypass: load PyTorch DINOv2 output directly
+  try {
+    const bypassResp = await fetch('test_dinov2_output.bin');
+    if (bypassResp.ok) {
+      const bypassBuf = await bypassResp.arrayBuffer();
+      const bypassData = new Float32Array(bypassBuf);
+      const N = bypassData.length / 1024;
+      console.log(`BYPASS: Loaded PyTorch DINOv2 output: ${N} tokens, [0,:5]=[${Array.from(bypassData.slice(0,5)).map(v=>v.toFixed(4)).join(',')}]`);
+      dinov2Result = {
+        tokensBuf: createStorageBuffer(device, bypassData),
+        N: Math.floor(N),
+        tokenH: 36,
+        tokenW: 36,
+      };
+    } else {
+      throw new Error('no bypass file');
+    }
+  } catch {
+    const encoder2 = device.createCommandEncoder();
+    dinov2Result = pipelines.imageTokenizer.encode(
+      encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
+    device.queue.submit([encoder2.finish()]);
+  }
 
   // Diagnostic: DINOv2 output
   {
@@ -286,19 +315,31 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     console.log('Backbone: no validation errors');
   }
 
-  // Stage-by-stage backbone block diagnostics
+  // DINOv2 point check
+  {
+    const d2Full = await readBuffer(device, dinov2Result.tokensBuf, dinov2Result.N * 1024 * 4);
+    // PyTorch ref: DINOv2[0,:5] (CLS) = [0.234, 0.098, -1.094, 0.157, 0.608]
+    console.log(`DINOv2[0,:5] (CLS): [${Array.from(d2Full.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}]`);
+    console.log(`DINOv2[1,:5] (patch0): [${Array.from(d2Full.slice(1024, 1024+5)).map(v => v.toFixed(4)).join(', ')}]`);
+    console.log(`DINOv2[100,:5]: [${Array.from(d2Full.slice(100*1024, 100*1024+5)).map(v => v.toFixed(4)).join(', ')}]`);
+  }
+
+  // Point-check backbone inputs against PyTorch reference
   if (pipelines.twoStream._diagnosticBuffers) {
-    for (const [name, buf] of Object.entries(pipelines.twoStream._diagnosticBuffers)) {
-      // Use actual buffer size: GPUBuffer.size
-      const actualSize = buf.size;
-      const sample = await readBuffer(device, buf, actualSize);
-      let min = Infinity, max = -Infinity, nan = 0;
-      for (let i = 0; i < sample.length; i++) {
-        if (isNaN(sample[i])) { nan++; continue; }
-        if (sample[i] < min) min = sample[i];
-        if (sample[i] > max) max = sample[i];
-      }
-      console.log(`Backbone ${name}: min=${min.toFixed(4)}, max=${max.toFixed(4)}, NaN=${nan}/${sample.length}`);
+    const triProj = pipelines.twoStream._diagnosticBuffers['triProjBuf'];
+    const latent = pipelines.twoStream._diagnosticBuffers['latentBuf'];
+    if (triProj) {
+      const tp = await readBuffer(device, triProj, Math.min(triProj.size, 27648 * 1024 * 4));
+      // PyTorch ref: triProjBuf[0, :5] = [-0.425, -0.179, -0.134, 0.484, 0.449]
+      console.log(`triProjBuf[0,:5]: [${Array.from(tp.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}]`);
+      console.log(`triProjBuf[100,:5]: [${Array.from(tp.slice(100*1024, 100*1024+5)).map(v => v.toFixed(4)).join(', ')}]`);
+      console.log(`triProjBuf[9216,:5]: [${Array.from(tp.slice(9216*1024, 9216*1024+5)).map(v => v.toFixed(4)).join(', ')}]`);
+    }
+    if (latent) {
+      const lt = await readBuffer(device, latent, Math.min(latent.size, 3089 * 1024 * 4));
+      // PyTorch ref: latentBuf[0, :5] = [-0.778, -0.872, 0.427, 1.171, 1.312]
+      console.log(`latentBuf[0,:5]: [${Array.from(lt.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}]`);
+      console.log(`latentBuf[1297,:5]: [${Array.from(lt.slice(1297*1024, 1297*1024+5)).map(v => v.toFixed(4)).join(', ')}]`);
     }
   }
 
