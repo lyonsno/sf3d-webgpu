@@ -11,5 +11,8 @@
   "devDependencies": {
     "puppeteer-core": "^25.2.1",
     "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "xatlas-web": "^0.1.0"
   }
 }
