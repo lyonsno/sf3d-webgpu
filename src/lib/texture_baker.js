@@ -19,6 +19,13 @@ import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
  * then projected onto that face's 2D plane. The 6 projections are packed
  * into a 3×2 grid in UV space.
  *
+ * Quality note: cube projection is simpler than xatlas but produces higher
+ * distortion for triangles at 45° to principal axes. These get foreshortened
+ * on their assigned face, causing stretched textures. The PyTorch reference
+ * uses a more sophisticated PCA-aligned box projection with atlas packing.
+ * This is a deliberate trade-off: pure JS, no WASM dependency, matching
+ * SF3D's box-projection concept. UV utilization is ~5% of texture area.
+ *
  * Vertices are duplicated per-face (no sharing across faces) to allow
  * per-face UVs without seam issues.
  *
@@ -26,9 +33,10 @@ import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
  * @param {Uint32Array} faces - [N_f * 3] triangle indices
  * @param {number} numVertices
  * @param {number} numFaces
+ * @param {number} radius - model space radius for UV normalization
  * @returns {{ uvs: Float32Array, newVertices: Float32Array, newFaces: Uint32Array, newNumVertices: number, newNumFaces: number }}
  */
-export function unwrapUV(vertices, faces, numVertices, numFaces) {
+export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) {
   // Compute face normals and assign each face to a cube face
   const faceAssignment = new Uint8Array(numFaces); // 0-5: +X,-X,+Y,-Y,+Z,-Z
 
@@ -62,8 +70,6 @@ export function unwrapUV(vertices, faces, numVertices, numFaces) {
   const newVertices = new Float32Array(newNumVertices * 3);
   const newFaces = new Uint32Array(newNumFaces * 3);
   const uvs = new Float32Array(newNumVertices * 2);
-
-  const radius = 0.87;
 
   // Grid layout: 3 columns × 2 rows
   const pad = 0.005;
@@ -225,6 +231,7 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     encoder, queryPosBuf, triplanesBuf, numOccupied,
     decoderWeights, ['features']);
   device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
 
   // Read back RGB values (sigmoid already applied by decoder)
   const featuresCPU = await readBuffer(device, decoded.features, numOccupied * 3 * 4);
