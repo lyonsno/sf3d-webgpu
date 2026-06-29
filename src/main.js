@@ -159,16 +159,17 @@ runBtn.addEventListener('click', async () => {
       uvResult.newNumFaces, texResolution);
     setStatus(`Rasterized ${rasterResult.mask.reduce((a, b) => a + b, 0)} texels. Baking texture...`);
 
-    // Step 4: Bake texture (GPU triplane query + features decoder)
-    const textureData = await bakeTexture(
+    // Step 4: Bake textures (GPU triplane query + features/perturb_normal decoder)
+    const bakeResult = await bakeTexture(
       device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
       meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
-      texResolution);
-    setStatus('Texture baked. Building GLB...');
+      rasterResult.tbnData, texResolution);
+    setStatus('Textures baked. Building GLB...');
 
     // Step 5: Export as GLB
     lastGLB = await exportGLB(
-      uvResult.newVertices, uvResult.newFaces, uvResult.uvs, textureData,
+      uvResult.newVertices, uvResult.newFaces, uvResult.uvs,
+      bakeResult.albedo, bakeResult.normalMap,
       uvResult.newNumVertices, uvResult.newNumFaces, texResolution,
       0.5, 0.0); // hardcoded roughness/metallic for now
 

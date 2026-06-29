@@ -127,21 +127,24 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
 }
 
 /**
- * Rasterize UV space to get 3D positions at each texel.
+ * Rasterize UV space to get 3D positions and TBN basis at each texel.
  *
  * For each triangle in UV space, rasterize its bounding box and compute
- * barycentric interpolation of 3D positions.
+ * barycentric interpolation of 3D positions. Also computes per-face
+ * tangent/bitangent/normal basis from UV edges and position edges.
  *
  * @param {Float32Array} uvs - [N_v * 2] UV coordinates
  * @param {Float32Array} positions - [N_v * 3] vertex positions
  * @param {Uint32Array} faces - [N_f * 3] face indices
  * @param {number} numFaces
  * @param {number} resolution - texture resolution (default 1024)
- * @returns {{ positions3D: Float32Array, mask: Uint8Array }}
+ * @returns {{ positions3D: Float32Array, mask: Uint8Array, tbnData: Float32Array }}
  */
 export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024) {
   const positions3D = new Float32Array(resolution * resolution * 3);
   const mask = new Uint8Array(resolution * resolution);
+  // TBN: 9 floats per texel (tangent[3], bitangent[3], normal[3])
+  const tbnData = new Float32Array(resolution * resolution * 9);
 
   for (let f = 0; f < numFaces; f++) {
     const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
@@ -154,6 +157,46 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024) 
     const p1x = positions[i1*3], p1y = positions[i1*3+1], p1z = positions[i1*3+2];
     const p2x = positions[i2*3], p2y = positions[i2*3+1], p2z = positions[i2*3+2];
 
+    // Compute face TBN from edges and UV deltas
+    const e1x = p1x-p0x, e1y = p1y-p0y, e1z = p1z-p0z;
+    const e2x = p2x-p0x, e2y = p2y-p0y, e2z = p2z-p0z;
+    const duv1u = u1-u0, duv1v = v1-v0;
+    const duv2u = u2-u0, duv2v = v2-v0;
+
+    // Face normal
+    let fnx = e1y*e2z - e1z*e2y;
+    let fny = e1z*e2x - e1x*e2z;
+    let fnz = e1x*e2y - e1y*e2x;
+    let fnLen = Math.sqrt(fnx*fnx + fny*fny + fnz*fnz) || 1;
+    fnx /= fnLen; fny /= fnLen; fnz /= fnLen;
+
+    // Tangent from UV gradients: T = (e1 * duv2v - e2 * duv1v) / det
+    const det = duv1u * duv2v - duv1v * duv2u;
+    let tx, ty, tz, bx, by, bz;
+    if (Math.abs(det) > 1e-10) {
+      const invDet = 1.0 / det;
+      tx = (e1x * duv2v - e2x * duv1v) * invDet;
+      ty = (e1y * duv2v - e2y * duv1v) * invDet;
+      tz = (e1z * duv2v - e2z * duv1v) * invDet;
+    } else {
+      // Degenerate UV: pick arbitrary tangent perpendicular to normal
+      tx = 1; ty = 0; tz = 0;
+      if (Math.abs(fnx) > 0.9) { tx = 0; ty = 1; }
+    }
+
+    // Orthogonalize tangent against normal (Gram-Schmidt)
+    const tDotN = tx*fnx + ty*fny + tz*fnz;
+    tx -= tDotN * fnx; ty -= tDotN * fny; tz -= tDotN * fnz;
+    let tLen = Math.sqrt(tx*tx + ty*ty + tz*tz) || 1;
+    tx /= tLen; ty /= tLen; tz /= tLen;
+
+    // Bitangent = cross(normal, tangent)
+    bx = fny*tz - fnz*ty;
+    by = fnz*tx - fnx*tz;
+    bz = fnx*ty - fny*tx;
+    let bLen = Math.sqrt(bx*bx + by*by + bz*bz) || 1;
+    bx /= bLen; by /= bLen; bz /= bLen;
+
     // Bounding box in pixel coords
     const minPx = Math.max(0, Math.floor(Math.min(u0, u1, u2) * resolution));
     const maxPx = Math.min(resolution - 1, Math.ceil(Math.max(u0, u1, u2) * resolution));
@@ -161,7 +204,7 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024) 
     const maxPy = Math.min(resolution - 1, Math.ceil(Math.max(v0, v1, v2) * resolution));
 
     const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
-    if (Math.abs(denom) < 1e-10) continue; // degenerate
+    if (Math.abs(denom) < 1e-10) continue;
     const invDenom = 1.0 / denom;
 
     for (let py = minPy; py <= maxPy; py++) {
@@ -179,16 +222,21 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024) 
           positions3D[pixIdx * 3] = w0 * p0x + w1 * p1x + w2 * p2x;
           positions3D[pixIdx * 3 + 1] = w0 * p0y + w1 * p1y + w2 * p2y;
           positions3D[pixIdx * 3 + 2] = w0 * p0z + w1 * p1z + w2 * p2z;
+          // TBN is constant per face (vertices are duplicated per face)
+          const tbnBase = pixIdx * 9;
+          tbnData[tbnBase]   = tx; tbnData[tbnBase+1] = ty; tbnData[tbnBase+2] = tz;
+          tbnData[tbnBase+3] = bx; tbnData[tbnBase+4] = by; tbnData[tbnBase+5] = bz;
+          tbnData[tbnBase+6] = fnx; tbnData[tbnBase+7] = fny; tbnData[tbnBase+8] = fnz;
         }
       }
     }
   }
 
-  return { positions3D, mask };
+  return { positions3D, mask, tbnData };
 }
 
 /**
- * Bake texture colors by querying the triplane at rasterized 3D positions.
+ * Bake albedo texture and normal map by querying the triplane decoder.
  *
  * @param {GPUDevice} device
  * @param {Object} triplaneDecoder - TriplaneDecoder instance
@@ -196,11 +244,12 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024) 
  * @param {Object} decoderWeights - decoder weights
  * @param {Float32Array} positions3D - [res*res, 3] from rasterizeUV
  * @param {Uint8Array} mask - [res*res] from rasterizeUV
+ * @param {Float32Array} tbnData - [res*res, 9] TBN basis from rasterizeUV
  * @param {number} resolution
- * @returns {Uint8Array} - [res, res, 4] RGBA texture
+ * @returns {{ albedo: Uint8Array, normalMap: Uint8Array }} - [res, res, 4] RGBA textures
  */
 export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoderWeights,
-                                   positions3D, mask, resolution = 1024) {
+                                   positions3D, mask, tbnData, resolution = 1024) {
   // Collect occupied texel positions
   const occupiedIndices = [];
   for (let i = 0; i < resolution * resolution; i++) {
@@ -210,8 +259,9 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
   const numOccupied = occupiedIndices.length;
   console.log(`Texture bake: ${numOccupied} occupied texels out of ${resolution * resolution}`);
 
+  const emptyTex = new Uint8Array(resolution * resolution * 4);
   if (numOccupied === 0) {
-    return new Uint8Array(resolution * resolution * 4);
+    return { albedo: emptyTex, normalMap: new Uint8Array(emptyTex) };
   }
 
   // Pack occupied positions into a dense array
@@ -223,33 +273,73 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     queryPositions[i * 3 + 2] = positions3D[idx * 3 + 2];
   }
 
-  // Upload to GPU and decode features (RGB colors)
+  // Upload to GPU and decode features + perturb_normal
   const queryPosBuf = createStorageBuffer(device, queryPositions);
 
   const encoder = device.createCommandEncoder();
   const decoded = triplaneDecoder.decode(
     encoder, queryPosBuf, triplanesBuf, numOccupied,
-    decoderWeights, ['features']);
+    decoderWeights, ['features', 'perturb_normal']);
   device.queue.submit([encoder.finish()]);
   await device.queue.onSubmittedWorkDone();
 
-  // Read back RGB values (sigmoid already applied by decoder)
+  // Read back both outputs
   const featuresCPU = await readBuffer(device, decoded.features, numOccupied * 3 * 4);
+  const normalsCPU = await readBuffer(device, decoded.perturb_normal, numOccupied * 3 * 4);
 
-  // Build RGBA texture
-  const texture = new Uint8Array(resolution * resolution * 4);
+  // Build albedo RGBA texture
+  const albedo = new Uint8Array(resolution * resolution * 4);
   for (let i = 0; i < numOccupied; i++) {
     const texIdx = occupiedIndices[i];
-    texture[texIdx * 4] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3] * 255)));
-    texture[texIdx * 4 + 1] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3 + 1] * 255)));
-    texture[texIdx * 4 + 2] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3 + 2] * 255)));
-    texture[texIdx * 4 + 3] = 255;
+    albedo[texIdx * 4] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3] * 255)));
+    albedo[texIdx * 4 + 1] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3 + 1] * 255)));
+    albedo[texIdx * 4 + 2] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3 + 2] * 255)));
+    albedo[texIdx * 4 + 3] = 255;
   }
 
-  // Dilate to fill empty texels near edges
-  _dilateTexture(texture, mask, resolution, 6);
+  // Build normal map: transform perturb_normal from world space to tangent space
+  const normalMap = new Uint8Array(resolution * resolution * 4);
+  // Default normal (pointing straight out): [0.5, 0.5, 1.0] in encoded space
+  for (let i = 0; i < resolution * resolution; i++) {
+    normalMap[i * 4 + 2] = 255; // blue channel = 1.0 (pointing along surface normal)
+    normalMap[i * 4 + 3] = 255;
+  }
 
-  return texture;
+  for (let i = 0; i < numOccupied; i++) {
+    const texIdx = occupiedIndices[i];
+    const tbnBase = texIdx * 9;
+
+    // World-space perturb_normal (already normalized by decoder)
+    const nx = normalsCPU[i * 3];
+    const ny = normalsCPU[i * 3 + 1];
+    const nz = normalsCPU[i * 3 + 2];
+
+    // TBN basis vectors
+    const tx = tbnData[tbnBase], ty = tbnData[tbnBase+1], tz = tbnData[tbnBase+2];
+    const bx = tbnData[tbnBase+3], by = tbnData[tbnBase+4], bz = tbnData[tbnBase+5];
+    const fnx = tbnData[tbnBase+6], fny = tbnData[tbnBase+7], fnz = tbnData[tbnBase+8];
+
+    // Transform to tangent space: n_tangent = TBN^T * n_world
+    let ntx = tx*nx + ty*ny + tz*nz;     // dot(tangent, normal_world)
+    let nty = bx*nx + by*ny + bz*nz;     // dot(bitangent, normal_world)
+    let ntz = fnx*nx + fny*ny + fnz*nz;  // dot(face_normal, normal_world)
+
+    // Encode from [-1,1] to [0,1]: encoded = n * 0.5 + 0.5
+    const r = Math.max(0, Math.min(255, Math.round((ntx * 0.5 + 0.5) * 255)));
+    const g = Math.max(0, Math.min(255, Math.round((nty * 0.5 + 0.5) * 255)));
+    const b = Math.max(0, Math.min(255, Math.round((ntz * 0.5 + 0.5) * 255)));
+
+    normalMap[texIdx * 4] = r;
+    normalMap[texIdx * 4 + 1] = g;
+    normalMap[texIdx * 4 + 2] = b;
+    normalMap[texIdx * 4 + 3] = 255;
+  }
+
+  // Dilate both textures
+  _dilateTexture(albedo, mask, resolution, 6);
+  _dilateTexture(normalMap, mask, resolution, 6);
+
+  return { albedo, normalMap };
 }
 
 /**
@@ -308,7 +398,8 @@ function _dilateTexture(texture, mask, resolution, iterations = 6) {
  * @param {Float32Array} vertices - [N_v * 3]
  * @param {Uint32Array} faces - [N_f * 3]
  * @param {Float32Array} uvs - [N_v * 2]
- * @param {Uint8Array} texture - [res, res, 4] RGBA
+ * @param {Uint8Array} albedoTexture - [res, res, 4] RGBA
+ * @param {Uint8Array|null} normalMapTexture - [res, res, 4] RGBA or null
  * @param {number} numVertices
  * @param {number} numFaces
  * @param {number} textureResolution
@@ -316,7 +407,7 @@ function _dilateTexture(texture, mask, resolution, iterations = 6) {
  * @param {number} metallic
  * @returns {ArrayBuffer} GLB binary
  */
-export async function exportGLB(vertices, faces, uvs, texture,
+export async function exportGLB(vertices, faces, uvs, albedoTexture, normalMapTexture,
                                  numVertices, numFaces, textureResolution = 1024,
                                  roughness = 0.5, metallic = 0.0) {
   if (numVertices === 0 || numFaces === 0) {
@@ -366,10 +457,16 @@ export async function exportGLB(vertices, faces, uvs, texture,
     normals[i*3] /= len; normals[i*3+1] /= len; normals[i*3+2] /= len;
   }
 
-  // Encode texture as JPEG
-  const texBlob = await _textureToJPEG(texture, textureResolution);
-  if (!texBlob) throw new Error('Failed to encode texture as JPEG');
-  const texBytes = new Uint8Array(await texBlob.arrayBuffer());
+  // Encode textures as JPEG
+  const albedoBlob = await _textureToJPEG(albedoTexture, textureResolution);
+  if (!albedoBlob) throw new Error('Failed to encode albedo texture as JPEG');
+  const albedoBytes = new Uint8Array(await albedoBlob.arrayBuffer());
+
+  let normalBytes = null;
+  if (normalMapTexture) {
+    const normalBlob = await _textureToJPEG(normalMapTexture, textureResolution, 0.95);
+    if (normalBlob) normalBytes = new Uint8Array(await normalBlob.arrayBuffer());
+  }
 
   // Compute bounding box
   let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -384,24 +481,32 @@ export async function exportGLB(vertices, faces, uvs, texture,
   const pad4 = (n) => (n + 3) & ~3;
 
   const vertexBytes = new Uint8Array(transformedVerts.buffer, transformedVerts.byteOffset, transformedVerts.byteLength);
-  const normalBytes = new Uint8Array(normals.buffer, normals.byteOffset, normals.byteLength);
+  const vnormalBytes = new Uint8Array(normals.buffer, normals.byteOffset, normals.byteLength);
   const indexBytes = new Uint8Array(invertedFaces.buffer, invertedFaces.byteOffset, invertedFaces.byteLength);
   const uvBytes = new Uint8Array(uvs.buffer, uvs.byteOffset, uvs.byteLength);
 
   const vertexLen = pad4(vertexBytes.byteLength);
-  const normalLen = pad4(normalBytes.byteLength);
+  const vnormalLen = pad4(vnormalBytes.byteLength);
   const indexLen = pad4(indexBytes.byteLength);
   const uvLen = pad4(uvBytes.byteLength);
-  const texLen = pad4(texBytes.byteLength);
-  const totalBinLen = vertexLen + normalLen + indexLen + uvLen + texLen;
+  const albedoLen = pad4(albedoBytes.byteLength);
+  const normalTexLen = normalBytes ? pad4(normalBytes.byteLength) : 0;
+  const totalBinLen = vertexLen + vnormalLen + indexLen + uvLen + albedoLen + normalTexLen;
 
+  let off = 0;
   const bufferViews = [
-    { buffer: 0, byteOffset: 0, byteLength: vertexBytes.byteLength, target: 34962 },
-    { buffer: 0, byteOffset: vertexLen, byteLength: normalBytes.byteLength, target: 34962 },
-    { buffer: 0, byteOffset: vertexLen + normalLen, byteLength: indexBytes.byteLength, target: 34963 },
-    { buffer: 0, byteOffset: vertexLen + normalLen + indexLen, byteLength: uvBytes.byteLength, target: 34962 },
-    { buffer: 0, byteOffset: vertexLen + normalLen + indexLen + uvLen, byteLength: texBytes.byteLength },
+    { buffer: 0, byteOffset: (off), byteLength: vertexBytes.byteLength, target: 34962 },
+    { buffer: 0, byteOffset: (off += vertexLen), byteLength: vnormalBytes.byteLength, target: 34962 },
+    { buffer: 0, byteOffset: (off += vnormalLen), byteLength: indexBytes.byteLength, target: 34963 },
+    { buffer: 0, byteOffset: (off += indexLen), byteLength: uvBytes.byteLength, target: 34962 },
+    { buffer: 0, byteOffset: (off += uvLen), byteLength: albedoBytes.byteLength }, // albedo image
   ];
+  const albedoImageBV = 4;
+  let normalImageBV = -1;
+  if (normalBytes) {
+    normalImageBV = bufferViews.length;
+    bufferViews.push({ buffer: 0, byteOffset: (off += albedoLen), byteLength: normalBytes.byteLength });
+  }
 
   const accessors = [
     { bufferView: 0, componentType: 5126, count: numVertices, type: 'VEC3',
@@ -410,6 +515,24 @@ export async function exportGLB(vertices, faces, uvs, texture,
     { bufferView: 2, componentType: 5125, count: numFaces * 3, type: 'SCALAR' },
     { bufferView: 3, componentType: 5126, count: numVertices, type: 'VEC2' },
   ];
+
+  const images = [{ bufferView: albedoImageBV, mimeType: 'image/jpeg' }];
+  const textures = [{ source: 0, sampler: 0 }];
+  if (normalBytes) {
+    images.push({ bufferView: normalImageBV, mimeType: 'image/jpeg' });
+    textures.push({ source: 1, sampler: 0 });
+  }
+
+  const material = {
+    pbrMetallicRoughness: {
+      baseColorTexture: { index: 0 },
+      roughnessFactor: roughness,
+      metallicFactor: metallic,
+    },
+  };
+  if (normalBytes) {
+    material.normalTexture = { index: 1 };
+  }
 
   const gltf = {
     asset: { version: '2.0', generator: 'SF3D-WebGPU' },
@@ -423,16 +546,10 @@ export async function exportGLB(vertices, faces, uvs, texture,
         material: 0,
       }],
     }],
-    materials: [{
-      pbrMetallicRoughness: {
-        baseColorTexture: { index: 0 },
-        roughnessFactor: roughness,
-        metallicFactor: metallic,
-      },
-    }],
-    textures: [{ source: 0, sampler: 0 }],
-    images: [{ bufferView: 4, mimeType: 'image/jpeg' }],
-    samplers: [{ magFilter: 9729, minFilter: 9729 }], // LINEAR for both
+    materials: [material],
+    textures,
+    images,
+    samplers: [{ magFilter: 9729, minFilter: 9729 }],
     accessors,
     bufferViews,
     buffers: [{ byteLength: totalBinLen }],
@@ -464,15 +581,16 @@ export async function exportGLB(vertices, faces, uvs, texture,
   offset += 8;
 
   bytes.set(vertexBytes, offset); offset += vertexLen;
-  bytes.set(normalBytes, offset); offset += normalLen;
+  bytes.set(vnormalBytes, offset); offset += vnormalLen;
   bytes.set(indexBytes, offset); offset += indexLen;
   bytes.set(uvBytes, offset); offset += uvLen;
-  bytes.set(texBytes, offset);
+  bytes.set(albedoBytes, offset); offset += albedoLen;
+  if (normalBytes) { bytes.set(normalBytes, offset); }
 
   return glb;
 }
 
-function _textureToJPEG(texture, resolution) {
+function _textureToJPEG(texture, resolution, quality = 0.92) {
   const canvas = document.createElement('canvas');
   canvas.width = resolution;
   canvas.height = resolution;
@@ -481,6 +599,6 @@ function _textureToJPEG(texture, resolution) {
   imgData.data.set(texture);
   ctx.putImageData(imgData, 0, 0);
   return new Promise((resolve) => {
-    canvas.toBlob(resolve, 'image/jpeg', 0.92);
+    canvas.toBlob(resolve, 'image/jpeg', quality);
   });
 }
