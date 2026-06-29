@@ -312,23 +312,24 @@ function _dilateTexture(texture, mask, resolution, iterations = 6) {
 export async function exportGLB(vertices, faces, uvs, texture,
                                  numVertices, numFaces, textureResolution = 1024,
                                  roughness = 0.5, metallic = 0.0) {
+  if (numVertices === 0 || numFaces === 0) {
+    throw new Error('Cannot export empty mesh as GLB');
+  }
+
   // Apply coordinate transforms to match glTF conventions
-  // SF3D: X-right, Y-up, Z-forward → glTF: X-right, Y-up, Z-backward
-  // Match PyTorch: rot(-90, X) then rot(90, Y) then invert faces
+  // Combined: rot(-90, X) then rot(+90, Y) gives (x,y,z) → (-y, z, -x)
+  // Then invert face winding to match PyTorch's mesh.invert()
   const transformedVerts = new Float32Array(numVertices * 3);
   for (let i = 0; i < numVertices; i++) {
     const x = vertices[i * 3];
     const y = vertices[i * 3 + 1];
     const z = vertices[i * 3 + 2];
-    // rot(-90, X): (x, y, z) → (x, z, -y)
     const rx = x, ry = z, rz = -y;
-    // rot(+90, Y): (x, y, z) → (z, y, -x)
     transformedVerts[i * 3] = rz;
     transformedVerts[i * 3 + 1] = ry;
     transformedVerts[i * 3 + 2] = -rx;
   }
 
-  // Invert face winding (PyTorch mesh.invert())
   const invertedFaces = new Uint32Array(numFaces * 3);
   for (let f = 0; f < numFaces; f++) {
     invertedFaces[f * 3] = faces[f * 3];
@@ -336,8 +337,31 @@ export async function exportGLB(vertices, faces, uvs, texture,
     invertedFaces[f * 3 + 2] = faces[f * 3 + 1];
   }
 
+  // Compute per-vertex normals (area-weighted face normals)
+  const normals = new Float32Array(numVertices * 3);
+  for (let f = 0; f < numFaces; f++) {
+    const i0 = invertedFaces[f*3], i1 = invertedFaces[f*3+1], i2 = invertedFaces[f*3+2];
+    const v0x = transformedVerts[i0*3], v0y = transformedVerts[i0*3+1], v0z = transformedVerts[i0*3+2];
+    const v1x = transformedVerts[i1*3], v1y = transformedVerts[i1*3+1], v1z = transformedVerts[i1*3+2];
+    const v2x = transformedVerts[i2*3], v2y = transformedVerts[i2*3+1], v2z = transformedVerts[i2*3+2];
+    const e1x = v1x-v0x, e1y = v1y-v0y, e1z = v1z-v0z;
+    const e2x = v2x-v0x, e2y = v2y-v0y, e2z = v2z-v0z;
+    const nx = e1y*e2z - e1z*e2y;
+    const ny = e1z*e2x - e1x*e2z;
+    const nz = e1x*e2y - e1y*e2x;
+    for (const idx of [i0, i1, i2]) {
+      normals[idx*3] += nx; normals[idx*3+1] += ny; normals[idx*3+2] += nz;
+    }
+  }
+  for (let i = 0; i < numVertices; i++) {
+    const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2];
+    const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+    normals[i*3] /= len; normals[i*3+1] /= len; normals[i*3+2] /= len;
+  }
+
   // Encode texture as JPEG
   const texBlob = await _textureToJPEG(texture, textureResolution);
+  if (!texBlob) throw new Error('Failed to encode texture as JPEG');
   const texBytes = new Uint8Array(await texBlob.arrayBuffer());
 
   // Compute bounding box
@@ -350,31 +374,34 @@ export async function exportGLB(vertices, faces, uvs, texture,
     if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
   }
 
-  // Pad to 4-byte alignment
   const pad4 = (n) => (n + 3) & ~3;
 
   const vertexBytes = new Uint8Array(transformedVerts.buffer, transformedVerts.byteOffset, transformedVerts.byteLength);
+  const normalBytes = new Uint8Array(normals.buffer, normals.byteOffset, normals.byteLength);
   const indexBytes = new Uint8Array(invertedFaces.buffer, invertedFaces.byteOffset, invertedFaces.byteLength);
   const uvBytes = new Uint8Array(uvs.buffer, uvs.byteOffset, uvs.byteLength);
 
   const vertexLen = pad4(vertexBytes.byteLength);
+  const normalLen = pad4(normalBytes.byteLength);
   const indexLen = pad4(indexBytes.byteLength);
   const uvLen = pad4(uvBytes.byteLength);
   const texLen = pad4(texBytes.byteLength);
-  const totalBinLen = vertexLen + indexLen + uvLen + texLen;
+  const totalBinLen = vertexLen + normalLen + indexLen + uvLen + texLen;
 
   const bufferViews = [
     { buffer: 0, byteOffset: 0, byteLength: vertexBytes.byteLength, target: 34962 },
-    { buffer: 0, byteOffset: vertexLen, byteLength: indexBytes.byteLength, target: 34963 },
-    { buffer: 0, byteOffset: vertexLen + indexLen, byteLength: uvBytes.byteLength, target: 34962 },
-    { buffer: 0, byteOffset: vertexLen + indexLen + uvLen, byteLength: texBytes.byteLength },
+    { buffer: 0, byteOffset: vertexLen, byteLength: normalBytes.byteLength, target: 34962 },
+    { buffer: 0, byteOffset: vertexLen + normalLen, byteLength: indexBytes.byteLength, target: 34963 },
+    { buffer: 0, byteOffset: vertexLen + normalLen + indexLen, byteLength: uvBytes.byteLength, target: 34962 },
+    { buffer: 0, byteOffset: vertexLen + normalLen + indexLen + uvLen, byteLength: texBytes.byteLength },
   ];
 
   const accessors = [
     { bufferView: 0, componentType: 5126, count: numVertices, type: 'VEC3',
       min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
-    { bufferView: 1, componentType: 5125, count: numFaces * 3, type: 'SCALAR' },
-    { bufferView: 2, componentType: 5126, count: numVertices, type: 'VEC2' },
+    { bufferView: 1, componentType: 5126, count: numVertices, type: 'VEC3' },
+    { bufferView: 2, componentType: 5125, count: numFaces * 3, type: 'SCALAR' },
+    { bufferView: 3, componentType: 5126, count: numVertices, type: 'VEC2' },
   ];
 
   const gltf = {
@@ -384,8 +411,8 @@ export async function exportGLB(vertices, faces, uvs, texture,
     nodes: [{ mesh: 0 }],
     meshes: [{
       primitives: [{
-        attributes: { POSITION: 0, TEXCOORD_0: 2 },
-        indices: 1,
+        attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 3 },
+        indices: 2,
         material: 0,
       }],
     }],
@@ -397,8 +424,8 @@ export async function exportGLB(vertices, faces, uvs, texture,
       },
     }],
     textures: [{ source: 0, sampler: 0 }],
-    images: [{ bufferView: 3, mimeType: 'image/jpeg' }],
-    samplers: [{ magFilter: 9729, minFilter: 9987 }],
+    images: [{ bufferView: 4, mimeType: 'image/jpeg' }],
+    samplers: [{ magFilter: 9729, minFilter: 9729 }], // LINEAR for both
     accessors,
     bufferViews,
     buffers: [{ byteLength: totalBinLen }],
@@ -409,16 +436,14 @@ export async function exportGLB(vertices, faces, uvs, texture,
   const jsonPadLen = pad4(jsonBytes.byteLength);
 
   const glbLen = 12 + 8 + jsonPadLen + 8 + totalBinLen;
-  const glb = new ArrayBuffer(glbLen);
+  const glb = new ArrayBuffer(glbLen); // zero-initialized per JS spec (BIN padding = 0x00)
   const view = new DataView(glb);
   const bytes = new Uint8Array(glb);
 
-  // Header
   view.setUint32(0, 0x46546C67, true); // "glTF"
   view.setUint32(4, 2, true);
   view.setUint32(8, glbLen, true);
 
-  // JSON chunk
   let offset = 12;
   view.setUint32(offset, jsonPadLen, true);
   view.setUint32(offset + 4, 0x4E4F534A, true); // "JSON"
@@ -427,12 +452,12 @@ export async function exportGLB(vertices, faces, uvs, texture,
   for (let i = jsonBytes.byteLength; i < jsonPadLen; i++) bytes[offset + i] = 0x20;
   offset += jsonPadLen;
 
-  // BIN chunk
   view.setUint32(offset, totalBinLen, true);
   view.setUint32(offset + 4, 0x004E4942, true); // "BIN\0"
   offset += 8;
 
   bytes.set(vertexBytes, offset); offset += vertexLen;
+  bytes.set(normalBytes, offset); offset += normalLen;
   bytes.set(indexBytes, offset); offset += indexLen;
   bytes.set(uvBytes, offset); offset += uvLen;
   bytes.set(texBytes, offset);
