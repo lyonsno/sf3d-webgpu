@@ -166,9 +166,9 @@ runBtn.addEventListener('click', async () => {
       rasterResult.tbnData, texResolution);
     setStatus('Textures baked. Building GLB...');
 
-    // Step 5: Export as GLB
+    // Step 5: Export as GLB (smooth normals from original mesh topology)
     lastGLB = await exportGLB(
-      uvResult.newVertices, uvResult.newFaces, uvResult.uvs,
+      uvResult.newVertices, uvResult.newNormals, uvResult.newFaces, uvResult.uvs,
       bakeResult.albedo, bakeResult.normalMap,
       uvResult.newNumVertices, uvResult.newNumFaces, texResolution,
       0.5, 0.0); // hardcoded roughness/metallic for now

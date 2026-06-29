@@ -34,11 +34,14 @@ import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
  * @param {number} numVertices
  * @param {number} numFaces
  * @param {number} radius - model space radius for UV normalization
- * @returns {{ uvs: Float32Array, newVertices: Float32Array, newFaces: Uint32Array, newNumVertices: number, newNumFaces: number }}
+ * @returns {{ uvs: Float32Array, newVertices: Float32Array, newNormals: Float32Array, newFaces: Uint32Array, newNumVertices: number, newNumFaces: number }}
  */
 export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) {
-  // Compute face normals and assign each face to a cube face
-  const faceAssignment = new Uint8Array(numFaces); // 0-5: +X,-X,+Y,-Y,+Z,-Z
+  // Compute smooth vertex normals from the original shared-vertex topology.
+  // Area-weighted: each face contributes its (unnormalized) cross product
+  // to all 3 vertices. Larger faces contribute more. Then normalize.
+  const smoothNormals = new Float32Array(numVertices * 3);
+  const faceAssignment = new Uint8Array(numFaces);
 
   for (let f = 0; f < numFaces; f++) {
     const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
@@ -46,14 +49,20 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     const v1x = vertices[i1*3], v1y = vertices[i1*3+1], v1z = vertices[i1*3+2];
     const v2x = vertices[i2*3], v2y = vertices[i2*3+1], v2z = vertices[i2*3+2];
 
-    // Cross product = face normal
     const e1x = v1x - v0x, e1y = v1y - v0y, e1z = v1z - v0z;
     const e2x = v2x - v0x, e2y = v2y - v0y, e2z = v2z - v0z;
     let nx = e1y * e2z - e1z * e2y;
     let ny = e1z * e2x - e1x * e2z;
     let nz = e1x * e2y - e1y * e2x;
 
-    // Assign to dominant axis
+    // Accumulate unnormalized face normal to each vertex (area-weighted)
+    for (const idx of [i0, i1, i2]) {
+      smoothNormals[idx * 3] += nx;
+      smoothNormals[idx * 3 + 1] += ny;
+      smoothNormals[idx * 3 + 2] += nz;
+    }
+
+    // Assign face to dominant cube axis
     const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
     if (ax >= ay && ax >= az) {
       faceAssignment[f] = nx > 0 ? 0 : 1;
@@ -64,10 +73,20 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     }
   }
 
+  // Normalize accumulated normals
+  for (let i = 0; i < numVertices; i++) {
+    const nx = smoothNormals[i*3], ny = smoothNormals[i*3+1], nz = smoothNormals[i*3+2];
+    const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+    smoothNormals[i*3] /= len;
+    smoothNormals[i*3+1] /= len;
+    smoothNormals[i*3+2] /= len;
+  }
+
   // Build per-face-vertex UVs (each face vertex gets its own UV)
   const newNumVertices = numFaces * 3;
   const newNumFaces = numFaces;
   const newVertices = new Float32Array(newNumVertices * 3);
+  const newNormals = new Float32Array(newNumVertices * 3);
   const newFaces = new Uint32Array(newNumFaces * 3);
   const uvs = new Float32Array(newNumVertices * 2);
 
@@ -101,10 +120,13 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
       const origIdx = faces[f * 3 + v];
       const newIdx = f * 3 + v;
 
-      // Copy position
+      // Copy position and smooth normal from original topology
       newVertices[newIdx * 3] = vertices[origIdx * 3];
       newVertices[newIdx * 3 + 1] = vertices[origIdx * 3 + 1];
       newVertices[newIdx * 3 + 2] = vertices[origIdx * 3 + 2];
+      newNormals[newIdx * 3] = smoothNormals[origIdx * 3];
+      newNormals[newIdx * 3 + 1] = smoothNormals[origIdx * 3 + 1];
+      newNormals[newIdx * 3 + 2] = smoothNormals[origIdx * 3 + 2];
 
       // Project onto cube face axes
       let u = vertices[origIdx * 3 + ax0];
@@ -123,7 +145,7 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     }
   }
 
-  return { uvs, newVertices, newFaces, newNumVertices, newNumFaces };
+  return { uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces };
 }
 
 /**
@@ -396,6 +418,7 @@ function _dilateTexture(texture, mask, resolution, iterations = 6) {
  * Export mesh as GLB (binary glTF 2.0).
  *
  * @param {Float32Array} vertices - [N_v * 3]
+ * @param {Float32Array} vertexNormals - [N_v * 3] pre-computed smooth normals
  * @param {Uint32Array} faces - [N_f * 3]
  * @param {Float32Array} uvs - [N_v * 2]
  * @param {Uint8Array} albedoTexture - [res, res, 4] RGBA
@@ -407,7 +430,8 @@ function _dilateTexture(texture, mask, resolution, iterations = 6) {
  * @param {number} metallic
  * @returns {ArrayBuffer} GLB binary
  */
-export async function exportGLB(vertices, faces, uvs, albedoTexture, normalMapTexture,
+export async function exportGLB(vertices, vertexNormals, faces, uvs,
+                                 albedoTexture, normalMapTexture,
                                  numVertices, numFaces, textureResolution = 1024,
                                  roughness = 0.5, metallic = 0.0) {
   if (numVertices === 0 || numFaces === 0) {
@@ -435,26 +459,17 @@ export async function exportGLB(vertices, faces, uvs, albedoTexture, normalMapTe
     invertedFaces[f * 3 + 2] = faces[f * 3 + 1];
   }
 
-  // Compute per-vertex normals (area-weighted face normals)
+  // Apply same rotation to pre-computed smooth normals, then negate
+  // for face inversion (winding flip makes outward normals point inward)
+  // Rotation (x,y,z)→(-y,z,-x), then negate: (y,-z,x)
   const normals = new Float32Array(numVertices * 3);
-  for (let f = 0; f < numFaces; f++) {
-    const i0 = invertedFaces[f*3], i1 = invertedFaces[f*3+1], i2 = invertedFaces[f*3+2];
-    const v0x = transformedVerts[i0*3], v0y = transformedVerts[i0*3+1], v0z = transformedVerts[i0*3+2];
-    const v1x = transformedVerts[i1*3], v1y = transformedVerts[i1*3+1], v1z = transformedVerts[i1*3+2];
-    const v2x = transformedVerts[i2*3], v2y = transformedVerts[i2*3+1], v2z = transformedVerts[i2*3+2];
-    const e1x = v1x-v0x, e1y = v1y-v0y, e1z = v1z-v0z;
-    const e2x = v2x-v0x, e2y = v2y-v0y, e2z = v2z-v0z;
-    const nx = e1y*e2z - e1z*e2y;
-    const ny = e1z*e2x - e1x*e2z;
-    const nz = e1x*e2y - e1y*e2x;
-    for (const idx of [i0, i1, i2]) {
-      normals[idx*3] += nx; normals[idx*3+1] += ny; normals[idx*3+2] += nz;
-    }
-  }
   for (let i = 0; i < numVertices; i++) {
-    const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2];
-    const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
-    normals[i*3] /= len; normals[i*3+1] /= len; normals[i*3+2] /= len;
+    const nx = vertexNormals[i * 3];
+    const ny = vertexNormals[i * 3 + 1];
+    const nz = vertexNormals[i * 3 + 2];
+    normals[i * 3] = ny;
+    normals[i * 3 + 1] = -nz;
+    normals[i * 3 + 2] = nx;
   }
 
   // Encode textures as JPEG
