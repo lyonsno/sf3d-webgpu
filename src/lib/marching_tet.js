@@ -71,8 +71,10 @@ export function marchingTetrahedra(gridVertices, sdf, tetIndices, vertexOffsets 
   // Apply vertex deformation if provided
   let positions;
   if (vertexOffsets) {
-    // normalize_grid_deformation: (1-0)/resolution * tanh(offsets)
-    const scale = 1.0 / resolution;
+    // normalize_grid_deformation: PyTorch uses (1-0)/resolution in [0,1] space,
+    // then post-scales by bbox range (1.74). We're already in bbox space, so
+    // apply the full factor directly: 1.74 / resolution.
+    const scale = 1.74 / resolution;
     positions = new Float32Array(N_v * 3);
     for (let i = 0; i < N_v * 3; i++) {
       positions[i] = gridVertices[i] + scale * Math.tanh(vertexOffsets[i]);

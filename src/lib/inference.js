@@ -606,6 +606,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     faces: mesh.faces,
     numVertices: mesh.numVertices,
     numFaces: mesh.numFaces,
+    // Expose for texture baking
+    _triplanesBuf: triplaneResult.buffer,
+    _triplaneDecoder: pipelines.triplaneDecoder,
+    _decoderWeights: weights.decoder,
   };
 }
 

@@ -6,12 +6,13 @@
  *   2. Weight loading
  *   3. Image input handling
  *   4. Inference pipeline dispatch
- *   5. OBJ mesh export
+ *   5. Texture baking + GLB export
  */
 
 import { initGPU } from './lib/gpu.js';
 import { loadWeights } from './lib/weights.js';
 import { initPipelines, runInference } from './lib/inference.js';
+import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './lib/texture_baker.js';
 
 const statusEl = document.getElementById('status');
 const progressFill = document.getElementById('progress-fill');
@@ -25,7 +26,7 @@ let device = null;
 let pipelines = null;
 let weights = null;
 let inputImage = null;
-let lastMesh = null;
+let lastGLB = null;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -126,24 +127,60 @@ demoBtn.addEventListener('click', async () => {
   img.src = 'demo_chair.png';
 });
 
-// --- Inference ---
+// --- Inference + texture baking ---
 runBtn.addEventListener('click', async () => {
   if (!inputImage || !weights || !pipelines) return;
   runBtn.disabled = true;
   downloadBtn.disabled = true;
+  lastGLB = null;
   setProgress(0);
 
   try {
     const t0 = performance.now();
-    lastMesh = await runInference(device, pipelines, weights, inputImage, (msg) => {
+
+    // Step 1: Run inference to get untextured mesh + triplane data
+    const meshResult = await runInference(device, pipelines, weights, inputImage, (msg) => {
       setStatus(msg);
     });
-    const dt = ((performance.now() - t0) / 1000).toFixed(1);
-    setStatus(`Done in ${dt}s: ${lastMesh.numVertices} vertices, ${lastMesh.numFaces} faces`);
+
+    const meshTime = ((performance.now() - t0) / 1000).toFixed(1);
+    setStatus(`Mesh in ${meshTime}s (${meshResult.numVertices} verts). UV unwrapping...`);
+
+    // Step 2: UV unwrap (synchronous cube projection)
+    const uvResult = unwrapUV(
+      meshResult.vertices, meshResult.faces,
+      meshResult.numVertices, meshResult.numFaces);
+    setStatus(`UV unwrap done (${uvResult.newNumVertices} verts). Rasterizing UV space...`);
+
+    // Step 3: Rasterize UV space to get 3D positions per texel
+    const texResolution = 1024;
+    const rasterResult = rasterizeUV(
+      uvResult.uvs, uvResult.newVertices, uvResult.newFaces,
+      uvResult.newNumFaces, texResolution);
+    setStatus(`Rasterized ${rasterResult.mask.reduce((a, b) => a + b, 0)} texels. Baking texture...`);
+
+    // Step 4: Bake texture (GPU triplane query + features decoder)
+    const textureData = await bakeTexture(
+      device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
+      meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
+      texResolution);
+    setStatus('Texture baked. Building GLB...');
+
+    // Step 5: Export as GLB
+    lastGLB = await exportGLB(
+      uvResult.newVertices, uvResult.newFaces, uvResult.uvs, textureData,
+      uvResult.newNumVertices, uvResult.newNumFaces, texResolution,
+      0.5, 0.0); // hardcoded roughness/metallic for now
+
+    const totalTime = ((performance.now() - t0) / 1000).toFixed(1);
+    setStatus(`Done in ${totalTime}s: ${meshResult.numVertices} vertices, ${meshResult.numFaces} faces, textured GLB ready`);
     setProgress(100);
     downloadBtn.disabled = false;
     runBtn.disabled = false;
-    window._lastMeshResult = lastMesh;
+
+    window._lastMeshResult = meshResult;
+    window._lastGLB = lastGLB;
+
   } catch (err) {
     console.error('Inference failed:', err);
     setStatus(`Error: ${err.message}`);
@@ -151,27 +188,15 @@ runBtn.addEventListener('click', async () => {
   }
 });
 
-// --- Download OBJ ---
+// --- Download GLB ---
 downloadBtn.addEventListener('click', () => {
-  if (!lastMesh) return;
+  if (!lastGLB) return;
 
-  const { vertices, faces, numVertices, numFaces } = lastMesh;
-  let obj = '# SF3D WebGPU mesh output\n';
-  obj += `# ${numVertices} vertices, ${numFaces} faces\n\n`;
-
-  for (let i = 0; i < numVertices; i++) {
-    obj += `v ${vertices[i * 3].toFixed(6)} ${vertices[i * 3 + 1].toFixed(6)} ${vertices[i * 3 + 2].toFixed(6)}\n`;
-  }
-  obj += '\n';
-  for (let i = 0; i < numFaces; i++) {
-    obj += `f ${faces[i * 3] + 1} ${faces[i * 3 + 1] + 1} ${faces[i * 3 + 2] + 1}\n`;
-  }
-
-  const blob = new Blob([obj], { type: 'text/plain' });
+  const blob = new Blob([lastGLB], { type: 'model/gltf-binary' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'sf3d_mesh.obj';
+  a.download = 'sf3d_mesh.glb';
   a.click();
   URL.revokeObjectURL(url);
 });
