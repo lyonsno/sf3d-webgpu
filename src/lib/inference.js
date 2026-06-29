@@ -20,6 +20,9 @@ import { dispatchPostProcessor } from './post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
 import { loadTetData, marchingTetrahedra, scaleTensor } from './marching_tet.js';
 
+// Set to true for detailed tensor diagnostics during inference
+const DEBUG = false;
+
 // SF3D model configuration
 const CONFIG = {
   condImageSize: 512,
@@ -244,7 +247,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   device.queue.submit([encoder1.finish()]);
 
   // Verify image buffer content before DINOv2 — check all 3 channels at pixel (0,0)
-  {
+  if (DEBUG) {
     const imgFull = await readBuffer(device, imageBuf, 3 * 512 * 512 * 4);
     // R at (0,0): index 0
     // G at (0,0): index 512*512 = 262144
@@ -271,7 +274,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   device.queue.submit([encoder2.finish()]);
 
   // Diagnostic: DINOv2 output
-  {
+  if (DEBUG) {
     const d2Sample = await readBuffer(device, dinov2Result.tokensBuf, dinov2Result.N * 1024 * 4);
     let min = Infinity, max = -Infinity, nan = 0, zero = 0;
     for (let i = 0; i < d2Sample.length; i++) {
@@ -284,7 +287,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
 
   // Diagnostic: camera embedding
-  {
+  if (DEBUG) {
     const camSample = await readBuffer(device, cameraEmbedBuf, 768 * 4);
     let min = Infinity, max = -Infinity, nan = 0, zero = 0;
     for (let i = 0; i < camSample.length; i++) {
@@ -369,7 +372,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   weights.backbone.tokenizer_embeddings_buf = weights.backbone._rearrangedEmbeddings;
 
   // Diagnostic: check tokenizer embeddings
-  {
+  if (DEBUG) {
     const embSample = await readBuffer(device, weights.tokenizer.embeddings, Math.min(4096, 28311552 * 4));
     let min = Infinity, max = -Infinity, nan = 0, zero = 0;
     for (let i = 0; i < embSample.length; i++) {
@@ -381,8 +384,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     console.log(`Tokenizer embeddings diagnostic: min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${embSample.length}`);
   }
 
-  // Push error scope to catch validation errors during backbone dispatch
-  device.pushErrorScope('validation');
+  if (DEBUG) device.pushErrorScope('validation');
 
   const encoder3 = device.createCommandEncoder();
 
@@ -390,15 +392,17 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     encoder3, dinov2Result.tokensBuf, dinov2Result.N, weights.backbone);
   device.queue.submit([encoder3.finish()]);
 
-  const bbError = await device.popErrorScope();
-  if (bbError) {
-    console.error(`Backbone validation error: ${bbError.message}`);
-  } else {
-    console.log('Backbone: no validation errors');
+  if (DEBUG) {
+    const bbError = await device.popErrorScope();
+    if (bbError) {
+      console.error(`Backbone validation error: ${bbError.message}`);
+    } else {
+      console.log('Backbone: no validation errors');
+    }
   }
 
   // DINOv2 layer-by-layer diagnostics
-  if (pipelines.imageTokenizer._dinov2Diag) {
+  if (DEBUG && pipelines.imageTokenizer._dinov2Diag) {
     for (const [name, buf] of Object.entries(pipelines.imageTokenizer._dinov2Diag)) {
       const data = await readBuffer(device, buf, Math.min(buf.size, 1297 * 1024 * 4));
       // Token 0 = CLS, Token 1 = first patch
@@ -407,7 +411,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
 
   // Point-check backbone inputs against PyTorch reference
-  if (pipelines.twoStream._diagnosticBuffers) {
+  if (DEBUG && pipelines.twoStream._diagnosticBuffers) {
     const triProj = pipelines.twoStream._diagnosticBuffers['triProjBuf'];
     const latent = pipelines.twoStream._diagnosticBuffers['latentBuf'];
     if (triProj) {
@@ -445,7 +449,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   await device.queue.onSubmittedWorkDone();
 
   // Diagnostic: check backbone output
-  {
+  if (DEBUG) {
     const bbTotal = backboneResult.C * backboneResult.N * 4;
     const bbSample = await readBuffer(device, backboneResult.buffer, bbTotal);
     let min = Infinity, max = -Infinity, nan = 0, zero = 0;
@@ -465,7 +469,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
 
   // Diagnostic: check triplane features after post-processor
-  {
+  if (DEBUG) {
     const tpSample = await readBuffer(device, triplaneResult.buffer, Math.min(4096, triplaneResult.C * triplaneResult.H * triplaneResult.W * 4));
     let min = Infinity, max = -Infinity, nan = 0, zero = 0;
     for (let i = 0; i < tpSample.length; i++) {
@@ -478,12 +482,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
 
   // Compare triplane features with PyTorch reference
-  // PyTorch reference (chair image):
-  //   Plane 0 ch0 center row first 20: [13.04, 13.33, 16.92, 17.89, 19.20, ...]
-  //   Plane 0: min=-28.64, max=34.45, std=10.53
-  //   Plane 1: min=-36.33, max=39.11, std=12.02
-  //   Plane 2: min=-27.64, max=15.02, std=4.44
-  {
+  if (DEBUG) {
     // Read the full triplane buffer
     const fullTP = await readBuffer(device, triplaneResult.buffer, 3 * 40 * 384 * 384 * 4);
     const tpArr = fullTP;
@@ -533,41 +532,38 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const densityCPU = await readBuffer(device, decoded.density, tetData.numVertices * 4);
   const sdf = new Float32Array(densityCPU);
 
-  // Diagnostic: check raw density values
-  let minD = Infinity, maxD = -Infinity, nanCount = 0, zeroCount = 0;
-  for (let i = 0; i < sdf.length; i++) {
-    if (isNaN(sdf[i])) { nanCount++; continue; }
-    if (sdf[i] === 0) zeroCount++;
-    if (sdf[i] < minD) minD = sdf[i];
-    if (sdf[i] > maxD) maxD = sdf[i];
-  }
-  console.log(`SDF diagnostic: min=${minD}, max=${maxD}, NaN=${nanCount}, zero=${zeroCount}, total=${sdf.length}`);
-
-  // Point-check: compare with PyTorch at known inside vertices
-  const checkIndices = [136813, 150448, 150449, 150452];
-  console.log('Density point-check (PyTorch ref: 11.32, 13.83, 15.00, 11.35):');
-  for (const idx of checkIndices) {
-    console.log(`  vertex ${idx}: density=${sdf[idx].toFixed(4)}`);
-  }
-
-  // Find our inside vertices to compare spatial location
-  const insideIndices = [];
-  for (let i = 0; i < sdf.length; i++) {
-    if (sdf[i] > 10.0) insideIndices.push(i);
-  }
-  console.log(`WebGPU inside vertices (density > 10): ${insideIndices.length}`);
-  if (insideIndices.length > 0) {
-    // Show first 5 inside vertices with their positions
-    for (let j = 0; j < Math.min(5, insideIndices.length); j++) {
-      const idx = insideIndices[j];
-      const px = gridPositions[idx * 3], py = gridPositions[idx * 3 + 1], pz = gridPositions[idx * 3 + 2];
-      console.log(`  inside vertex ${idx}: pos=[${px.toFixed(4)}, ${py.toFixed(4)}, ${pz.toFixed(4)}], density=${sdf[idx].toFixed(4)}`);
+  if (DEBUG) {
+    let minD = Infinity, maxD = -Infinity, nanCount = 0, zeroCount = 0;
+    for (let i = 0; i < sdf.length; i++) {
+      if (isNaN(sdf[i])) { nanCount++; continue; }
+      if (sdf[i] === 0) zeroCount++;
+      if (sdf[i] < minD) minD = sdf[i];
+      if (sdf[i] > maxD) maxD = sdf[i];
     }
-  }
+    console.log(`SDF diagnostic: min=${minD}, max=${maxD}, NaN=${nanCount}, zero=${zeroCount}, total=${sdf.length}`);
 
-  // Save raw density for comparison
-  if (typeof window !== 'undefined') {
-    window._lastDensity = new Float32Array(sdf);
+    const checkIndices = [136813, 150448, 150449, 150452];
+    console.log('Density point-check (PyTorch ref: 11.32, 13.83, 15.00, 11.35):');
+    for (const idx of checkIndices) {
+      console.log(`  vertex ${idx}: density=${sdf[idx].toFixed(4)}`);
+    }
+
+    const insideIndices = [];
+    for (let i = 0; i < sdf.length; i++) {
+      if (sdf[i] > 10.0) insideIndices.push(i);
+    }
+    console.log(`WebGPU inside vertices (density > 10): ${insideIndices.length}`);
+    if (insideIndices.length > 0) {
+      for (let j = 0; j < Math.min(5, insideIndices.length); j++) {
+        const idx = insideIndices[j];
+        const px = gridPositions[idx * 3], py = gridPositions[idx * 3 + 1], pz = gridPositions[idx * 3 + 2];
+        console.log(`  inside vertex ${idx}: pos=[${px.toFixed(4)}, ${py.toFixed(4)}, ${pz.toFixed(4)}], density=${sdf[idx].toFixed(4)}`);
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      window._lastDensity = new Float32Array(sdf);
+    }
   }
 
   // Subtract threshold: sdf = density - threshold
@@ -579,7 +575,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const vertexOffsets = new Float32Array(vertexOffsetCPU);
 
   // Diagnostic: vertex offset statistics
-  {
+  if (DEBUG) {
     let oMin = Infinity, oMax = -Infinity, oNan = 0;
     for (let i = 0; i < vertexOffsets.length; i++) {
       if (isNaN(vertexOffsets[i])) { oNan++; continue; }
