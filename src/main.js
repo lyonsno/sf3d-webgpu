@@ -156,7 +156,7 @@ runBtn.addEventListener('click', async () => {
     const texResolution = 1024;
     const rasterResult = rasterizeUV(
       uvResult.uvs, uvResult.newVertices, uvResult.newFaces,
-      uvResult.newNumFaces, texResolution);
+      uvResult.newNumFaces, texResolution, uvResult.faceAssignment);
     setStatus(`Rasterized ${rasterResult.mask.reduce((a, b) => a + b, 0)} texels. Baking texture...`);
 
     // Step 4: Bake textures (GPU triplane query + features/perturb_normal decoder)

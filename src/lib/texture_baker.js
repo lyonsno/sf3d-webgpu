@@ -2,8 +2,8 @@
  * texture_baker.js — UV unwrapping + texture baking for SF3D WebGPU.
  *
  * Pipeline:
- *   1. Cube-projection UV unwrapping (matching SF3D's box-projection approach)
- *   2. CPU rasterization of UV space → 3D positions
+ *   1. Cube-projection UV unwrapping with bbox normalization
+ *   2. CPU rasterization of UV space → 3D positions (with depth buffer)
  *   3. GPU triplane query + features decoder → RGB
  *   4. Texture dilation to fill seams
  *
@@ -13,18 +13,12 @@
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
 
 /**
- * UV unwrap a mesh using cube projection.
+ * UV unwrap a mesh using cube projection with bounding-box normalization.
  *
  * Each triangle is assigned to one of 6 cube faces based on its face normal,
- * then projected onto that face's 2D plane. The 6 projections are packed
+ * then projected onto that face's 2D plane using the mesh's actual bounding
+ * box (not a fixed radius) for UV normalization. The 6 projections are packed
  * into a 3×2 grid in UV space.
- *
- * Quality note: cube projection is simpler than xatlas but produces higher
- * distortion for triangles at 45° to principal axes. These get foreshortened
- * on their assigned face, causing stretched textures. The PyTorch reference
- * uses a more sophisticated PCA-aligned box projection with atlas packing.
- * This is a deliberate trade-off: pure JS, no WASM dependency, matching
- * SF3D's box-projection concept. UV utilization is ~5% of texture area.
  *
  * Vertices are duplicated per-face (no sharing across faces) to allow
  * per-face UVs without seam issues.
@@ -33,8 +27,8 @@ import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
  * @param {Uint32Array} faces - [N_f * 3] triangle indices
  * @param {number} numVertices
  * @param {number} numFaces
- * @param {number} radius - model space radius for UV normalization
- * @returns {{ uvs: Float32Array, newVertices: Float32Array, newNormals: Float32Array, newFaces: Uint32Array, newNumVertices: number, newNumFaces: number }}
+ * @param {number} radius - model space radius (unused, kept for API compat)
+ * @returns {{ uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces, faceAssignment }}
  */
 export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) {
   // Compute smooth vertex normals from the original shared-vertex topology.
@@ -82,6 +76,23 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     smoothNormals[i*3+2] /= len;
   }
 
+  // Compute actual bounding box for UV normalization
+  let bboxMin = [Infinity, Infinity, Infinity];
+  let bboxMax = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < numVertices; i++) {
+    for (let a = 0; a < 3; a++) {
+      const v = vertices[i * 3 + a];
+      if (v < bboxMin[a]) bboxMin[a] = v;
+      if (v > bboxMax[a]) bboxMax[a] = v;
+    }
+  }
+  // Half-extents per axis (like a per-axis radius)
+  const extent = [
+    Math.max(Math.abs(bboxMin[0]), Math.abs(bboxMax[0])) || 1,
+    Math.max(Math.abs(bboxMin[1]), Math.abs(bboxMax[1])) || 1,
+    Math.max(Math.abs(bboxMin[2]), Math.abs(bboxMax[2])) || 1,
+  ];
+
   // Build per-face-vertex UVs (each face vertex gets its own UV)
   const newNumVertices = numFaces * 3;
   const newNumFaces = numFaces;
@@ -128,14 +139,14 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
       newNormals[newIdx * 3 + 1] = smoothNormals[origIdx * 3 + 1];
       newNormals[newIdx * 3 + 2] = smoothNormals[origIdx * 3 + 2];
 
-      // Project onto cube face axes
+      // Project onto cube face axes, normalize by per-axis extent
       let u = vertices[origIdx * 3 + ax0];
       let vv = vertices[origIdx * 3 + ax1];
       if (flip) u = -u;
 
-      // Normalize from [-radius, radius] to [0, 1]
-      u = (u / radius + 1) * 0.5;
-      vv = (vv / radius + 1) * 0.5;
+      // Normalize from [-extent, extent] to [0, 1]
+      u = (u / extent[ax0] + 1) * 0.5;
+      vv = (vv / extent[ax1] + 1) * 0.5;
 
       // Map to grid cell with padding
       uvs[newIdx * 2] = col * cellW + pad + u * (cellW - 2 * pad);
@@ -145,7 +156,7 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     }
   }
 
-  return { uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces };
+  return { uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces, faceAssignment };
 }
 
 /**
@@ -160,9 +171,10 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
  * @param {Uint32Array} faces - [N_f * 3] face indices
  * @param {number} numFaces
  * @param {number} resolution - texture resolution (default 1024)
+ * @param {Uint8Array} [_faceAssignment] - unused, kept for API compat
  * @returns {{ positions3D: Float32Array, mask: Uint8Array, tbnData: Float32Array }}
  */
-export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024) {
+export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024, _faceAssignment = null) {
   const positions3D = new Float32Array(resolution * resolution * 3);
   const mask = new Uint8Array(resolution * resolution);
   // TBN: 9 floats per texel (tangent[3], bitangent[3], normal[3])
