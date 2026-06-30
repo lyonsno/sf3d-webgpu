@@ -93,25 +93,6 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     Math.max(Math.abs(bboxMin[2]), Math.abs(bboxMax[2])) || 1,
   ];
 
-  // Build per-face-vertex UVs (each face vertex gets its own UV)
-  const newNumVertices = numFaces * 3;
-  const newNumFaces = numFaces;
-  const newVertices = new Float32Array(newNumVertices * 3);
-  const newNormals = new Float32Array(newNumVertices * 3);
-  const newFaces = new Uint32Array(newNumFaces * 3);
-  const uvs = new Float32Array(newNumVertices * 2);
-
-  // Grid layout: 3 columns × 2 rows
-  const pad = 0.005;
-  const cellW = 1 / 3;
-  const cellH = 1 / 2;
-
-  // Cube face → grid position
-  const gridPos = [
-    [0, 0], [1, 0], [2, 0],
-    [0, 1], [1, 1], [2, 1],
-  ];
-
   // UV projection axes per cube face:
   //   +X: (z, y)   -X: (-z, y)
   //   +Y: (x, z)   -Y: (x, -z)
@@ -122,41 +103,173 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     [0, 1, false], [0, 1, true],
   ];
 
+  // Depth axis per cube face (perpendicular to projection plane)
+  const depthAxis = [0, 0, 1, 1, 2, 2];
+  const depthKeepMax = [true, false, true, false, true, false];
+
+  // --- Step 1: Compute raw [0,1] UVs and depth centroids ---
+  const rawU = new Float32Array(numFaces * 3);
+  const rawV = new Float32Array(numFaces * 3);
+  const centroidDepth = new Float32Array(numFaces);
+
   for (let f = 0; f < numFaces; f++) {
     const cubeF = faceAssignment[f];
-    const [col, row] = gridPos[cubeF];
     const [ax0, ax1, flip] = projAxes[cubeF];
+    const dAxis = depthAxis[cubeF];
+    let depthSum = 0;
+    for (let vi = 0; vi < 3; vi++) {
+      const origIdx = faces[f * 3 + vi];
+      let u = vertices[origIdx * 3 + ax0];
+      let vv = vertices[origIdx * 3 + ax1];
+      if (flip) u = -u;
+      rawU[f * 3 + vi] = (u / extent[ax0] + 1) * 0.5;
+      rawV[f * 3 + vi] = (vv / extent[ax1] + 1) * 0.5;
+      depthSum += vertices[origIdx * 3 + dAxis];
+    }
+    centroidDepth[f] = depthSum / 3;
+  }
 
-    for (let v = 0; v < 3; v++) {
-      const origIdx = faces[f * 3 + v];
-      const newIdx = f * 3 + v;
+  // --- Step 2: Detect UV overlaps and assign atlas indices ---
+  // 0-5 = primary, 6-11 = first overlap, 12 = remaining
+  const atlasIndex = new Int32Array(numFaces);
+  for (let f = 0; f < numFaces; f++) atlasIndex[f] = faceAssignment[f];
 
-      // Copy position and smooth normal from original topology
+  const GRID = 128;
+  _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, GRID, 0);
+  _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, GRID, 6);
+
+  // --- Step 3: Build per-face-vertex arrays ---
+  const newNumVertices = numFaces * 3;
+  const newNumFaces = numFaces;
+  const newVertices = new Float32Array(newNumVertices * 3);
+  const newNormals = new Float32Array(newNumVertices * 3);
+  const newFaces = new Uint32Array(newNumFaces * 3);
+  const uvs = new Float32Array(newNumVertices * 2);
+
+  for (let f = 0; f < numFaces; f++) {
+    for (let vi = 0; vi < 3; vi++) {
+      const origIdx = faces[f * 3 + vi];
+      const newIdx = f * 3 + vi;
       newVertices[newIdx * 3] = vertices[origIdx * 3];
       newVertices[newIdx * 3 + 1] = vertices[origIdx * 3 + 1];
       newVertices[newIdx * 3 + 2] = vertices[origIdx * 3 + 2];
       newNormals[newIdx * 3] = smoothNormals[origIdx * 3];
       newNormals[newIdx * 3 + 1] = smoothNormals[origIdx * 3 + 1];
       newNormals[newIdx * 3 + 2] = smoothNormals[origIdx * 3 + 2];
-
-      // Project onto cube face axes, normalize by per-axis extent
-      let u = vertices[origIdx * 3 + ax0];
-      let vv = vertices[origIdx * 3 + ax1];
-      if (flip) u = -u;
-
-      // Normalize from [-extent, extent] to [0, 1]
-      u = (u / extent[ax0] + 1) * 0.5;
-      vv = (vv / extent[ax1] + 1) * 0.5;
-
-      // Map to grid cell with padding
-      uvs[newIdx * 2] = col * cellW + pad + u * (cellW - 2 * pad);
-      uvs[newIdx * 2 + 1] = row * cellH + pad + vv * (cellH - 2 * pad);
-
-      newFaces[f * 3 + v] = newIdx;
+      newFaces[f * 3 + vi] = newIdx;
     }
   }
 
-  return { uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces, faceAssignment };
+  // --- Step 4: Pack UVs into atlas ---
+  // Layout matching PyTorch _find_slice_offset_and_scale:
+  //   Primary (0-5):   3×2 grid, cell=1/3×1/3, region [0,1]×[0,2/3]
+  //   Secondary (6-11): 3×2 grid, cell=1/6×1/6, region [0,1/2]×[2/3,1]
+  //   Remaining (12+):  single block, cell=1/2×1/3, region [1/2,1]×[2/3,1]
+  const pad = 0.005;
+
+  // offset_x_vals and offset_y_vals per slot within a tier (slot % 6)
+  const slotCol = [0, 1, 2, 0, 1, 2];
+  const slotRow = [0, 0, 0, 1, 1, 1];
+
+  for (let f = 0; f < numFaces; f++) {
+    const ai = atlasIndex[f];
+    const tier = Math.floor(ai / 6); // 0=primary, 1=secondary, 2+=remaining
+    const slot = ai % 6;
+    const sc = slotCol[slot], sr = slotRow[slot];
+
+    let offX, offY, divX, divY;
+    if (tier === 0) {
+      // Primary: x_offset = (1/3)*sc, y_offset = (1/3)*sr, div = 3
+      offX = (1/3) * sc;
+      offY = (1/3) * sr;
+      divX = 3; divY = 3;
+    } else if (tier === 1) {
+      // Secondary: x_offset = (1/6)*sc, y_offset = (1/6)*sr + 2/3, div = 6
+      offX = (1/6) * sc;
+      offY = (1/6) * sr + 2/3;
+      divX = 6; divY = 6;
+    } else {
+      // Remaining: x_offset = (1/6)*sc + 0.5, y_offset = (1/6)*sr + 2/3
+      // div_x = 2, div_y = 3
+      offX = (1/6) * sc + 0.5;
+      offY = (1/6) * sr + 2/3;
+      divX = 2; divY = 3;
+    }
+
+    for (let vi = 0; vi < 3; vi++) {
+      const idx = f * 3 + vi;
+      // raw UV ∈ [0,1] → shrink by div, shift by offset, with padding
+      const cellW = 1 / divX, cellH = 1 / divY;
+      uvs[idx * 2] = offX + pad + rawU[idx] * (cellW - 2 * pad);
+      uvs[idx * 2 + 1] = offY + pad + rawV[idx] * (cellH - 2 * pad);
+    }
+  }
+
+  return { uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces, faceAssignment: atlasIndex };
+}
+
+/**
+ * Detect UV overlaps within each slot group using a rasterized grid.
+ * When two triangles in the same slot overlap in UV space, the occluded
+ * one (by 3D centroid depth along the cube face axis) gets bumped to slot+6.
+ */
+function _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth,
+    depthKeepMax, gridSize, slotOffset) {
+
+  for (let slot = slotOffset; slot < slotOffset + 6; slot++) {
+    const slotFaces = [];
+    for (let f = 0; f < numFaces; f++) {
+      if (atlasIndex[f] === slot) slotFaces.push(f);
+    }
+    if (slotFaces.length === 0) continue;
+
+    const baseSlot = slot % 6;
+    const keepMax = depthKeepMax[baseSlot];
+
+    // Grid cells: owner face index and depth
+    const gridOwner = new Int32Array(gridSize * gridSize).fill(-1);
+    const gridDepth = new Float32Array(gridSize * gridSize);
+    const bumped = new Set();
+
+    for (const f of slotFaces) {
+      if (bumped.has(f)) continue;
+
+      const u0 = rawU[f*3], u1 = rawU[f*3+1], u2 = rawU[f*3+2];
+      const v0 = rawV[f*3], v1 = rawV[f*3+1], v2 = rawV[f*3+2];
+      const minGx = Math.max(0, Math.floor(Math.min(u0, u1, u2) * gridSize));
+      const maxGx = Math.min(gridSize-1, Math.floor(Math.max(u0, u1, u2) * gridSize));
+      const minGy = Math.max(0, Math.floor(Math.min(v0, v1, v2) * gridSize));
+      const maxGy = Math.min(gridSize-1, Math.floor(Math.max(v0, v1, v2) * gridSize));
+
+      const fDepth = centroidDepth[f];
+
+      for (let gy = minGy; gy <= maxGy; gy++) {
+        for (let gx = minGx; gx <= maxGx; gx++) {
+          const gi = gy * gridSize + gx;
+          const owner = gridOwner[gi];
+          if (owner === -1) {
+            gridOwner[gi] = f;
+            gridDepth[gi] = fDepth;
+          } else if (owner !== f && !bumped.has(owner)) {
+            // Overlap: bump the occluded face
+            const ownerDepth = gridDepth[gi];
+            let occluded;
+            if (keepMax) {
+              occluded = (fDepth >= ownerDepth) ? owner : f;
+            } else {
+              occluded = (fDepth <= ownerDepth) ? owner : f;
+            }
+            atlasIndex[occluded] = Math.min(atlasIndex[occluded] + 6, 12);
+            bumped.add(occluded);
+            if (occluded === owner) {
+              gridOwner[gi] = f;
+              gridDepth[gi] = fDepth;
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 /**

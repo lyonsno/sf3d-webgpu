@@ -216,6 +216,24 @@ try {
     }
   } catch (e) { console.log(`Could not extract mesh: ${e.message}`); }
 
+  // Extract GLB for visual inspection
+  try {
+    const glbBase64 = await page.evaluate(() => {
+      if (window._lastGLB) {
+        const bytes = new Uint8Array(window._lastGLB);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+      }
+      return null;
+    });
+    if (glbBase64) {
+      const glbPath = '/tmp/sf3d-inference-smoke.glb';
+      fs.writeFileSync(glbPath, Buffer.from(glbBase64, 'base64'));
+      console.log(`GLB saved: ${glbPath} (${(fs.statSync(glbPath).size / 1024).toFixed(0)} KB)`);
+    }
+  } catch (e) { console.log(`Could not extract GLB: ${e.message}`); }
+
   // Extract density array for comparison
   try {
     const density = await page.evaluate(() => {
