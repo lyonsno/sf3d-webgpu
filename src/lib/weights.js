@@ -310,6 +310,13 @@ export async function loadWeights(device, url, onProgress) {
 
   console.log(`Loaded ${tensors.size} SF3D tensors from weight file`);
 
+  // Raw tensor access for modules that need direct weight lookup by name
+  // (e.g., CLIP visual encoder in clip_estimator.js)
+  const _rawGet = (name) => get(name);
+  const _rawGetCPU = (name) => getCPU(name);
+  const _rawTryGet = (name) => tryGet(name);
+  const _rawHas = (name) => tensors.has(name);
+
   return {
     imageTokenizer,
     cameraEmbedder,
@@ -318,5 +325,9 @@ export async function loadWeights(device, url, onProgress) {
     postProcessor,
     decoder,
     imageEstimator,
+    _rawGet,
+    _rawGetCPU,
+    _rawTryGet,
+    _rawHas,
   };
 }

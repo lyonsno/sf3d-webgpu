@@ -13,6 +13,7 @@ import { initGPU } from './lib/gpu.js';
 import { loadWeights } from './lib/weights.js';
 import { initPipelines, runInference } from './lib/inference.js';
 import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './lib/texture_baker.js';
+import { estimateMaterials } from './lib/clip_estimator.js';
 
 const statusEl = document.getElementById('status');
 const progressFill = document.getElementById('progress-fill');
@@ -146,32 +147,53 @@ runBtn.addEventListener('click', async () => {
     const meshTime = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`Mesh in ${meshTime}s (${meshResult.numVertices} verts). UV unwrapping...`);
 
-    // Step 2: UV unwrap (synchronous cube projection)
+    // Step 2: CLIP material estimation (runs on GPU, uses input image)
+    // Get masked float RGBA pixels for CLIP input
+    const clipCanvas = document.createElement('canvas');
+    const clipSrcW = inputImage.naturalWidth || inputImage.width;
+    const clipSrcH = inputImage.naturalHeight || inputImage.height;
+    clipCanvas.width = clipSrcW;
+    clipCanvas.height = clipSrcH;
+    const clipCtx = clipCanvas.getContext('2d');
+    clipCtx.drawImage(inputImage, 0, 0);
+    const clipRaw = clipCtx.getImageData(0, 0, clipSrcW, clipSrcH).data;
+    const clipPixels = new Float32Array(clipSrcW * clipSrcH * 4);
+    for (let i = 0; i < clipRaw.length; i++) clipPixels[i] = clipRaw[i] / 255.0;
+    // Apply alpha blending with grey background (matching PyTorch: rgb_cond * mask_cond)
+    for (let i = 0; i < clipSrcW * clipSrcH; i++) {
+      const a = clipPixels[i * 4 + 3];
+      clipPixels[i * 4]     = clipPixels[i * 4] * a + 0.5 * (1 - a);
+      clipPixels[i * 4 + 1] = clipPixels[i * 4 + 1] * a + 0.5 * (1 - a);
+      clipPixels[i * 4 + 2] = clipPixels[i * 4 + 2] * a + 0.5 * (1 - a);
+    }
+    const { roughness, metallic } = await estimateMaterials(device, clipPixels, clipSrcW, clipSrcH, weights);
+
+    // Step 3: UV unwrap (synchronous cube projection)
     const uvResult = unwrapUV(
       meshResult.vertices, meshResult.faces,
       meshResult.numVertices, meshResult.numFaces);
     setStatus(`UV unwrap done (${uvResult.newNumVertices} verts). Rasterizing UV space...`);
 
-    // Step 3: Rasterize UV space to get 3D positions per texel
+    // Step 4: Rasterize UV space to get 3D positions per texel
     const texResolution = 1024;
     const rasterResult = rasterizeUV(
       uvResult.uvs, uvResult.newVertices, uvResult.newFaces,
       uvResult.newNumFaces, texResolution, uvResult.faceAssignment);
     setStatus(`Rasterized ${rasterResult.mask.reduce((a, b) => a + b, 0)} texels. Baking texture...`);
 
-    // Step 4: Bake textures (GPU triplane query + features/perturb_normal decoder)
+    // Step 5: Bake textures (GPU triplane query + features/perturb_normal decoder)
     const bakeResult = await bakeTexture(
       device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
       meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
       rasterResult.tbnData, texResolution);
     setStatus('Textures baked. Building GLB...');
 
-    // Step 5: Export as GLB (smooth normals from original mesh topology)
+    // Step 6: Export as GLB with CLIP-estimated materials
     lastGLB = await exportGLB(
       uvResult.newVertices, uvResult.newNormals, uvResult.newFaces, uvResult.uvs,
       bakeResult.albedo, bakeResult.normalMap,
       uvResult.newNumVertices, uvResult.newNumFaces, texResolution,
-      0.5, 0.0); // hardcoded roughness/metallic for now
+      roughness, metallic);
 
     const totalTime = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`Done in ${totalTime}s: ${meshResult.numVertices} vertices, ${meshResult.numFaces} faces, textured GLB ready`);
