@@ -110,20 +110,58 @@ export async function estimateMaterials(device, imagePixels, imgWidth, imgHeight
   return { roughness, metallic };
 }
 
+const COND_IMAGE_SIZE = 512;
+
+function _bilinearResize(src, srcW, srcH, dstW, dstH) {
+  // Resize RGBA float32 image using bilinear interpolation (align_corners=False)
+  const dst = new Float32Array(dstW * dstH * 4);
+  for (let y = 0; y < dstH; y++) {
+    for (let x = 0; x < dstW; x++) {
+      const srcX = Math.max(0, (x + 0.5) * (srcW / dstW) - 0.5);
+      const srcY = Math.max(0, (y + 0.5) * (srcH / dstH) - 0.5);
+      const x0 = Math.floor(srcX), y0 = Math.floor(srcY);
+      const x1 = Math.min(x0 + 1, srcW - 1), y1 = Math.min(y0 + 1, srcH - 1);
+      const fx = srcX - x0, fy = srcY - y0;
+      for (let c = 0; c < 4; c++) {
+        dst[(y * dstW + x) * 4 + c] =
+          src[(y0 * srcW + x0) * 4 + c] * (1-fx)*(1-fy) +
+          src[(y0 * srcW + x1) * 4 + c] * fx*(1-fy) +
+          src[(y1 * srcW + x0) * 4 + c] * (1-fx)*fy +
+          src[(y1 * srcW + x1) * 4 + c] * fx*fy;
+      }
+    }
+  }
+  return dst;
+}
+
 function _preprocessForCLIP(pixels, width, height) {
+  // Match PyTorch path: first resize to 512 (cond_image_size), then resize to 224
+  // PyTorch does: PIL resize → alpha blend → F.interpolate bilinear 512→224 → normalize
+  // The input pixels are already alpha-blended and masked, so we just need the two-step resize.
+  let img = pixels;
+  let w = width, h = height;
+
+  // Step 1: resize to cond_image_size (512) if not already
+  if (w !== COND_IMAGE_SIZE || h !== COND_IMAGE_SIZE) {
+    img = _bilinearResize(img, w, h, COND_IMAGE_SIZE, COND_IMAGE_SIZE);
+    w = COND_IMAGE_SIZE;
+    h = COND_IMAGE_SIZE;
+  }
+
+  // Step 2: resize to 224 (CLIP input size) matching F.interpolate bilinear align_corners=False
   const out = new Float32Array(3 * IMAGE_SIZE * IMAGE_SIZE);
   for (let y = 0; y < IMAGE_SIZE; y++) {
     for (let x = 0; x < IMAGE_SIZE; x++) {
-      const srcX = Math.max(0, (x + 0.5) * (width / IMAGE_SIZE) - 0.5);
-      const srcY = Math.max(0, (y + 0.5) * (height / IMAGE_SIZE) - 0.5);
+      const srcX = Math.max(0, (x + 0.5) * (w / IMAGE_SIZE) - 0.5);
+      const srcY = Math.max(0, (y + 0.5) * (h / IMAGE_SIZE) - 0.5);
       const x0 = Math.floor(srcX), y0 = Math.floor(srcY);
-      const x1 = Math.min(x0 + 1, width - 1), y1 = Math.min(y0 + 1, height - 1);
+      const x1 = Math.min(x0 + 1, w - 1), y1 = Math.min(y0 + 1, h - 1);
       const fx = srcX - x0, fy = srcY - y0;
       for (let c = 0; c < 3; c++) {
-        const v = pixels[(y0 * width + x0) * 4 + c] * (1-fx)*(1-fy) +
-                  pixels[(y0 * width + x1) * 4 + c] * fx*(1-fy) +
-                  pixels[(y1 * width + x0) * 4 + c] * (1-fx)*fy +
-                  pixels[(y1 * width + x1) * 4 + c] * fx*fy;
+        const v = img[(y0 * w + x0) * 4 + c] * (1-fx)*(1-fy) +
+                  img[(y0 * w + x1) * 4 + c] * fx*(1-fy) +
+                  img[(y1 * w + x0) * 4 + c] * (1-fx)*fy +
+                  img[(y1 * w + x1) * 4 + c] * fx*fy;
         out[c * IMAGE_SIZE * IMAGE_SIZE + y * IMAGE_SIZE + x] = (v - CLIP_MEAN[c]) / CLIP_STD[c];
       }
     }
@@ -173,7 +211,6 @@ function _runVisualTransformerCPU(embeddings, weights) {
 
   // Pre-LN
   x = _cpuLayerNorm(x, N, D, g('image_estimator.model.visual.ln_pre.weight'), g('image_estimator.model.visual.ln_pre.bias'));
-
   for (let b = 0; b < NUM_BLOCKS; b++) {
     const p = `image_estimator.model.visual.transformer.resblocks.${b}`;
 
@@ -181,13 +218,14 @@ function _runVisualTransformerCPU(embeddings, weights) {
     const ln1 = _cpuLayerNorm(x, N, D, g(`${p}.ln_1.weight`), g(`${p}.ln_1.bias`));
 
     // Fused QKV: [N, D] × [D, 3D] → [N, 3D]
-    const qkv = _cpuMatmulBias(ln1, N, D, 3*D, g(`${p}.attn.in_proj_weight`), g(`${p}.attn.in_proj_bias`));
+    // in_proj_weight is NOT transposed by converter (no .weight suffix)
+    const qkv = _cpuMatmulBias(ln1, N, D, 3*D, g(`${p}.attn.in_proj_weight`), g(`${p}.attn.in_proj_bias`), false);
 
     // Self-attention
     const attnOut = _cpuFusedAttn(qkv, N, NUM_HEADS, HEAD_DIM);
 
-    // Out proj
-    const proj = _cpuMatmulBias(attnOut, N, D, D, g(`${p}.attn.out_proj.weight`), g(`${p}.attn.out_proj.bias`));
+    // Out proj — transposed by converter (.weight suffix)
+    const proj = _cpuMatmulBias(attnOut, N, D, D, g(`${p}.attn.out_proj.weight`), g(`${p}.attn.out_proj.bias`), true);
 
     // Residual
     x = _cpuAdd(x, proj);
@@ -195,10 +233,10 @@ function _runVisualTransformerCPU(embeddings, weights) {
     // LN2
     const ln2 = _cpuLayerNorm(x, N, D, g(`${p}.ln_2.weight`), g(`${p}.ln_2.bias`));
 
-    // MLP
-    const fc = _cpuMatmulBias(ln2, N, D, MLP_DIM, g(`${p}.mlp.c_fc.weight`), g(`${p}.mlp.c_fc.bias`));
+    // MLP — both transposed by converter (.weight suffix)
+    const fc = _cpuMatmulBias(ln2, N, D, MLP_DIM, g(`${p}.mlp.c_fc.weight`), g(`${p}.mlp.c_fc.bias`), true);
     const gelu = _cpuGelu(fc);
-    const mlpOut = _cpuMatmulBias(gelu, N, MLP_DIM, D, g(`${p}.mlp.c_proj.weight`), g(`${p}.mlp.c_proj.bias`));
+    const mlpOut = _cpuMatmulBias(gelu, N, MLP_DIM, D, g(`${p}.mlp.c_proj.weight`), g(`${p}.mlp.c_proj.bias`), true);
 
     x = _cpuAdd(x, mlpOut);
   }
@@ -206,13 +244,13 @@ function _runVisualTransformerCPU(embeddings, weights) {
   // Post-LN
   x = _cpuLayerNorm(x, N, D, g('image_estimator.model.visual.ln_post.weight'), g('image_estimator.model.visual.ln_post.bias'));
 
-  // CLS → project: proj stored as [768, 512], PyTorch does cls @ proj
+  // CLS → project: converter transposed visual.proj from [768, 512] to [512, 768]
   const cls = x.slice(0, D);
   const projW = g('image_estimator.model.visual.proj');
   const features = new Float32Array(PROJ_DIM);
   for (let d = 0; d < PROJ_DIM; d++) {
     let sum = 0;
-    for (let k = 0; k < D; k++) sum += cls[k] * projW[k * PROJ_DIM + d];
+    for (let k = 0; k < D; k++) sum += cls[k] * projW[d * D + k];
     features[d] = sum;
   }
   return features;
@@ -235,17 +273,21 @@ function _cpuLayerNorm(x, N, D, weight, bias) {
   return out;
 }
 
-function _cpuMatmulBias(x, rows, inDim, outDim, weight, bias) {
-  // Weight may be [inDim, outDim] (transposed) or [outDim, inDim] (original PyTorch).
-  // Detect layout from weight length: if weight.length === inDim * outDim, check shape.
-  // The weight file stores CLIP weights as [outDim, inDim] (NOT transposed).
-  // So we compute: output[r, o] = sum_k x[r, k] * weight[o * inDim + k] + bias[o]
-  // This is x @ weight.T + bias, matching PyTorch's F.linear(x, weight, bias).
+function _cpuMatmulBias(x, rows, inDim, outDim, weight, bias, transposed = false) {
+  // Weight layout depends on whether the converter transposed this tensor:
+  //   transposed=false: [outDim, inDim] (PyTorch native F.linear layout)
+  //     output[r, o] = sum_k x[r, k] * weight[o * inDim + k] + bias[o]
+  //   transposed=true: [inDim, outDim] (converter did .T for WebGPU shaders)
+  //     output[r, o] = sum_k x[r, k] * weight[k * outDim + o] + bias[o]
   const out = new Float32Array(rows * outDim);
   for (let r = 0; r < rows; r++) {
     for (let o = 0; o < outDim; o++) {
       let sum = bias[o];
-      for (let k = 0; k < inDim; k++) sum += x[r*inDim+k] * weight[o*inDim+k];
+      if (transposed) {
+        for (let k = 0; k < inDim; k++) sum += x[r*inDim+k] * weight[k*outDim+o];
+      } else {
+        for (let k = 0; k < inDim; k++) sum += x[r*inDim+k] * weight[o*inDim+k];
+      }
       out[r*outDim+o] = sum;
     }
   }

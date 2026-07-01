@@ -68,11 +68,13 @@ function fp16ToFp32(h) {
 
 function extractTensor(device, buffer, info) {
   const { dtype, offset, size } = info;
+  const raw = extractBytes(buffer, offset, size);
   if (dtype === 0) {
-    const data = new Float32Array(buffer, offset, size / 4);
-    return createStorageBuffer(device, data);
+    // fp32 — raw bytes are already float32
+    const fp32 = new Float32Array(raw.buffer, raw.byteOffset, size / 4);
+    return createStorageBuffer(device, fp32);
   } else {
-    const fp16 = new Uint16Array(buffer, offset, size / 2);
+    const fp16 = new Uint16Array(raw.buffer, raw.byteOffset, size / 2);
     const fp32 = new Float32Array(fp16.length);
     for (let i = 0; i < fp16.length; i++) fp32[i] = fp16ToFp32(fp16[i]);
     return createStorageBuffer(device, fp32);
@@ -81,11 +83,61 @@ function extractTensor(device, buffer, info) {
 
 function extractTensorCPU(buffer, info) {
   const { dtype, offset, size } = info;
-  if (dtype === 0) return new Float32Array(buffer.slice(offset, offset + size));
-  const fp16 = new Uint16Array(buffer, offset, size / 2);
+  const raw = extractBytes(buffer, offset, size);
+  if (dtype === 0) {
+    const fp32 = new Float32Array(raw.buffer, raw.byteOffset, size / 4);
+    return new Float32Array(fp32); // copy to decouple from chunk
+  }
+  const fp16 = new Uint16Array(raw.buffer, raw.byteOffset, size / 2);
   const fp32 = new Float32Array(fp16.length);
   for (let i = 0; i < fp16.length; i++) fp32[i] = fp16ToFp32(fp16[i]);
   return fp32;
+}
+
+/**
+ * Extract a byte range from the chunked buffer.
+ * Returns a Uint8Array view if the range falls within a single chunk,
+ * otherwise copies into a new buffer (only for tensors that span chunk boundaries).
+ */
+function extractBytes(chunkedBuffer, offset, size) {
+  if (chunkedBuffer instanceof ArrayBuffer) {
+    // Legacy single-buffer path
+    return new Uint8Array(chunkedBuffer, offset, size);
+  }
+  // chunkedBuffer is { chunks, offsets, totalSize }
+  const { chunks, offsets } = chunkedBuffer;
+  const end = offset + size;
+
+  // Find the first chunk that contains the start
+  let startChunk = 0;
+  for (let i = 0; i < offsets.length; i++) {
+    if (offsets[i] + chunks[i].length > offset) { startChunk = i; break; }
+  }
+
+  const localOffset = offset - offsets[startChunk];
+  // Check if entirely within this chunk
+  if (localOffset + size <= chunks[startChunk].length) {
+    // Ensure 4-byte alignment for typed array views (Float32Array, Uint16Array)
+    const chunkBaseOffset = chunks[startChunk].byteOffset + localOffset;
+    if (chunkBaseOffset % 4 !== 0) {
+      const copy = new Uint8Array(size);
+      copy.set(chunks[startChunk].subarray(localOffset, localOffset + size));
+      return copy;
+    }
+    return chunks[startChunk].subarray(localOffset, localOffset + size);
+  }
+
+  // Spans multiple chunks — copy into aligned buffer
+  const result = new Uint8Array(size);
+  let written = 0;
+  for (let i = startChunk; i < chunks.length && written < size; i++) {
+    const chunkStart = Math.max(0, offset + written - offsets[i]);
+    const avail = chunks[i].length - chunkStart;
+    const take = Math.min(avail, size - written);
+    result.set(chunks[i].subarray(chunkStart, chunkStart + take), written);
+    written += take;
+  }
+  return result;
 }
 
 /**
@@ -98,38 +150,42 @@ export async function loadWeights(device, url, onProgress) {
   const contentLength = parseInt(response.headers.get('content-length') || '0');
   const reader = response.body.getReader();
   const chunks = [];
+  const chunkOffsets = [];
   let received = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    chunkOffsets.push(received);
     chunks.push(value);
     received += value.length;
     if (onProgress) onProgress(received, contentLength);
   }
 
-  const buffer = new ArrayBuffer(received);
-  const uint8 = new Uint8Array(buffer);
-  let pos = 0;
-  for (const chunk of chunks) { uint8.set(chunk, pos); pos += chunk.length; }
+  // Build a chunked buffer that avoids a single >2GB ArrayBuffer
+  const chunkedBuffer = { chunks, offsets: chunkOffsets, totalSize: received };
 
-  const { tensors } = parseHeader(buffer);
+  // Parse header from the first chunk(s) — header is always small (<1MB)
+  // Always copy to get a clean ArrayBuffer for DataView
+  const headerBytes = extractBytes(chunkedBuffer, 0, Math.min(received, 1024 * 1024));
+  const headerBuf = headerBytes.slice().buffer;
+  const { tensors } = parseHeader(headerBuf);
 
   const get = (name) => {
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
-    return extractTensor(device, buffer, info);
+    return extractTensor(device, chunkedBuffer, info);
   };
 
   const tryGet = (name) => {
     const info = tensors.get(name);
     if (!info) return null;
-    return extractTensor(device, buffer, info);
+    return extractTensor(device, chunkedBuffer, info);
   };
 
   const getCPU = (name) => {
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
-    return extractTensorCPU(buffer, info);
+    return extractTensorCPU(chunkedBuffer, info);
   };
 
   const getInfo = (name) => {

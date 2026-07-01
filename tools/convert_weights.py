@@ -147,7 +147,10 @@ def convert_weights(model_path, output_path, dtype="fp16", manifest_path=None):
             print(f"  New pos embed shape: {arr.shape}")
 
         # Convert to target dtype
-        if dtype == "fp16":
+        # CLIP image estimator weights need fp32 — fp16 quantization drifts
+        # through 12 transformer blocks and corrupts roughness/metallic prediction
+        needs_fp32 = name.startswith("image_estimator.")
+        if dtype == "fp16" and not needs_fp32:
             arr = arr.astype(np.float16)
             dtype_code = 1
         else:
