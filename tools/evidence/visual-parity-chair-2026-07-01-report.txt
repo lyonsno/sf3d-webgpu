@@ -1,0 +1,7 @@
+=== SF3D Inference Smoke Report ===
+Date: 2026-07-01T06:13:20.338Z
+Image: /Users/noahlyons/.local/state/gpu-greenroom/outputs/b4fe3aa9e629/input.png
+Total console messages: 22584
+Errors: 0
+Page errors: 0
+Last status: Done in 32.0s: 9988 vertices, 19976 faces, textured GLB ready
