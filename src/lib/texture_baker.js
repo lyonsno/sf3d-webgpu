@@ -242,6 +242,57 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     }
   }
 
+  // Diagnostic: check for degenerate UVs and out-of-bounds
+  let degenerateCount = 0, oobCount = 0;
+  const degFaces = [];
+  for (let f = 0; f < numFaces; f++) {
+    const u0 = uvs[f*6], v0 = uvs[f*6+1];
+    const u1 = uvs[f*6+2], v1 = uvs[f*6+3];
+    const u2 = uvs[f*6+4], v2 = uvs[f*6+5];
+    // UV triangle area via cross product
+    const area = Math.abs((u1-u0)*(v2-v0) - (u2-u0)*(v1-v0)) * 0.5;
+    if (area < 1e-10) {
+      degenerateCount++;
+      if (degFaces.length < 10) degFaces.push({ f, tier: Math.floor(atlasIndex[f]/6), ai: atlasIndex[f], area, u0, v0, u1, v1, u2, v2 });
+    }
+    // Check OOB
+    if (u0 < 0 || u0 > 1 || v0 < 0 || v0 > 1 ||
+        u1 < 0 || u1 > 1 || v1 < 0 || v1 > 1 ||
+        u2 < 0 || u2 > 1 || v2 < 0 || v2 > 1) oobCount++;
+  }
+  console.log(`UV diagnostics: degenerate=${degenerateCount}, out-of-bounds=${oobCount}, total=${numFaces}`);
+  if (degFaces.length > 0) console.log(`Sample degenerate faces: ${JSON.stringify(degFaces.slice(0, 5))}`);
+
+  // Also check: faces where all 3 UV verts map to the same texel at 1024 res
+  let sameTexelCount = 0;
+  const sameTexelFaces = [];
+  for (let f = 0; f < numFaces; f++) {
+    const px0 = Math.floor(uvs[f*6] * 1024), py0 = Math.floor(uvs[f*6+1] * 1024);
+    const px1 = Math.floor(uvs[f*6+2] * 1024), py1 = Math.floor(uvs[f*6+3] * 1024);
+    const px2 = Math.floor(uvs[f*6+4] * 1024), py2 = Math.floor(uvs[f*6+5] * 1024);
+    if (px0 === px1 && px1 === px2 && py0 === py1 && py1 === py2) {
+      sameTexelCount++;
+      if (sameTexelFaces.length < 5) sameTexelFaces.push({ f, tier: Math.floor(atlasIndex[f]/6), ai: atlasIndex[f] });
+    }
+  }
+  console.log(`Faces mapping to single texel at 1024: ${sameTexelCount} (these get 0 rasterized texels)`);
+  // Check: how many secondary/remaining faces have UV area < 1 texel at 1024?
+  let subTexelSecondary = 0, subTexelRemaining = 0;
+  for (let f = 0; f < numFaces; f++) {
+    const tier = Math.floor(atlasIndex[f] / 6);
+    if (tier === 0) continue;
+    const u0 = uvs[f*6], v0 = uvs[f*6+1];
+    const u1 = uvs[f*6+2], v1 = uvs[f*6+3];
+    const u2 = uvs[f*6+4], v2 = uvs[f*6+5];
+    const texelArea = Math.abs((u1-u0)*(v2-v0) - (u2-u0)*(v1-v0)) * 0.5 * 1024 * 1024;
+    if (texelArea < 1.0) {
+      if (tier === 1) subTexelSecondary++;
+      else subTexelRemaining++;
+    }
+  }
+  console.log(`Sub-texel faces: secondary=${subTexelSecondary}, remaining=${subTexelRemaining}`);
+  if (sameTexelFaces.length > 0) console.log(`Sample same-texel faces: ${JSON.stringify(sameTexelFaces)}`);
+
   // Diagnostic: count faces per tier
   const tierCounts = [0, 0, 0];
   for (let f = 0; f < numFaces; f++) {
@@ -437,6 +488,47 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024, 
     }
   }
 
+  // Centroid fallback: ensure every face gets at least one texel.
+  // Sub-texel faces in small atlas cells would otherwise map to black pixels.
+  for (let f = 0; f < numFaces; f++) {
+    const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
+    const cu = (uvs[i0*2] + uvs[i1*2] + uvs[i2*2]) / 3;
+    const cv = (uvs[i0*2+1] + uvs[i1*2+1] + uvs[i2*2+1]) / 3;
+    const cpx = Math.min(resolution - 1, Math.max(0, Math.floor(cu * resolution)));
+    const cpy = Math.min(resolution - 1, Math.max(0, Math.floor(cv * resolution)));
+    const cIdx = cpy * resolution + cpx;
+
+    if (!mask[cIdx]) {
+      mask[cIdx] = 1;
+      const p0x = positions[i0*3], p0y = positions[i0*3+1], p0z = positions[i0*3+2];
+      const p1x = positions[i1*3], p1y = positions[i1*3+1], p1z = positions[i1*3+2];
+      const p2x = positions[i2*3], p2y = positions[i2*3+1], p2z = positions[i2*3+2];
+      positions3D[cIdx * 3] = (p0x + p1x + p2x) / 3;
+      positions3D[cIdx * 3 + 1] = (p0y + p1y + p2y) / 3;
+      positions3D[cIdx * 3 + 2] = (p0z + p1z + p2z) / 3;
+
+      // Compute face TBN for centroid texel
+      const e1x = p1x-p0x, e1y = p1y-p0y, e1z = p1z-p0z;
+      const e2x = p2x-p0x, e2y = p2y-p0y, e2z = p2z-p0z;
+      let fnx = e1y*e2z - e1z*e2y;
+      let fny = e1z*e2x - e1x*e2z;
+      let fnz = e1x*e2y - e1y*e2x;
+      const fnLen = Math.sqrt(fnx*fnx + fny*fny + fnz*fnz) || 1;
+      fnx /= fnLen; fny /= fnLen; fnz /= fnLen;
+      let tx = 1, ty = 0, tz = 0;
+      if (Math.abs(fnx) > 0.9) { tx = 0; ty = 1; }
+      const tDotN = tx*fnx + ty*fny + tz*fnz;
+      tx -= tDotN*fnx; ty -= tDotN*fny; tz -= tDotN*fnz;
+      const tLen = Math.sqrt(tx*tx + ty*ty + tz*tz) || 1;
+      tx /= tLen; ty /= tLen; tz /= tLen;
+      const bx = fny*tz - fnz*ty, by = fnz*tx - fnx*tz, bz = fnx*ty - fny*tx;
+      const tbnBase = cIdx * 9;
+      tbnData[tbnBase] = tx; tbnData[tbnBase+1] = ty; tbnData[tbnBase+2] = tz;
+      tbnData[tbnBase+3] = bx; tbnData[tbnBase+4] = by; tbnData[tbnBase+5] = bz;
+      tbnData[tbnBase+6] = fnx; tbnData[tbnBase+7] = fny; tbnData[tbnBase+8] = fnz;
+    }
+  }
+
   return { positions3D, mask, tbnData };
 }
 
@@ -541,8 +633,8 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
   }
 
   // Dilate both textures
-  _dilateTexture(albedo, mask, resolution, 6);
-  _dilateTexture(normalMap, mask, resolution, 6);
+  _dilateTexture(albedo, mask, resolution, 20);
+  _dilateTexture(normalMap, mask, resolution, 20);
 
   return { albedo, normalMap };
 }
