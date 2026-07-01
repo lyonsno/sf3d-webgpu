@@ -31,7 +31,19 @@ import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
  * @returns {{ uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces, faceAssignment }}
  */
 export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) {
-  // Compute smooth vertex normals from the original shared-vertex topology.
+  // --- PCA alignment: rotate vertex positions so principal axes align with
+  // canonical X/Y/Z, matching PyTorch _align_mesh_with_main_axis.
+  // ONLY used for UV generation; output newVertices remain unrotated. ---
+  const rotMat = _computePCARotation(vertices, numVertices);
+  const rotVerts = new Float32Array(numVertices * 3);
+  for (let i = 0; i < numVertices; i++) {
+    const x = vertices[i*3], y = vertices[i*3+1], z = vertices[i*3+2];
+    rotVerts[i*3]   = rotMat[0]*x + rotMat[1]*y + rotMat[2]*z;
+    rotVerts[i*3+1] = rotMat[3]*x + rotMat[4]*y + rotMat[5]*z;
+    rotVerts[i*3+2] = rotMat[6]*x + rotMat[7]*y + rotMat[8]*z;
+  }
+
+  // Compute smooth vertex normals from ROTATED vertex positions.
   // Area-weighted: each face contributes its (unnormalized) cross product
   // to all 3 vertices. Larger faces contribute more. Then normalize.
   const smoothNormals = new Float32Array(numVertices * 3);
@@ -39,9 +51,9 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
 
   for (let f = 0; f < numFaces; f++) {
     const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
-    const v0x = vertices[i0*3], v0y = vertices[i0*3+1], v0z = vertices[i0*3+2];
-    const v1x = vertices[i1*3], v1y = vertices[i1*3+1], v1z = vertices[i1*3+2];
-    const v2x = vertices[i2*3], v2y = vertices[i2*3+1], v2z = vertices[i2*3+2];
+    const v0x = rotVerts[i0*3], v0y = rotVerts[i0*3+1], v0z = rotVerts[i0*3+2];
+    const v1x = rotVerts[i1*3], v1y = rotVerts[i1*3+1], v1z = rotVerts[i1*3+2];
+    const v2x = rotVerts[i2*3], v2y = rotVerts[i2*3+1], v2z = rotVerts[i2*3+2];
 
     const e1x = v1x - v0x, e1y = v1y - v0y, e1z = v1z - v0z;
     const e2x = v2x - v0x, e2y = v2y - v0y, e2z = v2z - v0z;
@@ -55,9 +67,6 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
       smoothNormals[idx * 3 + 1] += ny;
       smoothNormals[idx * 3 + 2] += nz;
     }
-
-    // Accumulate for face assignment: use mean vertex normals (matching PyTorch)
-    // We'll do face assignment after normals are normalized
   }
 
   // Normalize accumulated normals
@@ -70,10 +79,8 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
   }
 
   // Assign face to cube face using mean vertex normal (matching PyTorch)
-  // PyTorch: face_normal = normalize(sum of vertex normals), then argmax dot with 6 axes
   for (let f = 0; f < numFaces; f++) {
     const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
-    // Sum of vertex normals (then find dominant axis)
     const fnx = smoothNormals[i0*3] + smoothNormals[i1*3] + smoothNormals[i2*3];
     const fny = smoothNormals[i0*3+1] + smoothNormals[i1*3+1] + smoothNormals[i2*3+1];
     const fnz = smoothNormals[i0*3+2] + smoothNormals[i1*3+2] + smoothNormals[i2*3+2];
@@ -87,12 +94,12 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     }
   }
 
-  // Compute actual bounding box for UV normalization
+  // Compute bbox from ROTATED vertices for UV normalization
   let bboxMin = [Infinity, Infinity, Infinity];
   let bboxMax = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < numVertices; i++) {
     for (let a = 0; a < 3; a++) {
-      const v = vertices[i * 3 + a];
+      const v = rotVerts[i * 3 + a];
       if (v < bboxMin[a]) bboxMin[a] = v;
       if (v > bboxMax[a]) bboxMax[a] = v;
     }
@@ -103,12 +110,11 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     (bboxMax[2] - bboxMin[2]) || 1,
   ];
 
-  // Normalize vertex positions to [-1, 1] matching PyTorch:
-  // v_norm = (pos - bbox_min) / (bbox_max - bbox_min) * 2 - 1
+  // Normalize ROTATED vertex positions to [-1, 1] matching PyTorch
   const vNorm = new Float32Array(numVertices * 3);
   for (let i = 0; i < numVertices; i++) {
     for (let a = 0; a < 3; a++) {
-      vNorm[i * 3 + a] = (vertices[i * 3 + a] - bboxMin[a]) / bboxRange[a] * 2 - 1;
+      vNorm[i * 3 + a] = (rotVerts[i * 3 + a] - bboxMin[a]) / bboxRange[a] * 2 - 1;
     }
   }
 
@@ -157,19 +163,15 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
       // Map from [-1, 1] to [0, 1] (max_dim_div is always 1.0 in PyTorch)
       rawU[f * 3 + vi] = Math.max(0, Math.min(1, (uc + 1) * 0.5));
       rawV[f * 3 + vi] = Math.max(0, Math.min(1, (vc + 1) * 0.5));
-      depthSum += vertices[idx * 3 + dAxis];
+      depthSum += rotVerts[idx * 3 + dAxis];
     }
     centroidDepth[f] = depthSum / 3;
   }
 
   // --- Step 1b: Rotate UV slices to consistent tangent space ---
-  // Matching PyTorch _rotate_uv_slices_consistent_space: compute per-vertex
-  // tangent from UV gradients, compare against a canonical "expected" tangent
-  // derived from world position/normals, find per-cube-face rotation angle,
-  // and rotate all UVs in that face to align with the canonical direction.
-  // This makes texture flow consistent across cube face boundaries.
+  // Uses ROTATED positions and normals (same coordinate space as UV projection).
   _rotateUVSlicesConsistentSpace(
-    vertices, smoothNormals, faces, rawU, rawV, faceAssignment, numVertices, numFaces
+    rotVerts, smoothNormals, faces, rawU, rawV, faceAssignment, numVertices, numFaces
   );
 
   // --- Step 2: Detect UV overlaps and assign atlas indices ---
@@ -209,6 +211,29 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
   }
 
   // --- Step 3: Build per-face-vertex arrays ---
+  // Compute UNROTATED smooth normals for GLB export (from original vertices).
+  const origNormals = new Float32Array(numVertices * 3);
+  for (let f = 0; f < numFaces; f++) {
+    const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
+    const e1x = vertices[i1*3] - vertices[i0*3];
+    const e1y = vertices[i1*3+1] - vertices[i0*3+1];
+    const e1z = vertices[i1*3+2] - vertices[i0*3+2];
+    const e2x = vertices[i2*3] - vertices[i0*3];
+    const e2y = vertices[i2*3+1] - vertices[i0*3+1];
+    const e2z = vertices[i2*3+2] - vertices[i0*3+2];
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    for (const idx of [i0, i1, i2]) {
+      origNormals[idx*3] += nx; origNormals[idx*3+1] += ny; origNormals[idx*3+2] += nz;
+    }
+  }
+  for (let i = 0; i < numVertices; i++) {
+    const nx = origNormals[i*3], ny = origNormals[i*3+1], nz = origNormals[i*3+2];
+    const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+    origNormals[i*3] /= len; origNormals[i*3+1] /= len; origNormals[i*3+2] /= len;
+  }
+
   const newNumVertices = numFaces * 3;
   const newNumFaces = numFaces;
   const newVertices = new Float32Array(newNumVertices * 3);
@@ -220,12 +245,13 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     for (let vi = 0; vi < 3; vi++) {
       const origIdx = faces[f * 3 + vi];
       const newIdx = f * 3 + vi;
+      // ORIGINAL unrotated vertices and normals for output (triplane queries + GLB export)
       newVertices[newIdx * 3] = vertices[origIdx * 3];
       newVertices[newIdx * 3 + 1] = vertices[origIdx * 3 + 1];
       newVertices[newIdx * 3 + 2] = vertices[origIdx * 3 + 2];
-      newNormals[newIdx * 3] = smoothNormals[origIdx * 3];
-      newNormals[newIdx * 3 + 1] = smoothNormals[origIdx * 3 + 1];
-      newNormals[newIdx * 3 + 2] = smoothNormals[origIdx * 3 + 2];
+      newNormals[newIdx * 3] = origNormals[origIdx * 3];
+      newNormals[newIdx * 3 + 1] = origNormals[origIdx * 3 + 1];
+      newNormals[newIdx * 3 + 2] = origNormals[origIdx * 3 + 2];
       newFaces[f * 3 + vi] = newIdx;
     }
   }
@@ -965,6 +991,141 @@ export async function exportGLB(vertices, vertexNormals, faces, uvs,
   if (normalBytes) { bytes.set(normalBytes, offset); }
 
   return glb;
+}
+
+/**
+ * Compute PCA rotation matrix that aligns the mesh's principal axes
+ * with canonical X/Y/Z. Matching PyTorch _align_mesh_with_main_axis.
+ *
+ * Returns a 9-element Float32Array representing a 3×3 row-major rotation matrix.
+ */
+function _computePCARotation(vertices, numVertices) {
+  // Center vertices
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < numVertices; i++) {
+    cx += vertices[i*3]; cy += vertices[i*3+1]; cz += vertices[i*3+2];
+  }
+  cx /= numVertices; cy /= numVertices; cz /= numVertices;
+
+  // Compute 3×3 covariance matrix (symmetric)
+  let c00 = 0, c01 = 0, c02 = 0, c11 = 0, c12 = 0, c22 = 0;
+  for (let i = 0; i < numVertices; i++) {
+    const dx = vertices[i*3] - cx, dy = vertices[i*3+1] - cy, dz = vertices[i*3+2] - cz;
+    c00 += dx*dx; c01 += dx*dy; c02 += dx*dz;
+    c11 += dy*dy; c12 += dy*dz; c22 += dz*dz;
+  }
+
+  // Jacobi eigendecomposition for symmetric 3×3 matrix.
+  // Matrix A (symmetric, row-major): [c00, c01, c02, c01, c11, c12, c02, c12, c22]
+  // Eigenvector matrix V starts as identity.
+  const A = [c00, c01, c02, c01, c11, c12, c02, c12, c22];
+  const V = [1,0,0, 0,1,0, 0,0,1]; // eigenvectors as columns
+
+  for (let iter = 0; iter < 50; iter++) {
+    // Find largest off-diagonal element
+    let maxVal = 0, p = 0, q = 1;
+    for (let i = 0; i < 3; i++) {
+      for (let j = i + 1; j < 3; j++) {
+        const absVal = Math.abs(A[i*3+j]);
+        if (absVal > maxVal) { maxVal = absVal; p = i; q = j; }
+      }
+    }
+    if (maxVal < 1e-12) break; // converged
+
+    // Compute Jacobi rotation
+    const app = A[p*3+p], aqq = A[q*3+q], apq = A[p*3+q];
+    const tau = (aqq - app) / (2 * apq);
+    const t = Math.sign(tau) / (Math.abs(tau) + Math.sqrt(1 + tau*tau));
+    const c = 1 / Math.sqrt(1 + t*t);
+    const s = t * c;
+
+    // Update A: rotate rows/cols p and q
+    const newA = A.slice();
+    newA[p*3+p] = c*c*app - 2*s*c*apq + s*s*aqq;
+    newA[q*3+q] = s*s*app + 2*s*c*apq + c*c*aqq;
+    newA[p*3+q] = 0; newA[q*3+p] = 0;
+    for (let r = 0; r < 3; r++) {
+      if (r === p || r === q) continue;
+      const arp = A[r*3+p], arq = A[r*3+q];
+      newA[r*3+p] = c*arp - s*arq; newA[p*3+r] = newA[r*3+p];
+      newA[r*3+q] = s*arp + c*arq; newA[q*3+r] = newA[r*3+q];
+    }
+    for (let i = 0; i < 9; i++) A[i] = newA[i];
+
+    // Update V: rotate columns p and q
+    for (let r = 0; r < 3; r++) {
+      const vp = V[r*3+p], vq = V[r*3+q];
+      V[r*3+p] = c*vp - s*vq;
+      V[r*3+q] = s*vp + c*vq;
+    }
+  }
+
+  // Eigenvalues are diagonal of A; eigenvectors are columns of V
+  const eigenvalues = [A[0], A[4], A[8]];
+  // Sort eigenvectors by descending eigenvalue (largest variance = main axis)
+  const order = [0, 1, 2].sort((a, b) => eigenvalues[b] - eigenvalues[a]);
+
+  // Extract sorted eigenvectors
+  let mainAxis = [V[0*3+order[0]], V[1*3+order[0]], V[2*3+order[0]]];
+  let secAxis  = [V[0*3+order[1]], V[1*3+order[1]], V[2*3+order[1]]];
+
+  // Normalize main axis
+  let len = Math.sqrt(mainAxis[0]**2 + mainAxis[1]**2 + mainAxis[2]**2) || 1;
+  mainAxis = mainAxis.map(v => v / len);
+
+  // Orthogonalize secondary against main (Gram-Schmidt)
+  const dot = secAxis[0]*mainAxis[0] + secAxis[1]*mainAxis[1] + secAxis[2]*mainAxis[2];
+  secAxis = secAxis.map((v, i) => v - dot * mainAxis[i]);
+  len = Math.sqrt(secAxis[0]**2 + secAxis[1]**2 + secAxis[2]**2) || 1;
+  secAxis = secAxis.map(v => v / len);
+
+  // Third axis = cross(main, secondary)
+  let thirdAxis = [
+    mainAxis[1]*secAxis[2] - mainAxis[2]*secAxis[1],
+    mainAxis[2]*secAxis[0] - mainAxis[0]*secAxis[2],
+    mainAxis[0]*secAxis[1] - mainAxis[1]*secAxis[0],
+  ];
+  len = Math.sqrt(thirdAxis[0]**2 + thirdAxis[1]**2 + thirdAxis[2]**2) || 1;
+  thirdAxis = thirdAxis.map(v => v / len);
+
+  // Assign each PCA axis to the canonical axis it's most aligned with
+  let mainIdx = _argmaxAbs(mainAxis);
+  let secIdx = _argmaxAbs(secAxis);
+  let thirdIdx = _argmaxAbs(thirdAxis);
+
+  // Resolve conflicts (matching PyTorch logic)
+  const used = new Set([mainIdx, secIdx, thirdIdx]);
+  if (used.size !== 3) {
+    const all = new Set([0, 1, 2]);
+    let curIndex = 1;
+    while (new Set([mainIdx, secIdx, thirdIdx]).size !== 3) {
+      const missing = [...all].filter(x => ![mainIdx, secIdx, thirdIdx].includes(x))[0];
+      if (curIndex === 1) thirdIdx = missing;
+      else if (curIndex === 2) secIdx = missing;
+      curIndex++;
+      if (curIndex > 3) break;
+    }
+  }
+
+  // Build rotation matrix: place each PCA axis in the row of its canonical axis
+  // rot_mat = stack(axes, dim=1).T → axes[canonicalIdx] = pcaAxis → row canonicalIdx = pcaAxis
+  const rotMat = new Float32Array(9);
+  const axes = [mainAxis, secAxis, thirdAxis];
+  const indices = [mainIdx, secIdx, thirdIdx];
+  for (let i = 0; i < 3; i++) {
+    rotMat[indices[i]*3 + 0] = axes[i][0];
+    rotMat[indices[i]*3 + 1] = axes[i][1];
+    rotMat[indices[i]*3 + 2] = axes[i][2];
+  }
+
+  return rotMat;
+}
+
+function _argmaxAbs(v) {
+  const a0 = Math.abs(v[0]), a1 = Math.abs(v[1]), a2 = Math.abs(v[2]);
+  if (a0 >= a1 && a0 >= a2) return 0;
+  if (a1 >= a0 && a1 >= a2) return 1;
+  return 2;
 }
 
 /**
