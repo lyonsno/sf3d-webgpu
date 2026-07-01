@@ -585,10 +585,9 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024, 
   }
 
   // Sub-texel face coverage: for faces whose UV triangle is smaller than
-  // 1 texel, write face centroid position to every texel that any vertex
-  // would sample. Writes unconditionally (overwrites other faces' data)
-  // because the sub-texel face's vertices WILL sample these texels at
-  // render time and must get correct colors.
+  // 1 texel, write face centroid position to unoccupied texels only.
+  // CONDITIONAL write: never overwrite texels already covered by the main
+  // rasterization pass, to avoid corrupting larger faces' data.
   for (let f = 0; f < numFaces; f++) {
     const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
     const u0 = uvs[i0*2], v0 = uvs[i0*2+1];
@@ -621,7 +620,7 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024, 
     tx /= tLen; ty /= tLen; tz /= tLen;
     const bx = fny*tz - fnz*ty, by = fnz*tx - fnx*tz, bz = fnx*ty - fny*tx;
 
-    // Write to every unique texel that any vertex or centroid would sample
+    // Write to unoccupied texels at vertex and centroid positions
     const texels = new Set();
     for (const [pu, pv] of [[u0,v0],[u1,v1],[u2,v2],[(u0+u1+u2)/3,(v0+v1+v2)/3]]) {
       const px = Math.min(resolution-1, Math.max(0, Math.floor(pu * resolution)));
@@ -630,7 +629,7 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024, 
     }
 
     for (const pixIdx of texels) {
-      // Unconditional write — this face's vertices will sample these texels
+      if (mask[pixIdx]) continue; // don't overwrite correctly-rasterized texels
       mask[pixIdx] = 1;
       positions3D[pixIdx * 3] = cx;
       positions3D[pixIdx * 3 + 1] = cy;
@@ -745,9 +744,10 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     normalMap[texIdx * 4 + 3] = 255;
   }
 
-  // Dilate both textures
-  _dilateTexture(albedo, mask, resolution, 20);
-  _dilateTexture(normalMap, mask, resolution, 20);
+  // Dilate both textures (matching PyTorch: resolution // 150 ≈ 7 at 1024)
+  const dilateIters = Math.max(1, Math.round(resolution / 150));
+  _dilateTexture(albedo, mask, resolution, dilateIters);
+  _dilateTexture(normalMap, mask, resolution, dilateIters);
 
   return { albedo, normalMap };
 }
