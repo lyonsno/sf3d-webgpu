@@ -138,6 +138,33 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
   _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, GRID, 0);
   _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, GRID, 6);
 
+  // --- Step 2b: Per-island UV normalization for secondary tier (slots 6-11) ---
+  // Matching PyTorch _handle_slice_uvs: rescale all faces in each secondary
+  // slot so their UVs fill [0,1], with max 2x magnification (clip denom at 0.5).
+  for (let slot = 6; slot < 12; slot++) {
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    let count = 0;
+    for (let f = 0; f < numFaces; f++) {
+      if (atlasIndex[f] !== slot) continue;
+      count++;
+      for (let vi = 0; vi < 3; vi++) {
+        const u = rawU[f*3+vi], v = rawV[f*3+vi];
+        if (u < minU) minU = u; if (u > maxU) maxU = u;
+        if (v < minV) minV = v; if (v > maxV) maxV = v;
+      }
+    }
+    if (count === 0) continue;
+    const rangeU = Math.max(maxU - minU, 0.5); // clip at 0.5 = max 2x magnification
+    const rangeV = Math.max(maxV - minV, 0.5);
+    for (let f = 0; f < numFaces; f++) {
+      if (atlasIndex[f] !== slot) continue;
+      for (let vi = 0; vi < 3; vi++) {
+        rawU[f*3+vi] = (rawU[f*3+vi] - minU) / rangeU;
+        rawV[f*3+vi] = (rawV[f*3+vi] - minV) / rangeV;
+      }
+    }
+  }
+
   // --- Step 3: Build per-face-vertex arrays ---
   const newNumVertices = numFaces * 3;
   const newNumFaces = numFaces;
@@ -488,41 +515,58 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024, 
     }
   }
 
-  // Centroid fallback: ensure every face gets at least one texel.
-  // Sub-texel faces in small atlas cells would otherwise map to black pixels.
+  // Sub-texel face coverage: for faces whose UV triangle is smaller than
+  // 1 texel, write face centroid position to every texel that any vertex
+  // would sample. Writes unconditionally (overwrites other faces' data)
+  // because the sub-texel face's vertices WILL sample these texels at
+  // render time and must get correct colors.
   for (let f = 0; f < numFaces; f++) {
     const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
-    const cu = (uvs[i0*2] + uvs[i1*2] + uvs[i2*2]) / 3;
-    const cv = (uvs[i0*2+1] + uvs[i1*2+1] + uvs[i2*2+1]) / 3;
-    const cpx = Math.min(resolution - 1, Math.max(0, Math.floor(cu * resolution)));
-    const cpy = Math.min(resolution - 1, Math.max(0, Math.floor(cv * resolution)));
-    const cIdx = cpy * resolution + cpx;
+    const u0 = uvs[i0*2], v0 = uvs[i0*2+1];
+    const u1 = uvs[i1*2], v1 = uvs[i1*2+1];
+    const u2 = uvs[i2*2], v2 = uvs[i2*2+1];
 
-    if (!mask[cIdx]) {
-      mask[cIdx] = 1;
-      const p0x = positions[i0*3], p0y = positions[i0*3+1], p0z = positions[i0*3+2];
-      const p1x = positions[i1*3], p1y = positions[i1*3+1], p1z = positions[i1*3+2];
-      const p2x = positions[i2*3], p2y = positions[i2*3+1], p2z = positions[i2*3+2];
-      positions3D[cIdx * 3] = (p0x + p1x + p2x) / 3;
-      positions3D[cIdx * 3 + 1] = (p0y + p1y + p2y) / 3;
-      positions3D[cIdx * 3 + 2] = (p0z + p1z + p2z) / 3;
+    // Check UV triangle area in texels
+    const texelArea = Math.abs((u1-u0)*(v2-v0) - (u2-u0)*(v1-v0)) * 0.5 * resolution * resolution;
+    if (texelArea >= 1.0) continue; // adequately rasterized, skip
 
-      // Compute face TBN for centroid texel
-      const e1x = p1x-p0x, e1y = p1y-p0y, e1z = p1z-p0z;
-      const e2x = p2x-p0x, e2y = p2y-p0y, e2z = p2z-p0z;
-      let fnx = e1y*e2z - e1z*e2y;
-      let fny = e1z*e2x - e1x*e2z;
-      let fnz = e1x*e2y - e1y*e2x;
-      const fnLen = Math.sqrt(fnx*fnx + fny*fny + fnz*fnz) || 1;
-      fnx /= fnLen; fny /= fnLen; fnz /= fnLen;
-      let tx = 1, ty = 0, tz = 0;
-      if (Math.abs(fnx) > 0.9) { tx = 0; ty = 1; }
-      const tDotN = tx*fnx + ty*fny + tz*fnz;
-      tx -= tDotN*fnx; ty -= tDotN*fny; tz -= tDotN*fnz;
-      const tLen = Math.sqrt(tx*tx + ty*ty + tz*tz) || 1;
-      tx /= tLen; ty /= tLen; tz /= tLen;
-      const bx = fny*tz - fnz*ty, by = fnz*tx - fnx*tz, bz = fnx*ty - fny*tx;
-      const tbnBase = cIdx * 9;
+    // Face centroid in 3D
+    const p0x = positions[i0*3], p0y = positions[i0*3+1], p0z = positions[i0*3+2];
+    const p1x = positions[i1*3], p1y = positions[i1*3+1], p1z = positions[i1*3+2];
+    const p2x = positions[i2*3], p2y = positions[i2*3+1], p2z = positions[i2*3+2];
+    const cx = (p0x + p1x + p2x) / 3;
+    const cy = (p0y + p1y + p2y) / 3;
+    const cz = (p0z + p1z + p2z) / 3;
+
+    // Face TBN
+    const e1x = p1x-p0x, e1y = p1y-p0y, e1z = p1z-p0z;
+    const e2x = p2x-p0x, e2y = p2y-p0y, e2z = p2z-p0z;
+    let fnx = e1y*e2z - e1z*e2y, fny = e1z*e2x - e1x*e2z, fnz = e1x*e2y - e1y*e2x;
+    const fnLen = Math.sqrt(fnx*fnx + fny*fny + fnz*fnz) || 1;
+    fnx /= fnLen; fny /= fnLen; fnz /= fnLen;
+    let tx = 1, ty = 0, tz = 0;
+    if (Math.abs(fnx) > 0.9) { tx = 0; ty = 1; }
+    const tDotN = tx*fnx + ty*fny + tz*fnz;
+    tx -= tDotN*fnx; ty -= tDotN*fny; tz -= tDotN*fnz;
+    const tLen = Math.sqrt(tx*tx + ty*ty + tz*tz) || 1;
+    tx /= tLen; ty /= tLen; tz /= tLen;
+    const bx = fny*tz - fnz*ty, by = fnz*tx - fnx*tz, bz = fnx*ty - fny*tx;
+
+    // Write to every unique texel that any vertex or centroid would sample
+    const texels = new Set();
+    for (const [pu, pv] of [[u0,v0],[u1,v1],[u2,v2],[(u0+u1+u2)/3,(v0+v1+v2)/3]]) {
+      const px = Math.min(resolution-1, Math.max(0, Math.floor(pu * resolution)));
+      const py = Math.min(resolution-1, Math.max(0, Math.floor(pv * resolution)));
+      texels.add(py * resolution + px);
+    }
+
+    for (const pixIdx of texels) {
+      // Unconditional write — this face's vertices will sample these texels
+      mask[pixIdx] = 1;
+      positions3D[pixIdx * 3] = cx;
+      positions3D[pixIdx * 3 + 1] = cy;
+      positions3D[pixIdx * 3 + 2] = cz;
+      const tbnBase = pixIdx * 9;
       tbnData[tbnBase] = tx; tbnData[tbnBase+1] = ty; tbnData[tbnBase+2] = tz;
       tbnData[tbnBase+3] = bx; tbnData[tbnBase+4] = by; tbnData[tbnBase+5] = bz;
       tbnData[tbnBase+6] = fnx; tbnData[tbnBase+7] = fny; tbnData[tbnBase+8] = fnz;
