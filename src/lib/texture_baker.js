@@ -56,15 +56,8 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
       smoothNormals[idx * 3 + 2] += nz;
     }
 
-    // Assign face to dominant cube axis
-    const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
-    if (ax >= ay && ax >= az) {
-      faceAssignment[f] = nx > 0 ? 0 : 1;
-    } else if (ay >= ax && ay >= az) {
-      faceAssignment[f] = ny > 0 ? 2 : 3;
-    } else {
-      faceAssignment[f] = nz > 0 ? 4 : 5;
-    }
+    // Accumulate for face assignment: use mean vertex normals (matching PyTorch)
+    // We'll do face assignment after normals are normalized
   }
 
   // Normalize accumulated normals
@@ -74,6 +67,24 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
     smoothNormals[i*3] /= len;
     smoothNormals[i*3+1] /= len;
     smoothNormals[i*3+2] /= len;
+  }
+
+  // Assign face to cube face using mean vertex normal (matching PyTorch)
+  // PyTorch: face_normal = normalize(sum of vertex normals), then argmax dot with 6 axes
+  for (let f = 0; f < numFaces; f++) {
+    const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
+    // Sum of vertex normals (then find dominant axis)
+    const fnx = smoothNormals[i0*3] + smoothNormals[i1*3] + smoothNormals[i2*3];
+    const fny = smoothNormals[i0*3+1] + smoothNormals[i1*3+1] + smoothNormals[i2*3+1];
+    const fnz = smoothNormals[i0*3+2] + smoothNormals[i1*3+2] + smoothNormals[i2*3+2];
+    const ax = Math.abs(fnx), ay = Math.abs(fny), az = Math.abs(fnz);
+    if (ax >= ay && ax >= az) {
+      faceAssignment[f] = fnx > 0 ? 0 : 1;
+    } else if (ay >= ax && ay >= az) {
+      faceAssignment[f] = fny > 0 ? 2 : 3;
+    } else {
+      faceAssignment[f] = fnz > 0 ? 4 : 5;
+    }
   }
 
   // Compute actual bounding box for UV normalization
@@ -86,48 +97,80 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
       if (v > bboxMax[a]) bboxMax[a] = v;
     }
   }
-  // Half-extents per axis (like a per-axis radius)
-  const extent = [
-    Math.max(Math.abs(bboxMin[0]), Math.abs(bboxMax[0])) || 1,
-    Math.max(Math.abs(bboxMin[1]), Math.abs(bboxMax[1])) || 1,
-    Math.max(Math.abs(bboxMin[2]), Math.abs(bboxMax[2])) || 1,
+  const bboxRange = [
+    (bboxMax[0] - bboxMin[0]) || 1,
+    (bboxMax[1] - bboxMin[1]) || 1,
+    (bboxMax[2] - bboxMin[2]) || 1,
   ];
 
-  // UV projection axes per cube face:
-  //   +X: (z, y)   -X: (-z, y)
-  //   +Y: (x, z)   -Y: (x, -z)
-  //   +Z: (x, y)   -Z: (-x, y)
-  const projAxes = [
-    [2, 1, false], [2, 1, true],
-    [0, 2, false], [0, 2, true],
-    [0, 1, false], [0, 1, true],
-  ];
+  // Normalize vertex positions to [-1, 1] matching PyTorch:
+  // v_norm = (pos - bbox_min) / (bbox_max - bbox_min) * 2 - 1
+  const vNorm = new Float32Array(numVertices * 3);
+  for (let i = 0; i < numVertices; i++) {
+    for (let a = 0; a < 3; a++) {
+      vNorm[i * 3 + a] = (vertices[i * 3 + a] - bboxMin[a]) / bboxRange[a] * 2 - 1;
+    }
+  }
+
+  // UV projection axes matching PyTorch exactly:
+  //   +X (0): uc = y,  vc = -z
+  //   -X (1): uc = y,  vc = -z
+  //   +Y (2): uc = x,  vc = -z
+  //   -Y (3): uc = x,  vc = -z
+  //   +Z (4): uc = x,  vc = y
+  //   -Z (5): uc = x,  vc = -y
+  // abs_axis uses the corresponding position axis for max_dim_div
+  // +X/-X use abs(x), +Y/-Y use abs(y), +Z/-Z use abs(z)
 
   // Depth axis per cube face (perpendicular to projection plane)
   const depthAxis = [0, 0, 1, 1, 2, 2];
   const depthKeepMax = [true, false, true, false, true, false];
 
   // --- Step 1: Compute raw [0,1] UVs and depth centroids ---
+  // Matching PyTorch: project normalized positions, divide by max_dim_div per face, then to [0,1]
   const rawU = new Float32Array(numFaces * 3);
   const rawV = new Float32Array(numFaces * 3);
   const centroidDepth = new Float32Array(numFaces);
 
   for (let f = 0; f < numFaces; f++) {
     const cubeF = faceAssignment[f];
-    const [ax0, ax1, flip] = projAxes[cubeF];
     const dAxis = depthAxis[cubeF];
+
     let depthSum = 0;
     for (let vi = 0; vi < 3; vi++) {
-      const origIdx = faces[f * 3 + vi];
-      let u = vertices[origIdx * 3 + ax0];
-      let vv = vertices[origIdx * 3 + ax1];
-      if (flip) u = -u;
-      rawU[f * 3 + vi] = (u / extent[ax0] + 1) * 0.5;
-      rawV[f * 3 + vi] = (vv / extent[ax1] + 1) * 0.5;
-      depthSum += vertices[origIdx * 3 + dAxis];
+      const idx = faces[f * 3 + vi];
+      let uc, vc;
+      // Project matching PyTorch axes (positions already in [-1, 1])
+      if (cubeF <= 1) {       // +X, -X: uc = y, vc = -z
+        uc = vNorm[idx * 3 + 1];
+        vc = -vNorm[idx * 3 + 2];
+      } else if (cubeF <= 3) { // +Y, -Y: uc = x, vc = -z
+        uc = vNorm[idx * 3];
+        vc = -vNorm[idx * 3 + 2];
+      } else if (cubeF === 4) { // +Z: uc = x, vc = y
+        uc = vNorm[idx * 3];
+        vc = vNorm[idx * 3 + 1];
+      } else {                  // -Z: uc = x, vc = -y
+        uc = vNorm[idx * 3];
+        vc = -vNorm[idx * 3 + 1];
+      }
+      // Map from [-1, 1] to [0, 1] (max_dim_div is always 1.0 in PyTorch)
+      rawU[f * 3 + vi] = Math.max(0, Math.min(1, (uc + 1) * 0.5));
+      rawV[f * 3 + vi] = Math.max(0, Math.min(1, (vc + 1) * 0.5));
+      depthSum += vertices[idx * 3 + dAxis];
     }
     centroidDepth[f] = depthSum / 3;
   }
+
+  // --- Step 1b: Rotate UV slices to consistent tangent space ---
+  // Matching PyTorch _rotate_uv_slices_consistent_space: compute per-vertex
+  // tangent from UV gradients, compare against a canonical "expected" tangent
+  // derived from world position/normals, find per-cube-face rotation angle,
+  // and rotate all UVs in that face to align with the canonical direction.
+  // This makes texture flow consistent across cube face boundaries.
+  _rotateUVSlicesConsistentSpace(
+    vertices, smoothNormals, faces, rawU, rawV, faceAssignment, numVertices, numFaces
+  );
 
   // --- Step 2: Detect UV overlaps and assign atlas indices ---
   // 0-5 = primary, 6-11 = first overlap, 12 = remaining
@@ -922,6 +965,180 @@ export async function exportGLB(vertices, vertexNormals, faces, uvs,
   if (normalBytes) { bytes.set(normalBytes, offset); }
 
   return glb;
+}
+
+/**
+ * Rotate UV slices so adjacent cube faces have consistent texture flow.
+ *
+ * For each cube face, computes the mean UV-derived tangent direction and
+ * compares it against a canonical "expected" tangent derived from world-space
+ * position and normals. Rotates all UVs in that face by the angle between
+ * actual and expected tangents, then renormalizes to [0,1].
+ *
+ * Matches PyTorch's _rotate_uv_slices_consistent_space.
+ */
+function _rotateUVSlicesConsistentSpace(
+  vertices, smoothNormals, faces, rawU, rawV, faceAssignment, numVertices, numFaces
+) {
+  // Step 1: Compute per-vertex tangents from UV gradients (area-weighted)
+  const tangents = new Float32Array(numVertices * 3);
+  const tanCount = new Float32Array(numVertices * 3);
+
+  for (let f = 0; f < numFaces; f++) {
+    const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
+
+    // Position edges
+    const dp1x = vertices[i1*3] - vertices[i0*3];
+    const dp1y = vertices[i1*3+1] - vertices[i0*3+1];
+    const dp1z = vertices[i1*3+2] - vertices[i0*3+2];
+    const dp2x = vertices[i2*3] - vertices[i0*3];
+    const dp2y = vertices[i2*3+1] - vertices[i0*3+1];
+    const dp2z = vertices[i2*3+2] - vertices[i0*3+2];
+
+    // UV edges
+    const du1 = rawU[f*3+1] - rawU[f*3];
+    const dv1 = rawV[f*3+1] - rawV[f*3];
+    const du2 = rawU[f*3+2] - rawU[f*3];
+    const dv2 = rawV[f*3+2] - rawV[f*3];
+
+    // Tangent numerator: dpos1 * dv2 - dpos2 * dv1
+    const tx = dp1x * dv2 - dp2x * dv1;
+    const ty = dp1y * dv2 - dp2y * dv1;
+    const tz = dp1z * dv2 - dp2z * dv1;
+
+    // Denominator: du1 * dv2 - dv1 * du2
+    const denom = Math.max(du1 * dv2 - dv1 * du2, 1e-6);
+    const ttx = tx / denom, tty = ty / denom, ttz = tz / denom;
+
+    // Accumulate to all 3 vertices
+    for (const idx of [i0, i1, i2]) {
+      tangents[idx*3] += ttx;
+      tangents[idx*3+1] += tty;
+      tangents[idx*3+2] += ttz;
+      tanCount[idx*3] += 1;
+      tanCount[idx*3+1] += 1;
+      tanCount[idx*3+2] += 1;
+    }
+  }
+
+  // Average, normalize, then Gram-Schmidt orthogonalize against normals
+  for (let i = 0; i < numVertices; i++) {
+    const c = tanCount[i*3] || 1;
+    let tx = tangents[i*3] / c, ty = tangents[i*3+1] / c, tz = tangents[i*3+2] / c;
+
+    // Normalize
+    let len = Math.sqrt(tx*tx + ty*ty + tz*tz) || 1;
+    tx /= len; ty /= len; tz /= len;
+
+    // Gram-Schmidt: t = normalize(t - dot(t, n) * n)
+    const nx = smoothNormals[i*3], ny = smoothNormals[i*3+1], nz = smoothNormals[i*3+2];
+    const tdn = tx*nx + ty*ny + tz*nz;
+    tx -= tdn * nx; ty -= tdn * ny; tz -= tdn * nz;
+    len = Math.sqrt(tx*tx + ty*ty + tz*tz) || 1;
+    tangents[i*3] = tx / len;
+    tangents[i*3+1] = ty / len;
+    tangents[i*3+2] = tz / len;
+  }
+
+  // Step 2: Compute expected tangents per vertex
+  // expected = normalize(cross(normal, cross([-y, x, 0], normal)))
+  const expectedTangents = new Float32Array(numVertices * 3);
+  for (let i = 0; i < numVertices; i++) {
+    const nx = smoothNormals[i*3], ny = smoothNormals[i*3+1], nz = smoothNormals[i*3+2];
+    // pos_stack = [-y, x, 0]
+    const px = -vertices[i*3+1], py = vertices[i*3], pz = 0;
+
+    // inner = cross(pos_stack, normal)
+    const ix = py * nz - pz * ny;
+    const iy = pz * nx - px * nz;
+    const iz = px * ny - py * nx;
+
+    // outer = cross(normal, inner)
+    let ex = ny * iz - nz * iy;
+    let ey = nz * ix - nx * iz;
+    let ez = nx * iy - ny * ix;
+
+    // Normalize
+    const len = Math.sqrt(ex*ex + ey*ey + ez*ez) || 1;
+    expectedTangents[i*3] = ex / len;
+    expectedTangents[i*3+1] = ey / len;
+    expectedTangents[i*3+2] = ez / len;
+  }
+
+  // Step 3: Per cube face, compute mean actual and expected tangent (3D),
+  // find 2D rotation angle, rotate UVs
+  for (let slot = 0; slot < 6; slot++) {
+    // Collect mean actual and expected tangents across all faces in this slot
+    // (averaged over all 3 vertices of each face, matching PyTorch's mean(dim=(0,1)))
+    let actSumX = 0, actSumY = 0, actSumZ = 0;
+    let expSumX = 0, expSumY = 0, expSumZ = 0;
+    let count = 0;
+
+    for (let f = 0; f < numFaces; f++) {
+      if (faceAssignment[f] !== slot) continue;
+      for (let vi = 0; vi < 3; vi++) {
+        const idx = faces[f * 3 + vi];
+        actSumX += tangents[idx*3];
+        actSumY += tangents[idx*3+1];
+        actSumZ += tangents[idx*3+2];
+        expSumX += expectedTangents[idx*3];
+        expSumY += expectedTangents[idx*3+1];
+        expSumZ += expectedTangents[idx*3+2];
+        count++;
+      }
+    }
+
+    if (count === 0) continue;
+
+    // Mean tangent vectors (3D)
+    const amx = actSumX / count, amy = actSumY / count, amz = actSumZ / count;
+    const emx = expSumX / count, emy = expSumY / count, emz = expSumZ / count;
+
+    // 2D angle between actual and expected: dot and cross of 3D vectors
+    // PyTorch does dot and cross on the mean 3D tangent vectors directly
+    const dot = amx * emx + amy * emy + amz * emz;
+    const cross = amx * emy - amy * emx;
+    const angle = Math.atan2(cross, dot);
+
+    const cosA = Math.cos(angle), sinA = Math.sin(angle);
+
+    // Rotate all UVs in this slot:
+    // Center to [-1, 1], rotate, then rescale to [0, 1]
+    // First pass: rotate
+    for (let f = 0; f < numFaces; f++) {
+      if (faceAssignment[f] !== slot) continue;
+      for (let vi = 0; vi < 3; vi++) {
+        const idx = f * 3 + vi;
+        const u = rawU[idx] * 2 - 1;
+        const v = rawV[idx] * 2 - 1;
+        rawU[idx] = cosA * u - sinA * v;
+        rawV[idx] = sinA * u + cosA * v;
+      }
+    }
+
+    // Second pass: rescale to [0, 1]
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (let f = 0; f < numFaces; f++) {
+      if (faceAssignment[f] !== slot) continue;
+      for (let vi = 0; vi < 3; vi++) {
+        const idx = f * 3 + vi;
+        if (rawU[idx] < minU) minU = rawU[idx];
+        if (rawU[idx] > maxU) maxU = rawU[idx];
+        if (rawV[idx] < minV) minV = rawV[idx];
+        if (rawV[idx] > maxV) maxV = rawV[idx];
+      }
+    }
+    const rangeU = maxU - minU || 1;
+    const rangeV = maxV - minV || 1;
+    for (let f = 0; f < numFaces; f++) {
+      if (faceAssignment[f] !== slot) continue;
+      for (let vi = 0; vi < 3; vi++) {
+        const idx = f * 3 + vi;
+        rawU[idx] = (rawU[idx] - minU) / rangeU;
+        rawV[idx] = (rawV[idx] - minV) / rangeV;
+      }
+    }
+  }
 }
 
 function _textureToJPEG(texture, resolution, quality = 0.92) {
