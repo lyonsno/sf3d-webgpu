@@ -96,8 +96,11 @@ export async function estimateMaterials(device, imagePixels, imgWidth, imgHeight
   const embeddings = _patchEmbed(
     _preprocessForCLIP(imagePixels, imgWidth, imgHeight), weights);
 
-  // Step 2: GPU visual transformer
-  const features = await _runVisualTransformer(device, embeddings, weights);
+  // Step 2: Visual transformer (CPU fp32 for precision, GPU for speed)
+  const USE_CPU_TRANSFORMER = true; // Toggle for fp16 precision testing
+  const features = USE_CPU_TRANSFORMER
+    ? _runVisualTransformerCPU(embeddings, weights)
+    : await _runVisualTransformer(device, embeddings, weights);
 
   // Step 3: CPU heads (tiny)
   const roughness = _runHead(features, weights, 'roughness');
@@ -161,6 +164,146 @@ function _patchEmbed(image, weights) {
   // Add positional embedding
   for (let i = 0; i < NUM_TOKENS * HIDDEN_DIM; i++) result[i] += posEmb[i];
   return result;
+}
+
+function _runVisualTransformerCPU(embeddings, weights) {
+  const N = NUM_TOKENS, D = HIDDEN_DIM;
+  const g = (n) => weights._rawGetCPU(n);
+  let x = new Float32Array(embeddings);
+
+  // Pre-LN
+  x = _cpuLayerNorm(x, N, D, g('image_estimator.model.visual.ln_pre.weight'), g('image_estimator.model.visual.ln_pre.bias'));
+
+  for (let b = 0; b < NUM_BLOCKS; b++) {
+    const p = `image_estimator.model.visual.transformer.resblocks.${b}`;
+
+    // LN1
+    const ln1 = _cpuLayerNorm(x, N, D, g(`${p}.ln_1.weight`), g(`${p}.ln_1.bias`));
+
+    // Fused QKV: [N, D] × [D, 3D] → [N, 3D]
+    const qkv = _cpuMatmulBias(ln1, N, D, 3*D, g(`${p}.attn.in_proj_weight`), g(`${p}.attn.in_proj_bias`));
+
+    // Self-attention
+    const attnOut = _cpuFusedAttn(qkv, N, NUM_HEADS, HEAD_DIM);
+
+    // Out proj
+    const proj = _cpuMatmulBias(attnOut, N, D, D, g(`${p}.attn.out_proj.weight`), g(`${p}.attn.out_proj.bias`));
+
+    // Residual
+    x = _cpuAdd(x, proj);
+
+    // LN2
+    const ln2 = _cpuLayerNorm(x, N, D, g(`${p}.ln_2.weight`), g(`${p}.ln_2.bias`));
+
+    // MLP
+    const fc = _cpuMatmulBias(ln2, N, D, MLP_DIM, g(`${p}.mlp.c_fc.weight`), g(`${p}.mlp.c_fc.bias`));
+    const gelu = _cpuGelu(fc);
+    const mlpOut = _cpuMatmulBias(gelu, N, MLP_DIM, D, g(`${p}.mlp.c_proj.weight`), g(`${p}.mlp.c_proj.bias`));
+
+    x = _cpuAdd(x, mlpOut);
+  }
+
+  // Post-LN
+  x = _cpuLayerNorm(x, N, D, g('image_estimator.model.visual.ln_post.weight'), g('image_estimator.model.visual.ln_post.bias'));
+
+  // CLS → project: proj stored as [768, 512], PyTorch does cls @ proj
+  const cls = x.slice(0, D);
+  const projW = g('image_estimator.model.visual.proj');
+  const features = new Float32Array(PROJ_DIM);
+  for (let d = 0; d < PROJ_DIM; d++) {
+    let sum = 0;
+    for (let k = 0; k < D; k++) sum += cls[k] * projW[k * PROJ_DIM + d];
+    features[d] = sum;
+  }
+  return features;
+}
+
+function _cpuLayerNorm(x, N, D, weight, bias) {
+  const out = new Float32Array(N * D);
+  for (let n = 0; n < N; n++) {
+    let mean = 0;
+    for (let d = 0; d < D; d++) mean += x[n * D + d];
+    mean /= D;
+    let variance = 0;
+    for (let d = 0; d < D; d++) { const diff = x[n*D+d] - mean; variance += diff * diff; }
+    variance /= D;
+    const invStd = 1.0 / Math.sqrt(variance + 1e-5);
+    for (let d = 0; d < D; d++) {
+      out[n*D+d] = (x[n*D+d] - mean) * invStd * weight[d] + bias[d];
+    }
+  }
+  return out;
+}
+
+function _cpuMatmulBias(x, rows, inDim, outDim, weight, bias) {
+  // Weight may be [inDim, outDim] (transposed) or [outDim, inDim] (original PyTorch).
+  // Detect layout from weight length: if weight.length === inDim * outDim, check shape.
+  // The weight file stores CLIP weights as [outDim, inDim] (NOT transposed).
+  // So we compute: output[r, o] = sum_k x[r, k] * weight[o * inDim + k] + bias[o]
+  // This is x @ weight.T + bias, matching PyTorch's F.linear(x, weight, bias).
+  const out = new Float32Array(rows * outDim);
+  for (let r = 0; r < rows; r++) {
+    for (let o = 0; o < outDim; o++) {
+      let sum = bias[o];
+      for (let k = 0; k < inDim; k++) sum += x[r*inDim+k] * weight[o*inDim+k];
+      out[r*outDim+o] = sum;
+    }
+  }
+  return out;
+}
+
+function _cpuFusedAttn(qkv, N, numHeads, headDim) {
+  const D = numHeads * headDim;
+  const scale = 1.0 / Math.sqrt(headDim);
+  const out = new Float32Array(N * D);
+  for (let h = 0; h < numHeads; h++) {
+    for (let qi = 0; qi < N; qi++) {
+      // Compute scores
+      const scores = new Float32Array(N);
+      let maxS = -Infinity;
+      for (let ki = 0; ki < N; ki++) {
+        let s = 0;
+        for (let d = 0; d < headDim; d++) {
+          s += qkv[qi*3*D + h*headDim + d] * qkv[ki*3*D + D + h*headDim + d];
+        }
+        scores[ki] = s * scale;
+        if (scores[ki] > maxS) maxS = scores[ki];
+      }
+      // Softmax
+      let sumE = 0;
+      for (let ki = 0; ki < N; ki++) { scores[ki] = Math.exp(scores[ki] - maxS); sumE += scores[ki]; }
+      const inv = 1.0 / sumE;
+      // Weighted sum of V
+      for (let d = 0; d < headDim; d++) {
+        let val = 0;
+        for (let ki = 0; ki < N; ki++) {
+          val += scores[ki] * inv * qkv[ki*3*D + 2*D + h*headDim + d];
+        }
+        out[qi*D + h*headDim + d] = val;
+      }
+    }
+  }
+  return out;
+}
+
+function _cpuAdd(a, b) {
+  const out = new Float32Array(a.length);
+  for (let i = 0; i < a.length; i++) out[i] = a[i] + b[i];
+  return out;
+}
+
+function _cpuGelu(x) {
+  const out = new Float32Array(x.length);
+  for (let i = 0; i < x.length; i++) {
+    const v = x[i];
+    // Exact GELU using erf approximation (Abramowitz & Stegun)
+    const absv = Math.abs(v * 0.7071067811865476);
+    const t = 1.0 / (1.0 + 0.3275911 * absv);
+    const erf = 1.0 - (((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592)*t * Math.exp(-absv*absv);
+    const erfVal = v >= 0 ? erf : -erf;
+    out[i] = v * 0.5 * (1.0 + erfVal);
+  }
+  return out;
 }
 
 async function _runVisualTransformer(device, embeddings, weights) {
@@ -413,6 +556,8 @@ function _runHead(features, weights, headName) {
 }
 
 function _cpuLinear(x, weight, bias) {
+  // Head weights are transposed by converter: [inDim, outDim]
+  // output[o] = sum_i x[i] * weight[i * outDim + o] + bias[o]
   const inDim = x.length, outDim = bias.length;
   const out = new Float32Array(outDim);
   for (let o = 0; o < outDim; o++) {
