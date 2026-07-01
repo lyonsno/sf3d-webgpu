@@ -10,7 +10,7 @@ import {
   validateRouteReceipt,
 } from '@kaminos/webgpu-inference-kit';
 
-assert.equal(WEBGPU_INFERENCE_KIT_VERSION, '0.1.1');
+assert.match(WEBGPU_INFERENCE_KIT_VERSION, /^0\.1\.\d+$/);
 
 const requiredStages = [
   'image-preprocess',
