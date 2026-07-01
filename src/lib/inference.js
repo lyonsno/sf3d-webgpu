@@ -226,15 +226,18 @@ export function initPipelines(device) {
  */
 export async function runInference(device, pipelines, weights, imageElement, onProgress) {
   const report = (msg) => { if (onProgress) onProgress(msg); console.log(msg); };
+  const _stageTimings = {};
+  let _stageStart;
 
   // 1. Preprocess image (CPU)
+  _stageStart = performance.now();
   report('Preprocessing image...');
   const imageData = await preprocessImage(imageElement,
     imageElement.naturalWidth || imageElement.width,
     imageElement.naturalHeight || imageElement.height);
   const imageBuf = createStorageBuffer(device, imageData);
 
-  // 2. Camera embedding (GPU)
+  // 2. Camera embedding (GPU) — counted as part of image-preprocess
   report('Computing camera embedding...');
   const cameraInput = computeCameraInput();
   const cameraInputBuf = createStorageBuffer(device, cameraInput);
@@ -266,7 +269,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     console.log(`Image CHW pixel[256,256]: R=${rC.toFixed(6)}, G=${gC.toFixed(6)}, B=${bC.toFixed(6)}`);
   }
 
+  _stageTimings['image-preprocess'] = performance.now() - _stageStart;
+
   // 3. DINOv2 image tokenization (GPU)
+  _stageStart = performance.now();
   report('Running DINOv2 backbone...');
   const encoder2 = device.createCommandEncoder();
   const dinov2Result = pipelines.imageTokenizer.encode(
@@ -299,7 +305,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     console.log(`Camera embedding diagnostic: min=${min}, max=${max}, NaN=${nan}, zero=${zero}/${camSample.length}`);
   }
 
+  _stageTimings['dinov2-tokenizer'] = performance.now() - _stageStart;
+
   // 4. Two-stream backbone (GPU)
+  _stageStart = performance.now();
   report('Running two-stream backbone...');
 
   // Rearrange tokenizer embeddings from [3, 1024, 96, 96] to [1024, 27648]
@@ -438,7 +447,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   //   proj_out (permuted):  min=-5.68, max=5.44, std=0.36
   //   final (with residual): min=-5.67, max=5.45, std=0.36
 
-  // 5. PixelShuffle post-processing (GPU)
+  _stageTimings['two-stream-backbone'] = performance.now() - _stageStart;
+
+  // 5. PixelShuffle post-processing (counted as part of triplane-decode)
+  _stageStart = performance.now();
   report('Running post-processor...');
   const encoder4 = device.createCommandEncoder();
   const triplaneResult = dispatchPostProcessor(
@@ -508,7 +520,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     }
   }
 
-  // 6. Triplane query + decoder (GPU)
+  // 6. Triplane query + decoder (GPU) — still part of triplane-decode timing
   report('Querying triplane and decoding...');
 
   // Load tet grid data
@@ -587,7 +599,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     console.log(`After tanh/160: min=${(Math.tanh(oMin)/160).toFixed(6)}, max=${(Math.tanh(oMax)/160).toFixed(6)}`);
   }
 
+  _stageTimings['triplane-decode'] = performance.now() - _stageStart;
+
   // 7. Marching tetrahedra (CPU)
+  _stageStart = performance.now();
   report('Extracting mesh...');
   // Grid vertices need to be in model space with deformation applied
   // The grid is in [0, 1], scale to bbox for the marching tet
@@ -595,6 +610,8 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     gridPositions, sdf, tetData.indices, vertexOffsets, CONFIG.isosurfaceResolution);
 
   report(`Mesh extracted: ${mesh.numVertices} vertices, ${mesh.numFaces} faces`);
+
+  _stageTimings['marching-tet'] = performance.now() - _stageStart;
 
   // Mesh vertices are already in bbox space (from gridPositions which was pre-scaled)
   return {
@@ -606,6 +623,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     _triplanesBuf: triplaneResult.buffer,
     _triplaneDecoder: pipelines.triplaneDecoder,
     _decoderWeights: weights.decoder,
+    _stageTimings,
   };
 }
 

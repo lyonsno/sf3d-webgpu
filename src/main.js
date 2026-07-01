@@ -14,6 +14,15 @@ import { loadWeights } from './lib/weights.js';
 import { initPipelines, runInference } from './lib/inference.js';
 import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './lib/texture_baker.js';
 import { estimateMaterials } from './lib/clip_estimator.js';
+import {
+  createSf3dImageToMeshRouteReceipt,
+  createStagedSubmitProfile,
+  addStagedSubmitStage,
+  createWebGpuBackendIdentity,
+  SF3D_IMAGE_TO_MESH_ROUTE_ID,
+  WEBGPU_INFERENCE_KIT_VERSION,
+  validateRouteReceipt,
+} from '@kaminos/webgpu-inference-kit';
 
 const statusEl = document.getElementById('status');
 const progressFill = document.getElementById('progress-fill');
@@ -28,6 +37,9 @@ let pipelines = null;
 let weights = null;
 let inputImage = null;
 let lastGLB = null;
+let _adapterInfo = null;
+let _adapterLimits = null;
+let _adapterFeatures = null;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -44,11 +56,13 @@ async function init() {
     const gpu = await initGPU();
     device = gpu.device;
 
-    const adapterInfo = gpu.adapter.info || (gpu.adapter.requestAdapterInfo ? await gpu.adapter.requestAdapterInfo() : {});
-    setStatus(`WebGPU ready: ${adapterInfo.description || adapterInfo.device || 'GPU'}. Loading weights...`);
+    _adapterInfo = gpu.adapter.info || (gpu.adapter.requestAdapterInfo ? await gpu.adapter.requestAdapterInfo() : {});
+    _adapterLimits = gpu.adapter.limits;
+    _adapterFeatures = [...gpu.adapter.features];
+    setStatus(`WebGPU ready: ${_adapterInfo.description || _adapterInfo.device || 'GPU'}. Loading weights...`);
     console.log('Adapter limits:', {
-      maxBufferSize: gpu.adapter.limits.maxBufferSize,
-      maxStorageBufferBindingSize: gpu.adapter.limits.maxStorageBufferBindingSize,
+      maxBufferSize: _adapterLimits.maxBufferSize,
+      maxStorageBufferBindingSize: _adapterLimits.maxStorageBufferBindingSize,
     });
 
     // 2. Load weights
@@ -137,18 +151,35 @@ runBtn.addEventListener('click', async () => {
   setProgress(0);
 
   try {
+    const REQUIRED_STAGES = [
+      'image-preprocess', 'dinov2-tokenizer', 'two-stream-backbone',
+      'triplane-decode', 'marching-tet', 'texture-bake', 'glb-export',
+    ];
+    const profile = createStagedSubmitProfile({
+      route: SF3D_IMAGE_TO_MESH_ROUTE_ID,
+      timingSource: 'performance-now-wall-clock',
+      requiredStages: REQUIRED_STAGES,
+    });
+
     const t0 = performance.now();
 
     // Step 1: Run inference to get untextured mesh + triplane data
+    // runInference covers: image-preprocess, dinov2-tokenizer, two-stream-backbone,
+    // triplane-decode, marching-tet
     const meshResult = await runInference(device, pipelines, weights, inputImage, (msg) => {
       setStatus(msg);
     });
 
+    // Record stage timings from inference substages
+    const stageTimings = meshResult._stageTimings || {};
+    for (const name of ['image-preprocess', 'dinov2-tokenizer', 'two-stream-backbone', 'triplane-decode', 'marching-tet']) {
+      addStagedSubmitStage(profile, { name, ms: stageTimings[name] || 0 });
+    }
+
     const meshTime = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`Mesh in ${meshTime}s (${meshResult.numVertices} verts). UV unwrapping...`);
 
-    // Step 2: CLIP material estimation (runs on GPU, uses input image)
-    // Get masked float RGBA pixels for CLIP input
+    // Step 2: CLIP material estimation (runs on CPU, uses input image)
     const clipCanvas = document.createElement('canvas');
     const clipSrcW = inputImage.naturalWidth || inputImage.width;
     const clipSrcH = inputImage.naturalHeight || inputImage.height;
@@ -159,8 +190,6 @@ runBtn.addEventListener('click', async () => {
     const clipRaw = clipCtx.getImageData(0, 0, clipSrcW, clipSrcH).data;
     const clipPixels = new Float32Array(clipSrcW * clipSrcH * 4);
     for (let i = 0; i < clipRaw.length; i++) clipPixels[i] = clipRaw[i] / 255.0;
-    // Alpha blend with grey background, then multiply by alpha again
-    // (matching PyTorch: rgb_cond = lerp(bg, rgb, alpha), then rgb_cond * mask_cond)
     for (let i = 0; i < clipSrcW * clipSrcH; i++) {
       const a = clipPixels[i * 4 + 3];
       clipPixels[i * 4]     = (clipPixels[i * 4] * a + 0.5 * (1 - a)) * a;
@@ -183,24 +212,85 @@ runBtn.addEventListener('click', async () => {
     setStatus(`Rasterized ${rasterResult.mask.reduce((a, b) => a + b, 0)} texels. Baking texture...`);
 
     // Step 5: Bake textures (GPU triplane query + features/perturb_normal decoder)
+    const tBake = performance.now();
     const bakeResult = await bakeTexture(
       device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
       meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
       rasterResult.tbnData, texResolution);
+    addStagedSubmitStage(profile, { name: 'texture-bake', ms: performance.now() - tBake });
     setStatus('Textures baked. Building GLB...');
 
     // Step 6: Export as GLB with CLIP-estimated materials
+    const tGlb = performance.now();
     lastGLB = await exportGLB(
       uvResult.newVertices, uvResult.newNormals, uvResult.newFaces, uvResult.uvs,
       bakeResult.albedo, bakeResult.normalMap,
       uvResult.newNumVertices, uvResult.newNumFaces, texResolution,
       roughness, metallic);
+    addStagedSubmitStage(profile, { name: 'glb-export', ms: performance.now() - tGlb });
 
     const totalTime = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`Done in ${totalTime}s: ${meshResult.numVertices} vertices, ${meshResult.numFaces} faces, textured GLB ready`);
     setProgress(100);
     downloadBtn.disabled = false;
     runBtn.disabled = false;
+
+    // Emit route receipt
+    const backend = createWebGpuBackendIdentity({
+      adapterName: _adapterInfo.description || _adapterInfo.device || 'unknown',
+      browser: navigator.userAgent,
+      requestedFeatures: _adapterFeatures,
+      effectiveFeatures: _adapterFeatures,
+      limits: {
+        maxBufferSize: _adapterLimits.maxBufferSize,
+        maxStorageBufferBindingSize: _adapterLimits.maxStorageBufferBindingSize,
+        maxComputeInvocationsPerWorkgroup: _adapterLimits.maxComputeInvocationsPerWorkgroup,
+      },
+      timestampQuery: _adapterFeatures.includes('timestamp-query') ? 'available' : 'unavailable',
+    });
+
+    const receipt = createSf3dImageToMeshRouteReceipt({
+      input: {
+        artifactId: `source-image:${clipSrcW}x${clipSrcH}`,
+        sha256: 'not-computed',
+        shape: [clipSrcH, clipSrcW, 4],
+      },
+      outputs: {
+        meshGlb: {
+          artifactId: `mesh-glb:${meshResult.numVertices}v-${meshResult.numFaces}f`,
+          sha256: 'not-computed',
+          shape: [lastGLB.byteLength],
+        },
+        albedoTexture: {
+          artifactId: `albedo-texture:${texResolution}`,
+          sha256: 'not-computed',
+          shape: [texResolution, texResolution, 4],
+        },
+        normalMap: {
+          artifactId: `normal-map:${texResolution}`,
+          sha256: 'not-computed',
+          shape: [texResolution, texResolution, 4],
+        },
+      },
+      backend,
+      model: {
+        revision: 'stabilityai/stable-fast-3d',
+        weightsHash: 'not-computed',
+      },
+      kernel: {
+        kitVersion: WEBGPU_INFERENCE_KIT_VERSION,
+        profile: 'dinov2-two-stream-triplane-marching-tet-texture-bake',
+        commit: typeof __COMMIT_HASH__ !== 'undefined' ? __COMMIT_HASH__ : 'dev',
+      },
+      profile,
+    });
+
+    const validation = validateRouteReceipt(receipt);
+    if (!validation.ok) {
+      console.warn('Route receipt validation failed:', validation.errors);
+    }
+    window._lastRouteReceipt = receipt;
+    console.log('Route receipt emitted:', receipt.requestedRouteId);
 
     window._lastMeshResult = meshResult;
     window._lastGLB = lastGLB;
