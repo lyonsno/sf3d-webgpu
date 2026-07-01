@@ -103,11 +103,6 @@ export async function estimateMaterials(device, imagePixels, imgWidth, imgHeight
   const roughness = _runHead(features, weights, 'roughness');
   const metallic = _runHead(features, weights, 'metallic');
 
-  // Diagnostic: compare features against PyTorch reference
-  console.log(`CLIP features[0:5]: ${Array.from(features.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}`);
-  console.log(`CLIP features range: [${Math.min(...features).toFixed(4)}, ${Math.max(...features).toFixed(4)}]`);
-  console.log(`CLIP features mean: ${(features.reduce((a,b)=>a+b,0)/features.length).toFixed(4)}`);
-  // PyTorch ref: features[0:5] = [-0.1376, 0.6448, -0.5184, -0.3570, 0.1465], range=[-4.27, 4.27], mean=0.0271
   console.log(`CLIP material estimation: roughness=${roughness.toFixed(3)}, metallic=${metallic.toFixed(3)}`);
   return { roughness, metallic };
 }
@@ -116,8 +111,8 @@ function _preprocessForCLIP(pixels, width, height) {
   const out = new Float32Array(3 * IMAGE_SIZE * IMAGE_SIZE);
   for (let y = 0; y < IMAGE_SIZE; y++) {
     for (let x = 0; x < IMAGE_SIZE; x++) {
-      const srcX = x * (width - 1) / (IMAGE_SIZE - 1);
-      const srcY = y * (height - 1) / (IMAGE_SIZE - 1);
+      const srcX = Math.max(0, (x + 0.5) * (width / IMAGE_SIZE) - 0.5);
+      const srcY = Math.max(0, (y + 0.5) * (height / IMAGE_SIZE) - 0.5);
       const x0 = Math.floor(srcX), y0 = Math.floor(srcY);
       const x1 = Math.min(x0 + 1, width - 1), y1 = Math.min(y0 + 1, height - 1);
       const fx = srcX - x0, fy = srcY - y0;
@@ -172,7 +167,7 @@ async function _runVisualTransformer(device, embeddings, weights) {
   const N = NUM_TOKENS, D = HIDDEN_DIM;
 
   let xBuf = createStorageBuffer(device, new Float32Array(embeddings));
-  const encoder = device.createCommandEncoder();
+  let encoder = device.createCommandEncoder();
 
   // Pre-LN
   xBuf = _dispatchLN(encoder, device, xBuf, N, D, _weightBuffers.lnPre);
@@ -193,6 +188,7 @@ async function _runVisualTransformer(device, embeddings, weights) {
     const gelu = _dispatchGelu(encoder, device, fc, N * MLP_DIM);
     const mlp = _dispatchLinear(encoder, device, gelu, N, MLP_DIM, D, blk.proj);
     xBuf = _dispatchAdd(encoder, device, xBuf, mlp, N * D);
+
   }
 
   // Post-LN

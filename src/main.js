@@ -159,12 +159,13 @@ runBtn.addEventListener('click', async () => {
     const clipRaw = clipCtx.getImageData(0, 0, clipSrcW, clipSrcH).data;
     const clipPixels = new Float32Array(clipSrcW * clipSrcH * 4);
     for (let i = 0; i < clipRaw.length; i++) clipPixels[i] = clipRaw[i] / 255.0;
-    // Apply alpha blending with grey background (matching PyTorch: rgb_cond * mask_cond)
+    // Alpha blend with grey background, then multiply by alpha again
+    // (matching PyTorch: rgb_cond = lerp(bg, rgb, alpha), then rgb_cond * mask_cond)
     for (let i = 0; i < clipSrcW * clipSrcH; i++) {
       const a = clipPixels[i * 4 + 3];
-      clipPixels[i * 4]     = clipPixels[i * 4] * a + 0.5 * (1 - a);
-      clipPixels[i * 4 + 1] = clipPixels[i * 4 + 1] * a + 0.5 * (1 - a);
-      clipPixels[i * 4 + 2] = clipPixels[i * 4 + 2] * a + 0.5 * (1 - a);
+      clipPixels[i * 4]     = (clipPixels[i * 4] * a + 0.5 * (1 - a)) * a;
+      clipPixels[i * 4 + 1] = (clipPixels[i * 4 + 1] * a + 0.5 * (1 - a)) * a;
+      clipPixels[i * 4 + 2] = (clipPixels[i * 4 + 2] * a + 0.5 * (1 - a)) * a;
     }
     const { roughness, metallic } = await estimateMaterials(device, clipPixels, clipSrcW, clipSrcH, weights);
 
