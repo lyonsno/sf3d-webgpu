@@ -10,7 +10,7 @@
     "test:kit-route-contract": "node tools/test_kit_route_contract.mjs"
   },
   "devDependencies": {
-    "@kaminos/webgpu-inference-kit": "^0.1.0",
+    "@kaminos/webgpu-inference-kit": "^0.1.1",
     "puppeteer-core": "^25.2.1",
     "vite": "^6.0.0"
   },

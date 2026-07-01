@@ -6,8 +6,11 @@ import {
   createStagedSubmitProfile,
   createWebGpuBackendIdentity,
   SF3D_IMAGE_TO_MESH_ROUTE_ID,
+  WEBGPU_INFERENCE_KIT_VERSION,
   validateRouteReceipt,
 } from '@kaminos/webgpu-inference-kit';
+
+assert.equal(WEBGPU_INFERENCE_KIT_VERSION, '0.1.1');
 
 const requiredStages = [
   'image-preprocess',
@@ -21,7 +24,7 @@ const requiredStages = [
 
 const definition = createSf3dImageToMeshRouteDefinition({
   kernel: {
-    kitVersion: '0.1.0',
+    kitVersion: WEBGPU_INFERENCE_KIT_VERSION,
     profile: 'dinov2-two-stream-triplane-marching-tet-texture-bake',
     commit: 'sf3d-webgpu-kit-contract-smoke',
   },
@@ -91,7 +94,7 @@ const receipt = createSf3dImageToMeshRouteReceipt({
     weightsHash: 'sha256-weights',
   },
   kernel: {
-    kitVersion: '0.1.0',
+    kitVersion: WEBGPU_INFERENCE_KIT_VERSION,
     profile: 'dinov2-two-stream-triplane-marching-tet-texture-bake',
     commit: 'sf3d-webgpu-kit-contract-smoke',
   },
