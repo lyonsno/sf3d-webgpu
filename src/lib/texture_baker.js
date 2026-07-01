@@ -164,46 +164,91 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
   // Layout matching PyTorch _find_slice_offset_and_scale:
   //   Primary (0-5):   3×2 grid, cell=1/3×1/3, region [0,1]×[0,2/3]
   //   Secondary (6-11): 3×2 grid, cell=1/6×1/6, region [0,1/2]×[2/3,1]
-  //   Remaining (12+):  single block, cell=1/2×1/3, region [1/2,1]×[2/3,1]
+  //   Remaining (12+):  sub-cell grid in region [1/2,1]×[2/3,1]
   const pad = 0.005;
 
-  // offset_x_vals and offset_y_vals per slot within a tier (slot % 6)
   const slotCol = [0, 1, 2, 0, 1, 2];
   const slotRow = [0, 0, 0, 1, 1, 1];
 
+  // Collect remaining faces (atlasIndex >= 12) and compute their sub-cell grid
+  const remainingFaces = [];
+  for (let f = 0; f < numFaces; f++) {
+    if (atlasIndex[f] >= 12) remainingFaces.push(f);
+  }
+  // Sub-cell grid for remaining faces: pack into [0.5,1]×[2/3,1] = 0.5 × 1/3
+  const remRegionW = 0.5, remRegionH = 1 / 3;
+  const remRegionX = 0.5, remRegionY = 2 / 3;
+  let remGridW = 1, remGridH = 1;
+  if (remainingFaces.length > 0) {
+    const ratio = remRegionW / remRegionH; // aspect ratio of remaining region
+    const mult = Math.sqrt(remainingFaces.length / ratio);
+    remGridW = Math.max(1, Math.ceil(ratio * mult));
+    remGridH = Math.max(1, Math.ceil(remainingFaces.length / remGridW));
+  }
+  const remCellW = remRegionW / remGridW;
+  const remCellH = remRegionH / remGridH;
+
+  // Build a map from face index to remaining-grid position
+  const remFaceGridIdx = new Map();
+  for (let i = 0; i < remainingFaces.length; i++) {
+    remFaceGridIdx.set(remainingFaces[i], i);
+  }
+
   for (let f = 0; f < numFaces; f++) {
     const ai = atlasIndex[f];
-    const tier = Math.floor(ai / 6); // 0=primary, 1=secondary, 2+=remaining
+    const tier = Math.floor(ai / 6);
     const slot = ai % 6;
     const sc = slotCol[slot], sr = slotRow[slot];
 
-    let offX, offY, divX, divY;
+    let offX, offY, cellW, cellH;
     if (tier === 0) {
-      // Primary: x_offset = (1/3)*sc, y_offset = (1/3)*sr, div = 3
-      offX = (1/3) * sc;
-      offY = (1/3) * sr;
-      divX = 3; divY = 3;
+      cellW = 1/3; cellH = 1/3;
+      offX = cellW * sc;
+      offY = cellH * sr;
     } else if (tier === 1) {
-      // Secondary: x_offset = (1/6)*sc, y_offset = (1/6)*sr + 2/3, div = 6
-      offX = (1/6) * sc;
-      offY = (1/6) * sr + 2/3;
-      divX = 6; divY = 6;
+      cellW = 1/6; cellH = 1/6;
+      offX = cellW * sc;
+      offY = 2/3 + cellH * sr;
     } else {
-      // Remaining: x_offset = (1/6)*sc + 0.5, y_offset = (1/6)*sr + 2/3
-      // div_x = 2, div_y = 3
-      offX = (1/6) * sc + 0.5;
-      offY = (1/6) * sr + 2/3;
-      divX = 2; divY = 3;
+      // Remaining: each face gets its own sub-cell
+      cellW = remCellW; cellH = remCellH;
+      const gi = remFaceGridIdx.get(f) || 0;
+      const gx = gi % remGridW;
+      const gy = Math.floor(gi / remGridW);
+      offX = remRegionX + gx * cellW;
+      offY = remRegionY + gy * cellH;
     }
 
     for (let vi = 0; vi < 3; vi++) {
       const idx = f * 3 + vi;
-      // raw UV ∈ [0,1] → shrink by div, shift by offset, with padding
-      const cellW = 1 / divX, cellH = 1 / divY;
-      uvs[idx * 2] = offX + pad + rawU[idx] * (cellW - 2 * pad);
-      uvs[idx * 2 + 1] = offY + pad + rawV[idx] * (cellH - 2 * pad);
+      // Per-face UV normalization for remaining tier:
+      // normalize each triangle's UVs to fill [0,1] within its sub-cell
+      let u = rawU[idx], v = rawV[idx];
+      if (tier >= 2) {
+        // Normalize per-triangle: find min/max across this triangle's 3 verts
+        const u0 = rawU[f*3], u1 = rawU[f*3+1], u2 = rawU[f*3+2];
+        const v0 = rawV[f*3], v1 = rawV[f*3+1], v2 = rawV[f*3+2];
+        const uMin = Math.min(u0, u1, u2), uMax = Math.max(u0, u1, u2);
+        const vMin = Math.min(v0, v1, v2), vMax = Math.max(v0, v1, v2);
+        const uRange = uMax - uMin || 1;
+        const vRange = vMax - vMin || 1;
+        // Clamp scale to prevent extreme magnification (match PyTorch clip_val)
+        const clipVal = Math.min(cellW, cellH) * 1.5;
+        u = (u - uMin) / Math.max(uRange, clipVal);
+        v = (v - vMin) / Math.max(vRange, clipVal);
+      }
+      uvs[idx * 2] = offX + pad + u * (cellW - 2 * pad);
+      uvs[idx * 2 + 1] = offY + pad + v * (cellH - 2 * pad);
     }
   }
+
+  // Diagnostic: count faces per tier
+  const tierCounts = [0, 0, 0];
+  for (let f = 0; f < numFaces; f++) {
+    const t = Math.min(Math.floor(atlasIndex[f] / 6), 2);
+    tierCounts[t]++;
+  }
+  console.log(`Atlas tiers: primary=${tierCounts[0]}, secondary=${tierCounts[1]}, remaining=${tierCounts[2]}, total=${numFaces}`);
 
   return { uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces, faceAssignment: atlasIndex };
 }
@@ -241,17 +286,30 @@ function _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth,
       const minGy = Math.max(0, Math.floor(Math.min(v0, v1, v2) * gridSize));
       const maxGy = Math.min(gridSize-1, Math.floor(Math.max(v0, v1, v2) * gridSize));
 
+      // Precompute barycentric denominator for point-in-triangle test
+      const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
+      if (Math.abs(denom) < 1e-10) continue; // degenerate triangle
+      const invDenom = 1.0 / denom;
+
       const fDepth = centroidDepth[f];
 
       for (let gy = minGy; gy <= maxGy; gy++) {
         for (let gx = minGx; gx <= maxGx; gx++) {
+          // Point-in-triangle test at cell center
+          const pu = (gx + 0.5) / gridSize;
+          const pv = (gy + 0.5) / gridSize;
+          const w0 = ((v1 - v2) * (pu - u2) + (u2 - u1) * (pv - v2)) * invDenom;
+          const w1 = ((v2 - v0) * (pu - u2) + (u0 - u2) * (pv - v2)) * invDenom;
+          const w2 = 1 - w0 - w1;
+          if (w0 < -0.01 || w1 < -0.01 || w2 < -0.01) continue;
+
           const gi = gy * gridSize + gx;
           const owner = gridOwner[gi];
           if (owner === -1) {
             gridOwner[gi] = f;
             gridDepth[gi] = fDepth;
           } else if (owner !== f && !bumped.has(owner)) {
-            // Overlap: bump the occluded face
+            // True overlap: bump the occluded face
             const ownerDepth = gridDepth[gi];
             let occluded;
             if (keepMax) {
