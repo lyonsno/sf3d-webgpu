@@ -179,9 +179,8 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
   const atlasIndex = new Int32Array(numFaces);
   for (let f = 0; f < numFaces; f++) atlasIndex[f] = faceAssignment[f];
 
-  const GRID = 128;
-  _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, GRID, 0);
-  _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, GRID, 6);
+  _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, 0);
+  _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, 6);
 
   // --- Step 2b: Per-island UV normalization for secondary tier (slots 6-11) ---
   // Matching PyTorch _handle_slice_uvs: rescale all faces in each secondary
@@ -401,80 +400,245 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
 }
 
 /**
- * Detect UV overlaps within each slot group using a rasterized grid.
- * When two triangles in the same slot overlap in UV space, the occluded
- * one (by 3D centroid depth along the cube face axis) gets bumped to slot+6.
+ * Detect UV overlaps using BVH-accelerated triangle-triangle intersection.
+ * Matching PyTorch's BVH approach: build a BVH per cube face slot, test each
+ * triangle against the BVH, bump the occluded face (by depth) to slot+6.
  */
-function _detectOverlapsGrid(numFaces, atlasIndex, rawU, rawV, centroidDepth,
-    depthKeepMax, gridSize, slotOffset) {
+function _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth,
+    depthKeepMax, slotOffset) {
 
   for (let slot = slotOffset; slot < slotOffset + 6; slot++) {
     const slotFaces = [];
     for (let f = 0; f < numFaces; f++) {
       if (atlasIndex[f] === slot) slotFaces.push(f);
     }
-    if (slotFaces.length === 0) continue;
+    if (slotFaces.length < 2) continue;
 
     const baseSlot = slot % 6;
     const keepMax = depthKeepMax[baseSlot];
 
-    // Grid cells: owner face index and depth
-    const gridOwner = new Int32Array(gridSize * gridSize).fill(-1);
-    const gridDepth = new Float32Array(gridSize * gridSize);
+    // Build BVH from triangles in this slot
+    const tris = slotFaces.map(f => ({
+      f,
+      u0: rawU[f*3], v0: rawV[f*3],
+      u1: rawU[f*3+1], v1: rawV[f*3+1],
+      u2: rawU[f*3+2], v2: rawV[f*3+2],
+      minU: Math.min(rawU[f*3], rawU[f*3+1], rawU[f*3+2]),
+      maxU: Math.max(rawU[f*3], rawU[f*3+1], rawU[f*3+2]),
+      minV: Math.min(rawV[f*3], rawV[f*3+1], rawV[f*3+2]),
+      maxV: Math.max(rawV[f*3], rawV[f*3+1], rawV[f*3+2]),
+    }));
+
+    const bvh = _buildBVH2D(tris);
+
+    // For each triangle, query the BVH for overlapping triangles
     const bumped = new Set();
+    // Collect all unique intersection pairs first (matching PyTorch)
+    const pairs = [];
 
-    for (const f of slotFaces) {
-      if (bumped.has(f)) continue;
-
-      const u0 = rawU[f*3], u1 = rawU[f*3+1], u2 = rawU[f*3+2];
-      const v0 = rawV[f*3], v1 = rawV[f*3+1], v2 = rawV[f*3+2];
-      const minGx = Math.max(0, Math.floor(Math.min(u0, u1, u2) * gridSize));
-      const maxGx = Math.min(gridSize-1, Math.floor(Math.max(u0, u1, u2) * gridSize));
-      const minGy = Math.max(0, Math.floor(Math.min(v0, v1, v2) * gridSize));
-      const maxGy = Math.min(gridSize-1, Math.floor(Math.max(v0, v1, v2) * gridSize));
-
-      // Precompute barycentric denominator for point-in-triangle test
-      const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
-      if (Math.abs(denom) < 1e-10) continue; // degenerate triangle
-      const invDenom = 1.0 / denom;
-
-      const fDepth = centroidDepth[f];
-
-      for (let gy = minGy; gy <= maxGy; gy++) {
-        for (let gx = minGx; gx <= maxGx; gx++) {
-          // Point-in-triangle test at cell center
-          const pu = (gx + 0.5) / gridSize;
-          const pv = (gy + 0.5) / gridSize;
-          const w0 = ((v1 - v2) * (pu - u2) + (u2 - u1) * (pv - v2)) * invDenom;
-          const w1 = ((v2 - v0) * (pu - u2) + (u0 - u2) * (pv - v2)) * invDenom;
-          const w2 = 1 - w0 - w1;
-          if (w0 < -0.01 || w1 < -0.01 || w2 < -0.01) continue;
-
-          const gi = gy * gridSize + gx;
-          const owner = gridOwner[gi];
-          if (owner === -1) {
-            gridOwner[gi] = f;
-            gridDepth[gi] = fDepth;
-          } else if (owner !== f && !bumped.has(owner)) {
-            // True overlap: bump the occluded face
-            const ownerDepth = gridDepth[gi];
-            let occluded;
-            if (keepMax) {
-              occluded = (fDepth >= ownerDepth) ? owner : f;
-            } else {
-              occluded = (fDepth <= ownerDepth) ? owner : f;
-            }
-            atlasIndex[occluded] = Math.min(atlasIndex[occluded] + 6, 12);
-            bumped.add(occluded);
-            if (occluded === owner) {
-              gridOwner[gi] = f;
-              gridDepth[gi] = fDepth;
-            }
-          }
+    for (const tri of tris) {
+      if (bumped.has(tri.f)) continue;
+      const candidates = _queryBVH2D(bvh, tri);
+      for (const other of candidates) {
+        if (other.f === tri.f || bumped.has(other.f)) continue;
+        if (_trianglesOverlap2D(tri, other)) {
+          const a = Math.min(tri.f, other.f);
+          const b = Math.max(tri.f, other.f);
+          pairs.push([a, b]);
         }
       }
     }
+
+    // Deduplicate pairs and determine which face to bump (by depth)
+    const seen = new Set();
+    const occludedSet = new Set();
+    for (const [a, b] of pairs) {
+      const key = a * numFaces + b;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      // Determine which is occluded based on depth along cube face axis
+      let occluded;
+      if (keepMax) {
+        occluded = (centroidDepth[a] >= centroidDepth[b]) ? a : b;
+      } else {
+        occluded = (centroidDepth[a] <= centroidDepth[b]) ? a : b;
+      }
+      occludedSet.add(occluded);
+    }
+
+    // Bump all occluded faces
+    for (const f of occludedSet) {
+      atlasIndex[f] = Math.min(atlasIndex[f] + 6, 12);
+      bumped.add(f);
+    }
   }
+}
+
+/** Build a simple 2D AABB BVH over triangles. */
+function _buildBVH2D(tris) {
+  if (tris.length <= 4) return { tris, left: null, right: null };
+
+  // Find split axis (longest extent)
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  for (const t of tris) {
+    if (t.minU < minU) minU = t.minU;
+    if (t.maxU > maxU) maxU = t.maxU;
+    if (t.minV < minV) minV = t.minV;
+    if (t.maxV > maxV) maxV = t.maxV;
+  }
+
+  const extU = maxU - minU, extV = maxV - minV;
+  const axis = extU >= extV ? 'u' : 'v';
+
+  // Sort by centroid on split axis and split at median
+  const sorted = tris.slice().sort((a, b) => {
+    const ca = axis === 'u' ? (a.minU + a.maxU) : (a.minV + a.maxV);
+    const cb = axis === 'u' ? (b.minU + b.maxU) : (b.minV + b.maxV);
+    return ca - cb;
+  });
+
+  const mid = sorted.length >> 1;
+  return {
+    tris: null,
+    minU, maxU, minV, maxV,
+    left: _buildBVH2D(sorted.slice(0, mid)),
+    right: _buildBVH2D(sorted.slice(mid)),
+  };
+}
+
+/** Query a 2D BVH for triangles whose AABB overlaps the query triangle's AABB. */
+function _queryBVH2D(node, tri) {
+  if (node.tris) {
+    // Leaf: return triangles whose AABBs overlap
+    const result = [];
+    for (const t of node.tris) {
+      if (t.maxU >= tri.minU && t.minU <= tri.maxU &&
+          t.maxV >= tri.minV && t.minV <= tri.maxV) {
+        result.push(t);
+      }
+    }
+    return result;
+  }
+
+  // Interior: check AABB overlap with node bounds
+  if (node.maxU < tri.minU || node.minU > tri.maxU ||
+      node.maxV < tri.minV || node.minV > tri.maxV) {
+    return [];
+  }
+
+  const left = _queryBVH2D(node.left, tri);
+  const right = _queryBVH2D(node.right, tri);
+  return left.concat(right);
+}
+
+/**
+ * 2D triangle-triangle overlap test with area threshold.
+ * Matching PyTorch: two triangles "overlap" only if their intersection polygon
+ * has area > 1e-10. This filters out edge-touching adjacent faces (zero area)
+ * while catching true UV overlaps from different surfaces.
+ */
+function _trianglesOverlap2D(a, b) {
+  // Compute intersection polygon via Sutherland-Hodgman clipping
+  const area = _triangleIntersectionArea2D(
+    a.u0, a.v0, a.u1, a.v1, a.u2, a.v2,
+    b.u0, b.v0, b.u1, b.v1, b.u2, b.v2
+  );
+  return area > 1e-10;
+}
+
+/** Compute the area of intersection between two 2D triangles via polygon clipping. */
+function _triangleIntersectionArea2D(
+  au0,av0,au1,av1,au2,av2,
+  bu0,bv0,bu1,bv1,bu2,bv2
+) {
+  // Sutherland-Hodgman: clip triangle B against all edges of triangle A
+  let poly = [[bu0,bv0],[bu1,bv1],[bu2,bv2]];
+  const clip = [[au0,av0],[au1,av1],[au2,av2]];
+
+  for (let i = 0; i < 3; i++) {
+    if (poly.length === 0) return 0;
+    const [ex, ey] = clip[i];
+    const [fx, fy] = clip[(i + 1) % 3];
+    const output = [];
+
+    for (let j = 0; j < poly.length; j++) {
+      const [cx, cy] = poly[j];
+      const [dx, dy] = poly[(j + 1) % poly.length];
+      const cSide = (fx - ex) * (cy - ey) - (fy - ey) * (cx - ex);
+      const dSide = (fx - ex) * (dy - ey) - (fy - ey) * (dx - ex);
+
+      if (cSide >= 0) {
+        output.push([cx, cy]);
+        if (dSide < 0) {
+          output.push(_lineIntersect2D(cx, cy, dx, dy, ex, ey, fx, fy));
+        }
+      } else if (dSide >= 0) {
+        output.push(_lineIntersect2D(cx, cy, dx, dy, ex, ey, fx, fy));
+      }
+    }
+    poly = output;
+  }
+
+  if (poly.length < 3) return 0;
+
+  // Shoelace formula for polygon area
+  let area = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x1, y1] = poly[i];
+    const [x2, y2] = poly[(i + 1) % poly.length];
+    area += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(area) * 0.5;
+}
+
+function _lineIntersect2D(ax, ay, bx, by, cx, cy, dx, dy) {
+  const denom = (ax - bx) * (cy - dy) - (ay - by) * (cx - dx);
+  if (Math.abs(denom) < 1e-15) return [(ax + bx) * 0.5, (ay + by) * 0.5];
+  const t = ((ax - cx) * (cy - dy) - (ay - cy) * (cx - dx)) / denom;
+  return [ax + t * (bx - ax), ay + t * (by - ay)];
+}
+
+/** 2D segment-segment intersection test using orientation predicates. */
+function _segmentsIntersect2D(ax1,ay1,ax2,ay2, bx1,by1,bx2,by2) {
+  const d1 = _orient2D(bx1,by1,bx2,by2, ax1,ay1);
+  const d2 = _orient2D(bx1,by1,bx2,by2, ax2,ay2);
+  const d3 = _orient2D(ax1,ay1,ax2,ay2, bx1,by1);
+  const d4 = _orient2D(ax1,ay1,ax2,ay2, bx2,by2);
+
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+      ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+    return true;
+  }
+
+  // Collinear cases
+  if (d1 === 0 && _onSegment2D(bx1,by1,bx2,by2, ax1,ay1)) return true;
+  if (d2 === 0 && _onSegment2D(bx1,by1,bx2,by2, ax2,ay2)) return true;
+  if (d3 === 0 && _onSegment2D(ax1,ay1,ax2,ay2, bx1,by1)) return true;
+  if (d4 === 0 && _onSegment2D(ax1,ay1,ax2,ay2, bx2,by2)) return true;
+
+  return false;
+}
+
+function _orient2D(ax,ay,bx,by,cx,cy) {
+  const det = (ax - cx) * (by - cy) - (bx - cx) * (ay - cy);
+  if (det < -1e-10) return -1;
+  if (det > 1e-10) return 1;
+  return 0;
+}
+
+function _onSegment2D(ax,ay,bx,by,px,py) {
+  return Math.min(ax,bx) <= px + 1e-10 && px <= Math.max(ax,bx) + 1e-10 &&
+         Math.min(ay,by) <= py + 1e-10 && py <= Math.max(ay,by) + 1e-10;
+}
+
+function _pointInTriangle2D(px,py, ax,ay,bx,by,cx,cy) {
+  const d1 = _orient2D(ax,ay,bx,by,px,py);
+  const d2 = _orient2D(bx,by,cx,cy,px,py);
+  const d3 = _orient2D(cx,cy,ax,ay,px,py);
+  const hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+  const hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+  return !(hasNeg && hasPos);
 }
 
 /**
