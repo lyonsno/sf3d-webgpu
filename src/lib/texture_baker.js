@@ -1116,26 +1116,27 @@ function _rotateUVSlicesConsistentSpace(
       }
     }
 
-    // Second pass: rescale to [0, 1]
-    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    // Second pass: rescale to [0, 1] using joint min/max across both U and V
+    // (matching PyTorch: uv[mask] = (uv[mask] - uv[mask].min()) / (uv[mask].max() - uv[mask].min()))
+    // This preserves aspect ratio after rotation.
+    let jointMin = Infinity, jointMax = -Infinity;
     for (let f = 0; f < numFaces; f++) {
       if (faceAssignment[f] !== slot) continue;
       for (let vi = 0; vi < 3; vi++) {
         const idx = f * 3 + vi;
-        if (rawU[idx] < minU) minU = rawU[idx];
-        if (rawU[idx] > maxU) maxU = rawU[idx];
-        if (rawV[idx] < minV) minV = rawV[idx];
-        if (rawV[idx] > maxV) maxV = rawV[idx];
+        if (rawU[idx] < jointMin) jointMin = rawU[idx];
+        if (rawU[idx] > jointMax) jointMax = rawU[idx];
+        if (rawV[idx] < jointMin) jointMin = rawV[idx];
+        if (rawV[idx] > jointMax) jointMax = rawV[idx];
       }
     }
-    const rangeU = maxU - minU || 1;
-    const rangeV = maxV - minV || 1;
+    const jointRange = jointMax - jointMin || 1;
     for (let f = 0; f < numFaces; f++) {
       if (faceAssignment[f] !== slot) continue;
       for (let vi = 0; vi < 3; vi++) {
         const idx = f * 3 + vi;
-        rawU[idx] = (rawU[idx] - minU) / rangeU;
-        rawV[idx] = (rawV[idx] - minV) / rangeV;
+        rawU[idx] = (rawU[idx] - jointMin) / jointRange;
+        rawV[idx] = (rawV[idx] - jointMin) / jointRange;
       }
     }
   }
