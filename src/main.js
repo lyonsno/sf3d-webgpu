@@ -274,7 +274,7 @@ runBtn.addEventListener('click', async () => {
       },
       backend,
       model: {
-        revision: 'stabilityai/stable-fast-3d',
+        revision: 'v1.0.0-webgpu',
         weightsHash: 'not-computed',
       },
       kernel: {

@@ -109,9 +109,12 @@ function extractBytes(chunkedBuffer, offset, size) {
   const end = offset + size;
 
   // Find the first chunk that contains the start
-  let startChunk = 0;
+  let startChunk = -1;
   for (let i = 0; i < offsets.length; i++) {
     if (offsets[i] + chunks[i].length > offset) { startChunk = i; break; }
+  }
+  if (startChunk === -1) {
+    throw new Error(`Weight data offset ${offset} (size ${size}) is beyond end of file (${chunkedBuffer.totalSize} bytes)`);
   }
 
   const localOffset = offset - offsets[startChunk];
