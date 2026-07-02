@@ -7,10 +7,14 @@ import {
   createWebGpuBackendIdentity,
   SF3D_IMAGE_TO_MESH_ROUTE_ID,
   WEBGPU_INFERENCE_KIT_VERSION,
+  WEBGPU_ROUTE_BACKPRESSURE_SCHEMA,
+  WEBGPU_ROUTE_SCHEDULER_SCHEMA,
   validateRouteReceipt,
 } from '@kaminos/webgpu-inference-kit';
 
-assert.match(WEBGPU_INFERENCE_KIT_VERSION, /^0\.1\.\d+$/);
+const [kitMajor, kitMinor, kitPatch] = WEBGPU_INFERENCE_KIT_VERSION.split('.').map(Number);
+assert.deepEqual([kitMajor, kitMinor], [0, 1]);
+assert.ok(kitPatch >= 4, `breathability contract requires kit >=0.1.4, got ${WEBGPU_INFERENCE_KIT_VERSION}`);
 
 const requiredStages = [
   'image-preprocess',
@@ -33,6 +37,26 @@ const definition = createSf3dImageToMeshRouteDefinition({
 assert.equal(SF3D_IMAGE_TO_MESH_ROUTE_ID, 'sf3d.image-to-mesh.webgpu-local.v0');
 assert.equal(definition.routeId, SF3D_IMAGE_TO_MESH_ROUTE_ID);
 assert.deepEqual(definition.requiredStages, requiredStages);
+assert.equal(definition.scheduler.schema, WEBGPU_ROUTE_SCHEDULER_SCHEMA);
+assert.equal(definition.scheduler.requestedScheduler.mode, 'throughput');
+assert.equal(definition.backpressure.schema, WEBGPU_ROUTE_BACKPRESSURE_SCHEMA);
+assert.equal(definition.backpressure.effectiveBudget, 'furnace');
+assert.deepEqual(
+  definition.scheduler.breathability.spans.map(span => [span.stage, span.kind, span.interruptible]),
+  [
+    ['image-preprocess', 'gpu-submit-bound', false],
+    ['dinov2-tokenizer', 'gpu-submit-bound', false],
+    ['two-stream-backbone', 'gpu-submit-bound', false],
+    ['triplane-decode', 'gpu-submit-bound', false],
+    ['marching-tet', 'gpu-submit-bound', false],
+    ['texture-bake', 'gpu-submit-bound', false],
+    ['glb-export', 'cpu-bound', false],
+  ],
+);
+assert.deepEqual(
+  definition.scheduler.breathability.checkpoints.map(checkpoint => [checkpoint.afterStage, checkpoint.yieldable]),
+  requiredStages.map(stage => [stage, true]),
+);
 assert.deepEqual(
   definition.outputRoles.filter(output => output.required).map(output => output.role),
   ['mesh-glb', 'albedo-texture', 'normal-map'],
