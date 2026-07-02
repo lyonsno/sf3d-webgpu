@@ -179,24 +179,30 @@ runBtn.addEventListener('click', async () => {
     const meshTime = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`Mesh in ${meshTime}s (${meshResult.numVertices} verts). UV unwrapping...`);
 
-    // Step 2: CLIP material estimation (runs on CPU, uses input image)
+    // Step 2: CLIP material estimation
+    // Match PyTorch preprocessing order exactly:
+    //   1. PIL resize to cond_image_size (512) on uint8 RGBA
+    //   2. Convert to float, alpha-blend with grey [0.5, 0.5, 0.5]
+    //   3. Multiply by mask (alpha)
+    //   4. Estimator resizes 512→224 with bilinear
+    // Canvas drawImage handles the uint8 resize (step 1).
+    const COND_SIZE = 512;
     const clipCanvas = document.createElement('canvas');
-    const clipSrcW = inputImage.naturalWidth || inputImage.width;
-    const clipSrcH = inputImage.naturalHeight || inputImage.height;
-    clipCanvas.width = clipSrcW;
-    clipCanvas.height = clipSrcH;
+    clipCanvas.width = COND_SIZE;
+    clipCanvas.height = COND_SIZE;
     const clipCtx = clipCanvas.getContext('2d');
-    clipCtx.drawImage(inputImage, 0, 0);
-    const clipRaw = clipCtx.getImageData(0, 0, clipSrcW, clipSrcH).data;
-    const clipPixels = new Float32Array(clipSrcW * clipSrcH * 4);
+    clipCtx.drawImage(inputImage, 0, 0, COND_SIZE, COND_SIZE);
+    const clipRaw = clipCtx.getImageData(0, 0, COND_SIZE, COND_SIZE).data;
+    // Step 2-3: convert to float, alpha-blend with grey, multiply by mask
+    const clipPixels = new Float32Array(COND_SIZE * COND_SIZE * 4);
     for (let i = 0; i < clipRaw.length; i++) clipPixels[i] = clipRaw[i] / 255.0;
-    for (let i = 0; i < clipSrcW * clipSrcH; i++) {
+    for (let i = 0; i < COND_SIZE * COND_SIZE; i++) {
       const a = clipPixels[i * 4 + 3];
       clipPixels[i * 4]     = (clipPixels[i * 4] * a + 0.5 * (1 - a)) * a;
       clipPixels[i * 4 + 1] = (clipPixels[i * 4 + 1] * a + 0.5 * (1 - a)) * a;
       clipPixels[i * 4 + 2] = (clipPixels[i * 4 + 2] * a + 0.5 * (1 - a)) * a;
     }
-    const { roughness, metallic } = await estimateMaterials(device, clipPixels, clipSrcW, clipSrcH, weights);
+    const { roughness, metallic } = await estimateMaterials(device, clipPixels, COND_SIZE, COND_SIZE, weights);
 
     // Step 3: UV unwrap (synchronous cube projection)
     const uvResult = unwrapUV(
@@ -251,9 +257,9 @@ runBtn.addEventListener('click', async () => {
 
     const receipt = createSf3dImageToMeshRouteReceipt({
       input: {
-        artifactId: `source-image:${clipSrcW}x${clipSrcH}`,
+        artifactId: `source-image:${inputImage.naturalWidth || inputImage.width}x${inputImage.naturalHeight || inputImage.height}`,
         sha256: 'not-computed',
-        shape: [clipSrcH, clipSrcW, 4],
+        shape: [inputImage.naturalHeight || inputImage.height, inputImage.naturalWidth || inputImage.width, 4],
       },
       outputs: {
         meshGlb: {
