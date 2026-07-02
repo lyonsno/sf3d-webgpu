@@ -414,7 +414,7 @@ export class DINOv2Backbone {
     const totalWG = ceilDiv(numRows * outDim, 256);
     const [wgX, wgY] = splitWG(totalWG);
 
-    const paramsData = new Uint32Array([numRows, inDim, outDim, wgX]);
+    const paramsData = new Uint32Array([numRows, inDim, outDim, wgX, 1]);
     const paramsBuf = this._cachedUniform(paramsData);
 
     const entries = [
@@ -461,7 +461,7 @@ export class DINOv2Backbone {
     const totalWG = ceilDiv(numRows * outDim, 256);
     const [wgX, wgY] = splitWG(totalWG);
 
-    const paramsData = new Uint32Array([numRows, inDim, outDim, wgX]);
+    const paramsData = new Uint32Array([numRows, inDim, outDim, wgX, 1]);
     const paramsBuf = this._cachedUniform(paramsData);
 
     const weight = weights.encoder.blockWeights?.[`${prefix}.weight`];
@@ -492,7 +492,7 @@ export class DINOv2Backbone {
     const totalWG = ceilDiv(numRows * outDim, 256);
     const [wgX, wgY] = splitWG(totalWG);
 
-    const paramsData = new Uint32Array([numRows, inDim, outDim, wgX]);
+    const paramsData = new Uint32Array([numRows, inDim, outDim, wgX, 1]);
     const paramsBuf = this._cachedUniform(paramsData);
 
     const bg = this._cachedBindGroup('linOff', this.pipelines.linear.getBindGroupLayout(0), [
@@ -616,7 +616,7 @@ export class DINOv2Backbone {
     const totalWG = ceilDiv(numRows * outDim, 256);
     const [wgX, wgY] = splitWG(totalWG);
 
-    const paramsData = new Uint32Array([numRows, inDim, outDim, wgX]);
+    const paramsData = new Uint32Array([numRows, inDim, outDim, wgX, 1]);
     const paramsBuf = this._cachedUniform(paramsData);
 
     const weight = weights.encoder.blockWeights?.[`${prefix}.weight`];

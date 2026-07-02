@@ -414,7 +414,7 @@ export class TriplaneDecoder {
   _dispatchLinear(encoder, input, output, weight, bias, rows, inDim, outDim) {
     const totalWG = ceilDiv(rows * outDim, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
-    const params = this._cachedUniform(new Uint32Array([rows, inDim, outDim, wgX]));
+    const params = this._cachedUniform(new Uint32Array([rows, inDim, outDim, wgX, 1]));
     const bg = this.device.createBindGroup({
       layout: this.pipelines.linear.getBindGroupLayout(0),
       entries: [

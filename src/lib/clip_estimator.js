@@ -97,7 +97,7 @@ export async function estimateMaterials(device, imagePixels, imgWidth, imgHeight
     _preprocessForCLIP(imagePixels, imgWidth, imgHeight), weights);
 
   // Step 2: Visual transformer (CPU fp32 for precision, GPU for speed)
-  const USE_CPU_TRANSFORMER = true; // Toggle for fp16 precision testing
+  const USE_CPU_TRANSFORMER = false; // GPU path enabled with fp32 weights
   const features = USE_CPU_TRANSFORMER
     ? _runVisualTransformerCPU(embeddings, weights)
     : await _runVisualTransformer(device, embeddings, weights);
@@ -362,16 +362,17 @@ async function _runVisualTransformer(device, embeddings, weights) {
 
     // LN1 → fused QKV → attention → out proj → residual
     const ln1 = _dispatchLN(encoder, device, xBuf, N, D, blk.ln1);
-    const qkv = _dispatchLinear(encoder, device, ln1, N, D, 3*D, blk.qkv);
+    // in_proj_weight is NOT transposed (PyTorch native [outDim, inDim])
+    const qkv = _dispatchLinear(encoder, device, ln1, N, D, 3*D, blk.qkv, false);
     const attn = _dispatchFusedAttn(encoder, device, qkv, N);
-    const proj = _dispatchLinear(encoder, device, attn, N, D, D, blk.outProj);
+    const proj = _dispatchLinear(encoder, device, attn, N, D, D, blk.outProj, true);
     xBuf = _dispatchAdd(encoder, device, xBuf, proj, N * D);
 
     // LN2 → MLP (fc → GELU → proj) → residual
     const ln2 = _dispatchLN(encoder, device, xBuf, N, D, blk.ln2);
-    const fc = _dispatchLinear(encoder, device, ln2, N, D, MLP_DIM, blk.fc);
+    const fc = _dispatchLinear(encoder, device, ln2, N, D, MLP_DIM, blk.fc, true);
     const gelu = _dispatchGelu(encoder, device, fc, N * MLP_DIM);
-    const mlp = _dispatchLinear(encoder, device, gelu, N, MLP_DIM, D, blk.proj);
+    const mlp = _dispatchLinear(encoder, device, gelu, N, MLP_DIM, D, blk.proj, true);
     xBuf = _dispatchAdd(encoder, device, xBuf, mlp, N * D);
 
   }
@@ -400,11 +401,11 @@ async function _runVisualTransformer(device, embeddings, weights) {
 
 // --- GPU dispatch helpers ---
 
-function _dispatchLinear(encoder, device, input, rows, inDim, outDim, w) {
+function _dispatchLinear(encoder, device, input, rows, inDim, outDim, w, transposed = true) {
   const totalWG = ceilDiv(rows * outDim, WG_SIZE);
   const [wgX, wgY] = splitWG(totalWG);
-  const params = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(params, 0, new Uint32Array([rows, inDim, outDim, wgX]));
+  const params = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(params, 0, new Uint32Array([rows, inDim, outDim, wgX, transposed ? 1 : 0]));
   const output = createEmptyBuffer(device, rows * outDim * 4);
   const bg = device.createBindGroup({
     layout: _pipelines.linear.getBindGroupLayout(0),
