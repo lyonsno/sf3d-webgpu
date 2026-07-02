@@ -188,22 +188,48 @@ def main():
             }
             print(f"Vertex offset: {offset_np.shape}, range=[{offset_np.min():.4f}, {offset_np.max():.4f}]")
 
-        # --- Stage 7: Full mesh via run_image ---
-        img_pil = Image.open(img_path).convert("RGBA")
-        mesh, global_dict = model.run_image(img_pil, bake_resolution=1024)
-        verts = np.array(mesh.vertices)
-        faces = np.array(mesh.faces)
-        np.save(os.path.join(out_dir, "vertices.npy"), verts)
-        np.save(os.path.join(out_dir, "faces.npy"), faces)
-        summary["mesh"] = {
-            "num_vertices": len(verts),
-            "num_faces": len(faces),
-            "vert_bounds_min": verts.min(axis=0).tolist(),
-            "vert_bounds_max": verts.max(axis=0).tolist(),
-            "first_5_verts": verts[:5].tolist(),
+        # --- Stage 7: Raw mesh via triplane_to_meshes (no post-processing) ---
+        from contextlib import nullcontext
+        from sf3d.utils import get_device
+        dev = get_device()
+        autocast_ctx = (
+            torch.autocast(device_type=dev, enabled=False)
+            if dev in ("cuda", "mps") or "cuda" in dev else nullcontext()
+        )
+        with autocast_ctx:
+            raw_meshes = model.triplane_to_meshes(scene_codes)
+        raw_mesh = raw_meshes[0]
+        raw_verts = raw_mesh.v_pos.cpu().float().numpy()
+        raw_faces = raw_mesh.t_pos_idx.cpu().numpy()
+        np.save(os.path.join(out_dir, "raw_vertices.npy"), raw_verts)
+        np.save(os.path.join(out_dir, "raw_faces.npy"), raw_faces)
+        summary["raw_mesh"] = {
+            "num_vertices": len(raw_verts),
+            "num_faces": len(raw_faces),
+            "vert_bounds_min": raw_verts.min(axis=0).tolist(),
+            "vert_bounds_max": raw_verts.max(axis=0).tolist(),
+            "first_5_verts": raw_verts[:5].tolist(),
         }
-        print(f"Mesh: {len(verts)} vertices, {len(faces)} faces")
-        print(f"  Bounds: {verts.min(axis=0)} to {verts.max(axis=0)}")
+        print(f"Raw mesh (pre-post-processing): {len(raw_verts)} vertices, {len(raw_faces)} faces")
+        print(f"  Bounds: {raw_verts.min(axis=0)} to {raw_verts.max(axis=0)}")
+
+        # Also get run_image mesh for comparison
+        img_pil = Image.open(img_path).convert("RGBA")
+        mesh_final, global_dict = model.run_image(img_pil, bake_resolution=1024)
+        final_verts = np.array(mesh_final.vertices)
+        final_faces = np.array(mesh_final.faces)
+        summary["final_mesh"] = {
+            "num_vertices": len(final_verts),
+            "num_faces": len(final_faces),
+        }
+        print(f"Final mesh (run_image): {len(final_verts)} vertices, {len(final_faces)} faces")
+
+        # SDF stats for isosurface comparison
+        sdf_from_density = density_np.flatten() - 10.0  # isosurface_threshold = 10.0
+        near_surface = np.abs(sdf_from_density) < 0.5
+        summary["sdf_near_surface_count"] = int(near_surface.sum())
+        summary["isosurface_threshold"] = 10.0
+        print(f"SDF near-surface (<0.5 from threshold): {near_surface.sum()} grid points")
 
         # Materials
         roughness = global_dict.get("roughness", global_dict.get("decoder_roughness"))

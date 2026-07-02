@@ -113,20 +113,46 @@ try {
       tSum += v;
     }
 
+    // Density stats — sdf has threshold subtracted, add it back for raw density comparison
+    const threshold = meshResult._isosurfaceThreshold;
+    const sdfArr = meshResult._sdf;
+    const density = new Float32Array(sdfArr.length);
+    for (let i = 0; i < sdfArr.length; i++) density[i] = sdfArr[i] + threshold;
+    let dMin = Infinity, dMax = -Infinity, dSum = 0, dPositive = 0;
+    for (let i = 0; i < density.length; i++) {
+      const v = density[i];
+      if (v < dMin) dMin = v;
+      if (v > dMax) dMax = v;
+      dSum += v;
+      if (v > 0) dPositive++;
+    }
+    // Sample density at specific indices for point comparison
+    const sampleIndices = [0, 1, 100, 1000, 10000, 100000, 200000, 300000, 400000, 500000];
+    const densitySamples = sampleIndices
+      .filter(i => i < density.length)
+      .map(i => ({ index: i, value: density[i] }));
+
+    // Count inside vertices (density > isosurface_threshold=10)
+    let insideCount = 0;
+    for (let i = 0; i < density.length; i++) if (density[i] > 10.0) insideCount++;
+
     return {
       numVertices: meshResult.numVertices,
       numFaces: meshResult.numFaces,
       timings,
       triplaneFirst8: Array.from(triplaneData.slice(0, 8)),
       triplaneStats: { min: tMin, max: tMax, mean: tSum / triplaneData.length },
-      // Raw marching tet vertices (before GLB coordinate transform)
+      densityStats: { min: dMin, max: dMax, mean: dSum / density.length, numPositive: dPositive, insideCount, total: density.length },
+      densitySamples,
       firstVerts: Array.from(meshResult.vertices.slice(0, 15)),
     };
   });
 
   console.log(`\nPARITY: Mesh: ${result.numVertices} vertices, ${result.numFaces} faces`);
-  console.log(`PARITY: Triplane first 8: ${result.triplaneFirst8.map(v => v.toFixed(6)).join(', ')}`);
   console.log(`PARITY: Triplane range: [${result.triplaneStats.min.toFixed(4)}, ${result.triplaneStats.max.toFixed(4)}]`);
+  console.log(`PARITY: Density range: [${result.densityStats.min.toFixed(4)}, ${result.densityStats.max.toFixed(4)}]`);
+  console.log(`PARITY: Density positive: ${result.densityStats.numPositive}, inside (>10): ${result.densityStats.insideCount}`);
+  console.log(`PARITY: Density samples: ${result.densitySamples.map(s => `[${s.index}]=${s.value.toFixed(6)}`).join(', ')}`);
   console.log(`PARITY: Stage timings: ${JSON.stringify(result.timings)}`);
 
   // Load PyTorch reference and compare
@@ -136,17 +162,21 @@ try {
     console.log('\n=== Parity Comparison ===');
 
     // Mesh
-    console.log(`\nMesh vertices:  WebGPU=${result.numVertices}  PyTorch=${ref.mesh.num_vertices}  diff=${result.numVertices - ref.mesh.num_vertices}`);
-    console.log(`Mesh faces:     WebGPU=${result.numFaces}  PyTorch=${ref.mesh.num_faces}  diff=${result.numFaces - ref.mesh.num_faces}`);
+    // Raw mesh comparison (pre-post-processing)
+    const refMesh = ref.raw_mesh || ref.mesh;
+    console.log(`\nMesh vertices:  WebGPU=${result.numVertices}  PyTorch=${refMesh.num_vertices}  diff=${result.numVertices - refMesh.num_vertices}  (${(result.numVertices / refMesh.num_vertices * 100).toFixed(1)}%)`);
+    console.log(`Mesh faces:     WebGPU=${result.numFaces}  PyTorch=${refMesh.num_faces}  diff=${result.numFaces - refMesh.num_faces}  (${(result.numFaces / refMesh.num_faces * 100).toFixed(1)}%)`);
+    if (ref.final_mesh) {
+      console.log(`  (PyTorch run_image post-processed: ${ref.final_mesh.num_vertices} verts, ${ref.final_mesh.num_faces} faces)`);
+    }
 
-    // Compare first 5 vertices
-    if (ref.mesh.first_5_verts) {
-      console.log('\nFirst 5 vertices comparison:');
+    // Compare first 5 vertices (note: vertex ordering may differ)
+    if (refMesh.first_5_verts) {
+      console.log('\nFirst 5 vertices (ordering may differ between implementations):');
       for (let i = 0; i < 5; i++) {
         const wx = result.firstVerts[i*3], wy = result.firstVerts[i*3+1], wz = result.firstVerts[i*3+2];
-        const [px, py, pz] = ref.mesh.first_5_verts[i];
-        const dx = Math.abs(wx - px), dy = Math.abs(wy - py), dz = Math.abs(wz - pz);
-        console.log(`  v${i}: WebGPU=[${wx.toFixed(6)}, ${wy.toFixed(6)}, ${wz.toFixed(6)}]  PyTorch=[${px.toFixed(6)}, ${py.toFixed(6)}, ${pz.toFixed(6)}]  maxDiff=${Math.max(dx,dy,dz).toFixed(6)}`);
+        const [px, py, pz] = refMesh.first_5_verts[i];
+        console.log(`  v${i}: WebGPU=[${wx.toFixed(6)}, ${wy.toFixed(6)}, ${wz.toFixed(6)}]  PyTorch=[${px.toFixed(6)}, ${py.toFixed(6)}, ${pz.toFixed(6)}]`);
       }
     }
 
@@ -162,9 +192,31 @@ try {
     // Density
     if (ref.density) {
       console.log(`\nDensity:`);
+      console.log(`  WebGPU range: [${result.densityStats.min.toFixed(4)}, ${result.densityStats.max.toFixed(4)}]`);
       console.log(`  PyTorch range: [${ref.density.min.toFixed(4)}, ${ref.density.max.toFixed(4)}]`);
-      console.log(`  PyTorch positive: ${ref.density.num_positive}`);
-      console.log(`  PyTorch mean: ${ref.density.mean.toFixed(6)}`);
+      console.log(`  WebGPU positive: ${result.densityStats.numPositive}  PyTorch positive: ${ref.density.num_positive}  diff: ${result.densityStats.numPositive - ref.density.num_positive}`);
+      console.log(`  WebGPU inside(>10): ${result.densityStats.insideCount}`);
+      console.log(`  WebGPU mean: ${result.densityStats.mean.toFixed(6)}  PyTorch mean: ${ref.density.mean.toFixed(6)}`);
+      // Compare sample values
+      if (ref.density.first_8) {
+        console.log(`  Sample comparison (first 8 density values):`);
+        for (let i = 0; i < Math.min(8, result.densitySamples.length); i++) {
+          const ws = result.densitySamples[i];
+          const ps = ref.density.first_8[i];
+          const diff = Math.abs(ws.value - ps);
+          const relDiff = ps !== 0 ? (diff / Math.abs(ps) * 100).toFixed(1) : 'N/A';
+          console.log(`    [${ws.index}]: WebGPU=${ws.value.toExponential(6)}  PyTorch=${ps.toExponential(6)}  absDiff=${diff.toExponential(2)}  rel=${relDiff}%`);
+        }
+      }
+    }
+
+    // Raw mesh (pre-post-processing)
+    if (ref.raw_mesh) {
+      console.log(`\nRaw mesh (pre-post-processing):`);
+      console.log(`  WebGPU: ${result.numVertices} vertices, ${result.numFaces} faces`);
+      console.log(`  PyTorch: ${ref.raw_mesh.num_vertices} vertices, ${ref.raw_mesh.num_faces} faces`);
+      console.log(`  Vertex diff: ${result.numVertices - ref.raw_mesh.num_vertices}`);
+      console.log(`  Face diff: ${result.numFaces - ref.raw_mesh.num_faces}`);
     }
 
     // Materials
@@ -180,14 +232,20 @@ try {
         num_vertices: result.numVertices,
         num_faces: result.numFaces,
         triplane_range: [result.triplaneStats.min, result.triplaneStats.max],
+        density_range: [result.densityStats.min, result.densityStats.max],
+        density_mean: result.densityStats.mean,
+        density_inside_count: result.densityStats.insideCount,
         triplane_first_8: result.triplaneFirst8,
         first_5_verts: [],
         timings: result.timings,
       },
       pytorch: ref,
       comparison: {
-        vertex_diff: result.numVertices - ref.mesh.num_vertices,
-        face_diff: result.numFaces - ref.mesh.num_faces,
+        vertex_diff: result.numVertices - refMesh.num_vertices,
+        face_diff: result.numFaces - refMesh.num_faces,
+        vertex_pct: (result.numVertices / refMesh.num_vertices * 100).toFixed(1),
+        density_max_diff: Math.abs(result.densityStats.max - ref.density.max),
+        density_mean_diff: Math.abs(result.densityStats.mean - ref.density.mean),
       },
     };
     for (let i = 0; i < 5; i++) {

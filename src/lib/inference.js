@@ -624,6 +624,9 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     _triplaneDecoder: pipelines.triplaneDecoder,
     _decoderWeights: weights.decoder,
     _stageTimings,
+    // Expose for parity verification (sdf = density - threshold; add threshold back for raw)
+    _sdf: sdf,
+    _isosurfaceThreshold: CONFIG.isosurfaceThreshold,
   };
 }
 
