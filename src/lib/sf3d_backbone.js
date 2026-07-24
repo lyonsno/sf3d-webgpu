@@ -148,20 +148,92 @@ export class SF3DImageTokenizer {
    * @param {Object} weights - imageTokenizer weights from loadWeights
    * @returns {GPUBuffer} - [N_tokens, 1024] image token features (permuted for backbone)
    */
+  /**
+   * Legacy single-command-buffer encode. Records patch embed, all 24 ViT
+   * blocks, and the final LayerNorm into the caller-supplied `encoder`; the
+   * caller submits it once. Behavior-preserving over the pre-cooperative port.
+   */
   encode(encoder, imageBuf, cameraEmbedBuf, weights) {
+    const ctx = this._setupEncode(encoder, imageBuf, cameraEmbedBuf, weights);
+    for (let l = 0; l < VIT_CONFIG.numLayers; l++) {
+      this._encodeBlock(encoder, l, ctx, weights);
+    }
+    return this._finalizeEncode(encoder, ctx, weights);
+  }
+
+  /**
+   * Cooperative encode driven by the Kaminos cooperative porting spine.
+   *
+   * Numerically identical to encode(): the exact same dispatch sequence over
+   * the exact same device-owned work buffers (tokenBufA/tokenBufB ping-pong
+   * persists across chunks because buffers are device-owned, not encoder-owned).
+   * The only difference is command-buffer granularity — each fixed chunk of
+   * `chunkBlocks` blocks is recorded into its own encoder and handed to the
+   * driver to submit + yield, instead of all 24 blocks in one command buffer.
+   *
+   * Setup (patch embed + SiLU) rides in the first chunk's encoder; the final
+   * LayerNorm rides in the last chunk's encoder. Every dispatch executes in the
+   * same queue order it would under encode(), so GPU results are byte-identical.
+   *
+   * @param {object} o
+   * @param {GPUBuffer} o.imageBuf
+   * @param {GPUBuffer} o.cameraEmbedBuf
+   * @param {object} o.weights
+   * @param {number} o.numBlocks
+   * @param {number} o.chunkBlocks
+   * @param {(blockStart:number, blockEnd:number, encodeChunk:(enc:GPUCommandEncoder)=>void)=>Promise<void>} o.driver
+   */
+  async encodeCooperative({ imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver }) {
+    if (numBlocks !== VIT_CONFIG.numLayers) {
+      throw new Error(
+        `encodeCooperative numBlocks ${numBlocks} must equal VIT_CONFIG.numLayers ${VIT_CONFIG.numLayers}`,
+      );
+    }
+    // ctx (work buffers + currentTokens ping-pong pointer) is created once and
+    // survives every chunk. Setup dispatches are deferred into the first chunk.
+    let ctx = null;
+    let result = null;
+
+    for (let start = 0; start < numBlocks; start += chunkBlocks) {
+      const end = Math.min(start + chunkBlocks, numBlocks);
+      const isFirst = start === 0;
+      const isLast = end === numBlocks;
+      // eslint-disable-next-line no-await-in-loop
+      await driver(start, end, encoder => {
+        if (isFirst) {
+          ctx = this._setupEncode(encoder, imageBuf, cameraEmbedBuf, weights);
+        }
+        for (let l = start; l < end; l++) {
+          this._encodeBlock(encoder, l, ctx, weights);
+        }
+        if (isLast) {
+          result = this._finalizeEncode(encoder, ctx, weights);
+        }
+      });
+    }
+
+    if (!result) throw new Error('encodeCooperative produced no result');
+    return result;
+  }
+
+  /**
+   * Allocate work buffers and record patch embedding + SiLU(cameraEmbed) into
+   * `encoder`. Returns the mutable context (work buffers + currentTokens
+   * pointer) shared across the block loop.
+   */
+  _setupEncode(encoder, imageBuf, cameraEmbedBuf, weights) {
     const device = this.device;
     const D = VIT_CONFIG.dim;
     const ps = VIT_CONFIG.patchSize;
     const imgSize = 512;
     const tokenH = Math.floor(imgSize / ps); // 36 (512/14 = 36.57, DINOv2 uses floor)
     const tokenW = Math.floor(imgSize / ps);
-    // Actually 512/14 = 36.57... DINOv2 uses floor: tokenH = tokenW = 36
     // numPatches = 36*36 = 1296, N = 1297 (with CLS)
     const numPatches = tokenH * tokenW;
     const N = numPatches + 1;
     const T = N * D;
 
-    // Work buffers
+    // Work buffers (device-owned; persist across all command buffers)
     const tokenBufA = createEmptyBuffer(device, T * 4);
     const tokenBufB = createEmptyBuffer(device, T * 4);
     const normBuf = createEmptyBuffer(device, T * 4);
@@ -190,70 +262,87 @@ export class SF3DImageTokenizer {
     const siluCameraEmbedBuf = createEmptyBuffer(device, 768 * 4);
     this._dispatchSiLU(encoder, cameraEmbedBuf, siluCameraEmbedBuf, 768);
 
-    let currentTokens = tokenBufA;
+    return {
+      D, N, T, tokenH, tokenW,
+      tokenBufA, tokenBufB, normBuf, qBuf, kBuf, vBuf, scoreBuf,
+      attnOutBuf, projBuf, hiddenBuf, ffnOutBuf, modBuf, siluCameraEmbedBuf,
+      currentTokens: tokenBufA,
+    };
+  }
 
-    // 2. Run 24 transformer blocks with modulated attention
-    for (let l = 0; l < VIT_CONFIG.numLayers; l++) {
-      const block = weights.blocks[l];
+  /**
+   * Record one transformer block's dispatches into `encoder`, advancing
+   * ctx.currentTokens through the ping-pong. Exact per-block body from the
+   * pre-cooperative port; must remain byte-identical between encode() and
+   * encodeCooperative().
+   */
+  _encodeBlock(encoder, l, ctx, weights) {
+    const device = this.device;
+    const { D, N, T, tokenBufA, tokenBufB, normBuf, qBuf, kBuf, vBuf, scoreBuf,
+      attnOutBuf, projBuf, hiddenBuf, ffnOutBuf, modBuf, siluCameraEmbedBuf } = ctx;
+    const block = weights.blocks[l];
 
-      // Compute modulation for norm1: linear(silu(cameraEmbed)) → [2*D]
-      this._dispatchLinear(encoder, siluCameraEmbedBuf, modBuf, block.norm1Mod.weight, block.norm1Mod.bias, 1, 768, 2 * D);
+    // Compute modulation for norm1: linear(silu(cameraEmbed)) → [2*D]
+    this._dispatchLinear(encoder, siluCameraEmbedBuf, modBuf, block.norm1Mod.weight, block.norm1Mod.bias, 1, 768, 2 * D);
 
-      // Modulated LayerNorm1
-      this._dispatchModulatedLN(encoder, currentTokens, normBuf, block.norm1, modBuf, N);
+    // Modulated LayerNorm1
+    this._dispatchModulatedLN(encoder, ctx.currentTokens, normBuf, block.norm1, modBuf, N);
 
-      // Self-attention with separate Q/K/V projections
-      this._dispatchLinear(encoder, normBuf, qBuf, block.attn.q.weight, block.attn.q.bias, N, D, D);
-      this._dispatchLinear(encoder, normBuf, kBuf, block.attn.k.weight, block.attn.k.bias, N, D, D);
-      this._dispatchLinear(encoder, normBuf, vBuf, block.attn.v.weight, block.attn.v.bias, N, D, D);
+    // Self-attention with separate Q/K/V projections
+    this._dispatchLinear(encoder, normBuf, qBuf, block.attn.q.weight, block.attn.q.bias, N, D, D);
+    this._dispatchLinear(encoder, normBuf, kBuf, block.attn.k.weight, block.attn.k.bias, N, D, D);
+    this._dispatchLinear(encoder, normBuf, vBuf, block.attn.v.weight, block.attn.v.bias, N, D, D);
 
-      // Attention
-      this._dispatchAttnScores(encoder, qBuf, kBuf, scoreBuf, N);
-      this._dispatchAttnSoftmax(encoder, scoreBuf, N);
-      this._dispatchAttnApply(encoder, scoreBuf, vBuf, attnOutBuf, N);
+    // Attention
+    this._dispatchAttnScores(encoder, qBuf, kBuf, scoreBuf, N);
+    this._dispatchAttnSoftmax(encoder, scoreBuf, N);
+    this._dispatchAttnApply(encoder, scoreBuf, vBuf, attnOutBuf, N);
 
-      // Output projection
-      this._dispatchLinear(encoder, attnOutBuf, projBuf, block.attn.proj.weight, block.attn.proj.bias, N, D, D);
+    // Output projection
+    this._dispatchLinear(encoder, attnOutBuf, projBuf, block.attn.proj.weight, block.attn.proj.bias, N, D, D);
 
-      // LayerScale1 + residual
-      const attnOut = (currentTokens === tokenBufA) ? tokenBufB : tokenBufA;
-      this._dispatchLayerScaleResidual(encoder, projBuf, currentTokens, attnOut, block.layerScale1, T, D);
-      currentTokens = attnOut;
+    // LayerScale1 + residual
+    const attnOut = (ctx.currentTokens === tokenBufA) ? tokenBufB : tokenBufA;
+    this._dispatchLayerScaleResidual(encoder, projBuf, ctx.currentTokens, attnOut, block.layerScale1, T, D);
+    ctx.currentTokens = attnOut;
 
-      // Compute modulation for norm2: linear(silu(cameraEmbed)) → [2*D]
-      this._dispatchLinear(encoder, siluCameraEmbedBuf, modBuf, block.norm2Mod.weight, block.norm2Mod.bias, 1, 768, 2 * D);
+    // Compute modulation for norm2: linear(silu(cameraEmbed)) → [2*D]
+    this._dispatchLinear(encoder, siluCameraEmbedBuf, modBuf, block.norm2Mod.weight, block.norm2Mod.bias, 1, 768, 2 * D);
 
-      // Modulated LayerNorm2
-      this._dispatchModulatedLN(encoder, currentTokens, normBuf, block.norm2, modBuf, N);
+    // Modulated LayerNorm2
+    this._dispatchModulatedLN(encoder, ctx.currentTokens, normBuf, block.norm2, modBuf, N);
 
-      // GELU MLP: fc1 (linear + GELU) → fc2 (linear)
-      this._dispatchLinearGelu(encoder, normBuf, hiddenBuf,
-        block.mlp.fc1.weight, block.mlp.fc1.bias, N, D, VIT_CONFIG.mlpHiddenDim);
-      this._dispatchLinear(encoder, hiddenBuf, ffnOutBuf,
-        block.mlp.fc2.weight, block.mlp.fc2.bias, N, VIT_CONFIG.mlpHiddenDim, D);
+    // GELU MLP: fc1 (linear + GELU) → fc2 (linear)
+    this._dispatchLinearGelu(encoder, normBuf, hiddenBuf,
+      block.mlp.fc1.weight, block.mlp.fc1.bias, N, D, VIT_CONFIG.mlpHiddenDim);
+    this._dispatchLinear(encoder, hiddenBuf, ffnOutBuf,
+      block.mlp.fc2.weight, block.mlp.fc2.bias, N, VIT_CONFIG.mlpHiddenDim, D);
 
-      // LayerScale2 + residual
-      const ffnOut = (currentTokens === tokenBufA) ? tokenBufB : tokenBufA;
-      this._dispatchLayerScaleResidual(encoder, ffnOutBuf, currentTokens, ffnOut, block.layerScale2, T, D);
-      currentTokens = ffnOut;
+    // LayerScale2 + residual
+    const ffnOut = (ctx.currentTokens === tokenBufA) ? tokenBufB : tokenBufA;
+    this._dispatchLayerScaleResidual(encoder, ffnOutBuf, ctx.currentTokens, ffnOut, block.layerScale2, T, D);
+    ctx.currentTokens = ffnOut;
 
-      // Save diagnostic refs for first few blocks
-      if (l < 3 || l === 23) {
-        if (!this._dinov2Diag) this._dinov2Diag = {};
-        // Copy current state to a persistent buffer for readback
-        const diagBuf = createEmptyBuffer(device, T * 4);
-        encoder.copyBufferToBuffer(currentTokens, 0, diagBuf, 0, T * 4);
-        this._dinov2Diag[`block${l}`] = diagBuf;
-      }
+    // Save diagnostic refs for first few blocks
+    if (l < 3 || l === 23) {
+      if (!this._dinov2Diag) this._dinov2Diag = {};
+      // Copy current state to a persistent buffer for readback
+      const diagBuf = createEmptyBuffer(device, T * 4);
+      encoder.copyBufferToBuffer(ctx.currentTokens, 0, diagBuf, 0, T * 4);
+      this._dinov2Diag[`block${l}`] = diagBuf;
     }
+  }
+
+  /** Final LayerNorm + return the DINOv2 token output. */
+  _finalizeEncode(encoder, ctx, weights) {
+    const { N, normBuf, tokenH, tokenW } = ctx;
 
     // 3. Final LayerNorm
-    this._dispatchLayerNorm(encoder, currentTokens, normBuf, weights.layernorm, N);
+    this._dispatchLayerNorm(encoder, ctx.currentTokens, normBuf, weights.layernorm, N);
 
     // Output: normBuf contains [N, D] where N = 1297 (CLS + 1296 patches)
     // The backbone expects [N_tokens, D] — we return all tokens including CLS
     // The two-stream backbone will use this via permute to [C, N_t]
-
     return {
       tokensBuf: normBuf,
       N,

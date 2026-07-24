@@ -15,6 +15,7 @@
 
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
+import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
@@ -224,10 +225,21 @@ export function initPipelines(device) {
  * @param {Function} onProgress - progress callback
  * @returns {{ vertices: Float32Array, faces: Uint32Array, numVertices: number, numFaces: number }}
  */
-export async function runInference(device, pipelines, weights, imageElement, onProgress) {
+export async function runInference(device, pipelines, weights, imageElement, onProgress, options = {}) {
   const report = (msg) => { if (onProgress) onProgress(msg); console.log(msg); };
   const _stageTimings = {};
   let _stageStart;
+
+  // Cooperative DINO options (first uptake of @kaminos/webgpu-inference-kit
+  // cooperative porting spine; see cooperative_dino.js). Defaults preserve the
+  // legacy single-submit path exactly.
+  const cooperativeDino = options.cooperativeDino === true;
+  const dinoSchedulingMode = options.dinoSchedulingMode === 'disabled' ? 'disabled' : 'cooperative';
+  const dinoChunkBlocks = Number.isSafeInteger(options.dinoChunkBlocks) && options.dinoChunkBlocks > 0
+    ? options.dinoChunkBlocks
+    : 1;
+  // Surfaced back to the caller/smoke via the returned _cooperativeReports.
+  const _cooperativeReports = {};
 
   // 1. Preprocess image (CPU)
   _stageStart = performance.now();
@@ -273,11 +285,31 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   // 3. DINOv2 image tokenization (GPU)
   _stageStart = performance.now();
-  report('Running DINOv2 backbone...');
-  const encoder2 = device.createCommandEncoder();
-  const dinov2Result = pipelines.imageTokenizer.encode(
-    encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
-  device.queue.submit([encoder2.finish()]);
+  let dinov2Result;
+  if (cooperativeDino) {
+    report(`Running DINOv2 backbone (cooperative, ${dinoSchedulingMode}, chunk=${dinoChunkBlocks})...`);
+    const { result, report: coopReport } = await runCooperativeDino({
+      device,
+      tokenizer: pipelines.imageTokenizer,
+      imageBuf,
+      cameraEmbedBuf,
+      weights: weights.imageTokenizer,
+      numBlocks: CONFIG.numEncoderLayers,
+      chunkBlocks: dinoChunkBlocks,
+      schedulingMode: dinoSchedulingMode,
+      onProgress: (p) => {
+        if (p.percent != null) report(`DINOv2 blocks ${p.completedItems}/${p.totalItems} (${p.percent.toFixed(0)}%)`);
+      },
+    });
+    dinov2Result = result;
+    _cooperativeReports['dinov2-tokenizer'] = coopReport;
+  } else {
+    report('Running DINOv2 backbone...');
+    const encoder2 = device.createCommandEncoder();
+    dinov2Result = pipelines.imageTokenizer.encode(
+      encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
+    device.queue.submit([encoder2.finish()]);
+  }
 
   // Diagnostic: DINOv2 output
   if (DEBUG) {
@@ -624,6 +656,8 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     _triplaneDecoder: pipelines.triplaneDecoder,
     _decoderWeights: weights.decoder,
     _stageTimings,
+    // Cooperative execution reports per phase (empty unless options.cooperativeDino)
+    _cooperativeReports,
     // Expose for parity verification (sdf = density - threshold; add threshold back for raw)
     _sdf: sdf,
     _isosurfaceThreshold: CONFIG.isosurfaceThreshold,
