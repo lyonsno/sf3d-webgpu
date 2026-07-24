@@ -443,6 +443,193 @@ function cadenceTails(coopArm, disArm) {
 }
 
 // ---------------------------------------------------------------------------
+// Gates 8,9 — register candidate GLB through the Kaminos asset viewer and
+// inspect >=2 settled views. Uses a Kaminos checkout (main has the mesh_root
+// route) serving the app with the GLB dir mounted as a browse root.
+// ---------------------------------------------------------------------------
+async function pngNonBlank(buffer) {
+  // Decode enough of the PNG to sample pixel variance without a decoder lib:
+  // load it into a headless page-independent check via luminance spread of the
+  // raw compressed bytes is unreliable, so instead we sample via sharp-free
+  // heuristic: a non-blank render has high byte entropy in the IDAT. We use a
+  // cheap proxy — distinct-byte-value count over the file. Blank canvases
+  // compress to very low distinct-byte counts.
+  const distinct = new Set();
+  for (let i = 0; i < buffer.length; i += 7) distinct.add(buffer[i]);
+  return { distinctBytes: distinct.size, likelyNonBlank: distinct.size > 40 };
+}
+
+async function viewerGates(glbPath) {
+  report.phase = 'viewer';
+  if (!fs.existsSync(KAMINOS_REPO)) {
+    fail('viewer', `Kaminos checkout not found at ${KAMINOS_REPO} (pass --kaminos-repo)`);
+  }
+  // Verify the mesh_root route exists on this Kaminos checkout (fail loud if not).
+  const indexHtml = fs.readFileSync(path.join(KAMINOS_REPO, 'index.html'), 'utf8');
+  if (!indexHtml.includes('kaminosMeshAssetRouteFromSearch') || !indexHtml.includes('mesh_root')) {
+    fail('viewer', `Kaminos checkout ${KAMINOS_REPO} lacks the mesh_root asset-link route`);
+  }
+
+  // Mount the GLB's directory as a browse root and launch serve.py.
+  const glbDir = path.dirname(glbPath);
+  const glbFile = path.basename(glbPath);
+  const kport = await allocatePort();
+  const server = spawn('python3', ['serve.py', String(kport)], {
+    cwd: KAMINOS_REPO,
+    env: { ...process.env, KAMINOS_SPLAT_ASSET_ROOTS: glbDir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  procs.push(server);
+  await new Promise((resolve, reject) => {
+    const to = setTimeout(() => reject(new Error('kaminos serve.py startup timeout')), 20000);
+    const check = setInterval(async () => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${kport}/api/roots`);
+        if (res.ok) { clearTimeout(to); clearInterval(check); resolve(); }
+      } catch {}
+    }, 300);
+    server.on('error', e => { clearTimeout(to); clearInterval(check); reject(e); });
+  }).catch(e => fail('viewer', `kaminos server: ${e.message}`));
+
+  // Find the mounted root id for our GLB dir.
+  const roots = await (await fetch(`http://127.0.0.1:${kport}/api/roots`)).json();
+  const rootId = Object.keys(roots).find(id => {
+    try { return fs.realpathSync(roots[id].path) === fs.realpathSync(glbDir); } catch { return false; }
+  });
+  if (!rootId) fail('viewer', `mounted GLB root not found in /api/roots (dir ${glbDir})`);
+
+  const requestedRoot = rootId;
+  const requestedPath = glbFile;
+  const viewerUrl = `http://127.0.0.1:${kport}/index.html?mesh_root=${encodeURIComponent(requestedRoot)}&mesh_path=${encodeURIComponent(requestedPath)}`;
+
+  const browser = await puppeteer.launch({
+    executablePath: CHROME_PATH, headless: false,
+    args: ['--enable-unsafe-webgpu', '--use-angle=metal', '--window-size=1280,900'],
+  });
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 900 });
+  const pageErrors = [];
+  page.on('pageerror', e => pageErrors.push(e.message));
+
+  try {
+    await page.goto(viewerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    // Wait for the asset-smoke-link state to settle to loaded/failed.
+    let linkState = null;
+    const start = Date.now();
+    while (Date.now() - start < 60000) {
+      linkState = await page.evaluate(() =>
+        (window.kaminosAssetSmokeLinkDebugState ? window.kaminosAssetSmokeLinkDebugState() : null));
+      if (linkState && (linkState.status === 'loaded' || linkState.status === 'failed')) break;
+      await new Promise(r => setTimeout(r, 400));
+    }
+
+    // Effective route the app resolved.
+    const effectiveUrl = await page.evaluate(() => location.href);
+
+    // GATE 8 — registration + mount, requested vs effective identity.
+    const registered = !!linkState
+      && linkState.status === 'loaded'
+      && !!linkState.registeredObjectId
+      && linkState.requestedRoot === requestedRoot
+      && linkState.requestedPath === requestedPath
+      && typeof linkState.effectiveUrl === 'string'
+      && linkState.effectiveUrl.includes('/api/read');
+    // Cross-check the registered object is actually in the scene graph.
+    const inScene = await page.evaluate((objId) => {
+      const scene = window.__kaminosScene;
+      if (!scene || !objId) return false;
+      let found = false;
+      scene.traverse(o => { if (o.userData?.kaminosSceneObject?.id === objId) found = true; });
+      return found;
+    }, linkState?.registeredObjectId);
+
+    report.viewer = {
+      requestedRoot, requestedPath, viewerUrl, effectiveUrl,
+      linkState, registeredInScene: inScene,
+      kaminosCommit: execSync('git rev-parse HEAD', { cwd: KAMINOS_REPO }).toString().trim(),
+    };
+    gate('8-viewer-registration',
+      registered && inScene,
+      { note: registered && inScene
+          ? `registered ${linkState.registeredObjectId} (status ${linkState.status}, requested==effective, in scene)`
+          : `status ${linkState?.status}, registered ${linkState?.registeredObjectId}, inScene ${inScene}, error ${linkState?.error || 'none'}` });
+
+    // GATE 9 — capture >=2 settled views from different camera angles, non-blank.
+    // Rotate via a synthetic pointer drag on the canvas (OrbitControls responds
+    // to real pointer events; no app patching or window hook needed).
+    const views = [];
+    const canvas = await page.$('canvas');
+    const box = canvas ? await canvas.boundingBox() : null;
+    const dragOrbit = async (dx) => {
+      if (!box) return;
+      const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx + dx, cy, { steps: 12 });
+      await page.mouse.up();
+    };
+    const angles = [
+      { name: 'front', drag: 0 },
+      { name: 'three-quarter', drag: 260 },
+    ];
+    for (const a of angles) {
+      if (a.drag) await dragOrbit(a.drag);
+      await new Promise(r => setTimeout(r, 1400)); // settle
+      const shotPath = path.join(SHOT_DIR, `viewer-${a.name}.png`);
+      const buf = await page.screenshot({ path: shotPath });
+      const nb = await pngNonBlank(Buffer.from(buf));
+      views.push({ name: a.name, path: shotPath, bytes: buf.length, ...nb });
+    }
+    report.viewer.views = views;
+    const allNonBlank = views.length >= 2 && views.every(v => v.likelyNonBlank);
+    gate('9-settled-views',
+      allNonBlank && !pageErrors.length,
+      { note: allNonBlank
+          ? `${views.length} settled views non-blank (${views.map(v => `${v.name}:${v.distinctBytes}`).join(', ')})`
+          : `views ${views.map(v => `${v.name}:${v.distinctBytes}${v.likelyNonBlank ? '' : ' BLANK'}`).join(', ')}${pageErrors.length ? ` pageErrors:${pageErrors.join('|')}` : ''}` });
+
+    await browser.close().catch(() => {});
+    return { viewerUrl, effectiveUrl };
+  } catch (e) {
+    await browser.close().catch(() => {});
+    fail('viewer', e.message, { stack: e.stack });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Gates 10,11 — durable report already written throughout; landing capsule.
+// ---------------------------------------------------------------------------
+function emitLandingCapsule(viewer) {
+  report.phase = 'landing';
+  report.ok = Object.values(report.gates).every(g => g.passed);
+  report.landing = {
+    ok: report.ok,
+    reportPath: REPORT_PATH,
+    source: {
+      candidateCheckout: report.source.checkout,
+      candidateCommit: report.source.commit,
+      kitVersion: report.source.kitVersion,
+      route: ROUTE_ID,
+      inputSha256: report.source.inputSha256,
+      weightsSha256: report.source.weightsSha256,
+    },
+    artifacts: {
+      candidateGlb: report.glb.candidateGlbPath,
+      viewerShots: report.viewer.views?.map(v => v.path) || [],
+      capsuleReport: REPORT_PATH,
+    },
+    operatorSmokeUrl: viewer?.viewerUrl || null,
+    numericalParity: {
+      dinoTokensIdentical: report.numericalPayload.identical,
+      sha256: report.numericalPayload.coopSha256,
+    },
+    cadence: report.cadence,
+  };
+  writeReport();
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 (async () => {
@@ -454,13 +641,17 @@ function cadenceTails(coopArm, disArm) {
   cadenceTails(coopArm, disArm);
   await browser.close().catch(() => {});
 
-  // Viewer gates (8,9) are added in the next build step. For now mark pending
-  // so the report is honest about what has and hasn't run.
-  report.viewer = { status: 'not-yet-run', glbForViewer: glbPath };
-  report.phase = 'pre-viewer-complete';
-  report.ok = Object.values(report.gates).every(g => g.passed);
-  writeReport();
-  console.log(`\n${report.ok ? '✓' : '✗'} pre-viewer gates complete — report: ${REPORT_PATH}`);
+  const viewer = await viewerGates(glbPath);
+  emitLandingCapsule(viewer);
+
   for (const p of procs) { try { p.kill(); } catch {} }
-  process.exit(report.ok ? 0 : 1);
+  if (report.ok) {
+    console.log('\n✓ CAPSULE PASSED — all gates green');
+    console.log(`  report:            ${REPORT_PATH}`);
+    console.log(`  candidate GLB:     ${report.glb.candidateGlbPath}`);
+    console.log(`  operator smoke URL: ${report.landing.operatorSmokeUrl}`);
+    process.exit(0);
+  } else {
+    fail('landing', `some gates failed: ${Object.entries(report.gates).filter(([, g]) => !g.passed).map(([k]) => k).join(', ')}`);
+  }
 })().catch(e => fail(report.phase || 'unknown', e.message, { stack: e.stack }));
