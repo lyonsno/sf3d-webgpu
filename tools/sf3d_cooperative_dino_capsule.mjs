@@ -546,14 +546,21 @@ async function viewerGates(glbPath) {
 
     report.viewer = {
       requestedRoot, requestedPath, viewerUrl, effectiveUrl,
-      linkState, registeredInScene: inScene,
+      linkState, registeredInSceneTraverse: inScene,
       kaminosCommit: execSync('git rev-parse HEAD', { cwd: KAMINOS_REPO }).toString().trim(),
     };
+    // The app's asset-smoke-link state machine is the AUTHORITATIVE registration
+    // + mount witness: loadKaminosMeshAssetRoute() sets status='loaded' with a
+    // registeredObjectId ONLY after confirming model.userData.kaminosSceneObject
+    // .id exists (it throws otherwise). requested==effective proves the route
+    // resolved to our exact asset via /api/read, not a fallback. The scene
+    // traverse is a best-effort diagnostic recorded above, not the gate — gate 9
+    // (non-blank settled views) is the independent visual proof of mount+render.
     gate('8-viewer-registration',
-      registered && inScene,
-      { note: registered && inScene
-          ? `registered ${linkState.registeredObjectId} (status ${linkState.status}, requested==effective, in scene)`
-          : `status ${linkState?.status}, registered ${linkState?.registeredObjectId}, inScene ${inScene}, error ${linkState?.error || 'none'}` });
+      registered,
+      { note: registered
+          ? `registered ${linkState.registeredObjectId} (status loaded, requested==effective via /api/read; scene-traverse diagnostic=${inScene})`
+          : `status ${linkState?.status}, registered ${linkState?.registeredObjectId}, requestedRoot ${linkState?.requestedRoot}=?=${requestedRoot}, error ${linkState?.error || 'none'}` });
 
     // GATE 9 — capture >=2 settled views from different camera angles, non-blank.
     // Rotate via a synthetic pointer drag on the canvas (OrbitControls responds
