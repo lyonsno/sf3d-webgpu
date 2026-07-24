@@ -612,3 +612,119 @@ export class SF3DImageTokenizer {
 }
 
 export { VIT_CONFIG };
+
+export const VIT_NUM_BLOCKS = VIT_CONFIG.numLayers;
+
+/**
+ * Deterministically record the canonical DINO orchestration trace, GPU-free.
+ *
+ * This is the single source of truth for both the cooperative-DINO contract test
+ * and the conformance-adapter fingerprint. It stubs the tokenizer's GPU-touching
+ * _dispatch* helpers to append ordered ops (op name + source/dest buffer
+ * identity — the data flow that determines numerics), then walks the EXACT
+ * _setupEncode -> per-block _encodeBlock -> _finalizeEncode sequence, cut into
+ * the same fixed chunks the real cooperative driver uses.
+ *
+ * @param {object} o
+ * @param {number} o.numBlocks
+ * @param {number} o.chunkBlocks
+ * @param {(blockStart:number, blockEnd:number, recordChunkOps:()=>void)=>Promise<void>} [o.driver]
+ *   Optional. When provided (conformance path), the caller's shared boundary
+ *   driver is invoked once per chunk with a `recordChunkOps` callback that emits
+ *   that chunk's block ops in order. When absent (pure fingerprint path), chunks
+ *   are walked directly. Either way the recorded trace is identical.
+ * @returns {{ chunks: Array<{blockStart:number,blockEnd:number,ops:Array<{op:string,input:(number|null),output:(number|null)}>}>, output: {N:number,tokenH:number,tokenW:number,dim:number} } | Promise<...>}
+ *   Returns a plain object when no driver is given; returns a Promise when a
+ *   (potentially async) driver is given.
+ */
+export function recordDinoDispatchTrace({ numBlocks, chunkBlocks, driver }) {
+  if (numBlocks !== VIT_CONFIG.numLayers) {
+    throw new Error(`recordDinoDispatchTrace numBlocks ${numBlocks} must equal ${VIT_CONFIG.numLayers}`);
+  }
+  globalThis.GPUBufferUsage = globalThis.GPUBufferUsage || {
+    STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, MAP_READ: 8, UNIFORM: 16,
+  };
+
+  let bufSeq = 0;
+  const mkBuf = (tag) => ({ __buf: tag, id: bufSeq++ });
+
+  const tok = Object.create(SF3DImageTokenizer.prototype);
+  tok.device = { createBuffer: () => mkBuf('empty') };
+  tok._uniformCache = new Map();
+
+  // Ops for the CURRENT chunk are appended here; flushed into `chunks`.
+  let currentOps = null;
+  const rec = (op) => (...args) => {
+    const input = args[1]?.__buf ? args[1].id : null;
+    const output = args[2]?.__buf ? args[2].id : null;
+    currentOps.push({ op, input, output });
+  };
+  for (const name of [
+    '_dispatchPatchEmbed', '_dispatchSiLU', '_dispatchLinear', '_dispatchModulatedLN',
+    '_dispatchAttnScores', '_dispatchAttnSoftmax', '_dispatchAttnApply',
+    '_dispatchLayerScaleResidual', '_dispatchLinearGelu', '_dispatchLayerNorm',
+  ]) {
+    tok[name] = rec(name);
+  }
+
+  const recEncoder = { __id: 'trace', copyBufferToBuffer() {}, finish() { return {}; } };
+  const imageBuf = { __buf: 'image', id: -1 };
+  const camBuf = { __buf: 'cam', id: -2 };
+  const weights = makeTraceWeights(numBlocks);
+  const chunks = [];
+
+  // Setup ops belong to the first chunk. We open the first chunk, run setup,
+  // then encode blocks chunk by chunk, then finalize into the last chunk.
+  const ctx = (() => {
+    currentOps = [];
+    const c = tok._setupEncode(recEncoder, imageBuf, camBuf, weights);
+    return c;
+  })();
+
+  const emitChunk = (start, end) => {
+    // On the first chunk, currentOps already holds the setup ops; otherwise open fresh.
+    if (start !== 0) currentOps = [];
+    for (let l = start; l < end; l++) tok._encodeBlock(recEncoder, l, ctx, weights);
+    let output = null;
+    if (end === numBlocks) {
+      const r = tok._finalizeEncode(recEncoder, ctx, weights);
+      output = { N: r.N, tokenH: r.tokenH, tokenW: r.tokenW, dim: VIT_CONFIG.dim };
+    }
+    chunks.push({ blockStart: start, blockEnd: end, ops: currentOps, _output: output });
+  };
+
+  const finish = () => {
+    const output = chunks.find(c => c._output)?._output || null;
+    for (const c of chunks) delete c._output;
+    return { chunks, output };
+  };
+
+  if (!driver) {
+    for (let start = 0; start < numBlocks; start += chunkBlocks) {
+      emitChunk(start, Math.min(start + chunkBlocks, numBlocks));
+    }
+    return finish();
+  }
+
+  // Driver path (conformance): the caller's shared boundary driver invokes the
+  // per-chunk callback in order; may be async. Returns a Promise.
+  return (async () => {
+    for (let start = 0; start < numBlocks; start += chunkBlocks) {
+      const end = Math.min(start + chunkBlocks, numBlocks);
+      // eslint-disable-next-line no-await-in-loop
+      await driver(start, end, () => emitChunk(start, end));
+    }
+    return finish();
+  })();
+}
+
+function makeTraceWeights(numBlocks) {
+  const lin = () => ({ weight: { __buf: 'w', id: 900 }, bias: { __buf: 'b', id: 901 } });
+  const block = {
+    norm1Mod: lin(), norm2Mod: lin(), norm1: lin(), norm2: lin(),
+    attn: { q: lin(), k: lin(), v: lin(), proj: lin() },
+    mlp: { fc1: lin(), fc2: lin() },
+    layerScale1: { __buf: 'ls', id: 902 }, layerScale2: { __buf: 'ls', id: 903 },
+  };
+  return { blocks: Array.from({ length: numBlocks }, () => block), layernorm: lin() };
+}
