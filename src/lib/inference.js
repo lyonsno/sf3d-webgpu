@@ -240,6 +240,8 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     : 1;
   // Surfaced back to the caller/smoke via the returned _cooperativeReports.
   const _cooperativeReports = {};
+  // Exact DINO numerical payload (only when options.captureDinoPayload).
+  let _dinoPayload = null;
 
   // 1. Preprocess image (CPU)
   _stageStart = performance.now();
@@ -309,6 +311,20 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     dinov2Result = pipelines.imageTokenizer.encode(
       encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
     device.queue.submit([encoder2.finish()]);
+  }
+
+  // Exact numerical payload capture (acceptance-capsule gate 5). Reads back the
+  // complete DINOv2 token buffer — the canonical numerical output of the DINO
+  // boundary being A/B'd — so control and candidate can be hashed and compared
+  // field-by-field. Gated by option: normal runs pay no extra readback.
+  if (options.captureDinoPayload) {
+    const tokens = await readBuffer(device, dinov2Result.tokensBuf, dinov2Result.N * 1024 * 4);
+    _dinoPayload = {
+      shape: { N: dinov2Result.N, dim: 1024 },
+      length: tokens.length,
+      // Float32Array — the capsule hashes bytes and finds first differing index.
+      tokens: Float32Array.from(tokens),
+    };
   }
 
   // Diagnostic: DINOv2 output
@@ -658,6 +674,8 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     _stageTimings,
     // Cooperative execution reports per phase (empty unless options.cooperativeDino)
     _cooperativeReports,
+    // Exact DINO numerical payload for A/B comparison (null unless captured).
+    _dinoPayload,
     // Expose for parity verification (sdf = density - threshold; add threshold back for raw)
     _sdf: sdf,
     _isosurfaceThreshold: CONFIG.isosurfaceThreshold,
