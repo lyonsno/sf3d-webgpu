@@ -555,9 +555,12 @@ async function viewerGates(glbPath) {
     // dragging from an EMPTY upper region (well away from the centered transform
     // gizmo, which otherwise swallows a center-drag) so OrbitControls receives it.
     const views = [];
-    const canvas = await page.$('canvas');
+    // The main 3D renderer canvas is Three.js's renderer.domElement, appended to
+    // #viewport (OrbitControls listens on it). Target it specifically — a bare
+    // 'canvas' selector grabs a hidden atlas canvas.
+    const canvas = await page.$('#viewport canvas');
     const box = canvas ? await canvas.boundingBox() : null;
-    if (!box) fail('viewer', 'no renderer canvas found for view capture');
+    if (!box) fail('viewer', 'no #viewport renderer canvas found for view capture');
     const dragOrbit = async (dx, dy) => {
       // Start in the upper-left quadrant of the canvas — empty sky, no gizmo.
       const sx = box.x + box.width * 0.30, sy = box.y + box.height * 0.22;
