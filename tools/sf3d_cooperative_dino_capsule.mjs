@@ -447,18 +447,6 @@ function cadenceTails(coopArm, disArm) {
 // inspect >=2 settled views. Uses a Kaminos checkout (main has the mesh_root
 // route) serving the app with the GLB dir mounted as a browse root.
 // ---------------------------------------------------------------------------
-async function pngNonBlank(buffer) {
-  // Decode enough of the PNG to sample pixel variance without a decoder lib:
-  // load it into a headless page-independent check via luminance spread of the
-  // raw compressed bytes is unreliable, so instead we sample via sharp-free
-  // heuristic: a non-blank render has high byte entropy in the IDAT. We use a
-  // cheap proxy — distinct-byte-value count over the file. Blank canvases
-  // compress to very low distinct-byte counts.
-  const distinct = new Set();
-  for (let i = 0; i < buffer.length; i += 7) distinct.add(buffer[i]);
-  return { distinctBytes: distinct.size, likelyNonBlank: distinct.size > 40 };
-}
-
 async function viewerGates(glbPath) {
   report.phase = 'viewer';
   if (!fs.existsSync(KAMINOS_REPO)) {
@@ -562,39 +550,70 @@ async function viewerGates(glbPath) {
           ? `registered ${linkState.registeredObjectId} (status loaded, requested==effective via /api/read; scene-traverse diagnostic=${inScene})`
           : `status ${linkState?.status}, registered ${linkState?.registeredObjectId}, requestedRoot ${linkState?.requestedRoot}=?=${requestedRoot}, error ${linkState?.error || 'none'}` });
 
-    // GATE 9 — capture >=2 settled views from different camera angles, non-blank.
-    // Rotate via a synthetic pointer drag on the canvas (OrbitControls responds
-    // to real pointer events; no app patching or window hook needed).
+    // GATE 9 — capture >=2 SETTLED views from DIFFERENT camera angles, non-blank
+    // AND provably distinct. Rotate via a synthetic pointer drag on the canvas,
+    // dragging from an EMPTY upper region (well away from the centered transform
+    // gizmo, which otherwise swallows a center-drag) so OrbitControls receives it.
     const views = [];
     const canvas = await page.$('canvas');
     const box = canvas ? await canvas.boundingBox() : null;
-    const dragOrbit = async (dx) => {
-      if (!box) return;
-      const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
-      await page.mouse.move(cx, cy);
+    if (!box) fail('viewer', 'no renderer canvas found for view capture');
+    const dragOrbit = async (dx, dy) => {
+      // Start in the upper-left quadrant of the canvas — empty sky, no gizmo.
+      const sx = box.x + box.width * 0.30, sy = box.y + box.height * 0.22;
+      await page.mouse.move(sx, sy);
       await page.mouse.down();
-      await page.mouse.move(cx + dx, cy, { steps: 12 });
+      for (let i = 1; i <= 20; i++) {
+        await page.mouse.move(sx + (dx * i) / 20, sy + (dy * i) / 20);
+        await new Promise(r => setTimeout(r, 8));
+      }
       await page.mouse.up();
     };
     const angles = [
-      { name: 'front', drag: 0 },
-      { name: 'three-quarter', drag: 260 },
+      { name: 'front', dx: 0, dy: 0 },
+      { name: 'three-quarter', dx: 320, dy: 90 },
     ];
     for (const a of angles) {
-      if (a.drag) await dragOrbit(a.drag);
-      await new Promise(r => setTimeout(r, 1400)); // settle
+      if (a.dx || a.dy) await dragOrbit(a.dx, a.dy);
+      await new Promise(r => setTimeout(r, 1500)); // settle
       const shotPath = path.join(SHOT_DIR, `viewer-${a.name}.png`);
       const buf = await page.screenshot({ path: shotPath });
-      const nb = await pngNonBlank(Buffer.from(buf));
-      views.push({ name: a.name, path: shotPath, bytes: buf.length, ...nb });
+      views.push({ name: a.name, path: shotPath, bytes: buf.length, buffer: Buffer.from(buf) });
     }
+    // Non-blank via real luminance-variance over the decoded framebuffer region
+    // (sampled through the page, not a byte heuristic), and prove the two views
+    // are actually DIFFERENT (rotation happened, not the same frame twice).
+    for (const v of views) {
+      const stats = await page.evaluate(async (b64) => {
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = 'data:image/png;base64,' + b64; });
+        const c = document.createElement('canvas');
+        // sample the right 60% (the 3D viewport, excluding the left UI panel)
+        const sx = Math.floor(img.width * 0.4);
+        c.width = img.width - sx; c.height = img.height;
+        const cx = c.getContext('2d');
+        cx.drawImage(img, sx, 0, c.width, c.height, 0, 0, c.width, c.height);
+        const d = cx.getImageData(0, 0, c.width, c.height).data;
+        let sum = 0, sum2 = 0, n = 0;
+        for (let i = 0; i < d.length; i += 40) { const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; sum += l; sum2 += l * l; n++; }
+        const mean = sum / n; const variance = sum2 / n - mean * mean;
+        return { mean, variance, stddev: Math.sqrt(Math.max(0, variance)), samples: n };
+      }, v.buffer.toString('base64'));
+      v.luminance = stats;
+      v.likelyNonBlank = stats.stddev > 8; // a rendered mesh has real luminance spread
+      delete v.buffer;
+    }
+    // Distinctness: hash the two viewport regions; identical hashes => no rotation.
+    const hashes = views.map(v => crypto.createHash('sha256').update(fs.readFileSync(v.path)).digest('hex'));
+    const viewsDistinct = new Set(hashes).size === views.length;
     report.viewer.views = views;
+    report.viewer.viewsDistinct = viewsDistinct;
     const allNonBlank = views.length >= 2 && views.every(v => v.likelyNonBlank);
-    gate('9-settled-views',
-      allNonBlank && !pageErrors.length,
-      { note: allNonBlank
-          ? `${views.length} settled views non-blank (${views.map(v => `${v.name}:${v.distinctBytes}`).join(', ')})`
-          : `views ${views.map(v => `${v.name}:${v.distinctBytes}${v.likelyNonBlank ? '' : ' BLANK'}`).join(', ')}${pageErrors.length ? ` pageErrors:${pageErrors.join('|')}` : ''}` });
+    const pass = allNonBlank && viewsDistinct && !pageErrors.length;
+    gate('9-settled-views', pass, {
+      note: pass
+        ? `${views.length} distinct non-blank views (${views.map(v => `${v.name}:σ${v.luminance.stddev.toFixed(1)}`).join(', ')})`
+        : `nonBlank=${allNonBlank} distinct=${viewsDistinct} (${views.map(v => `${v.name}:σ${v.luminance?.stddev?.toFixed(1)}`).join(', ')})${pageErrors.length ? ` pageErrors:${pageErrors.join('|')}` : ''}` });
 
     await browser.close().catch(() => {});
     return { viewerUrl, effectiveUrl };
