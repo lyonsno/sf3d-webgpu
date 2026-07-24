@@ -556,11 +556,21 @@ async function viewerGates(glbPath) {
     // gizmo, which otherwise swallows a center-drag) so OrbitControls receives it.
     const views = [];
     // The main 3D renderer canvas is Three.js's renderer.domElement, appended to
-    // #viewport (OrbitControls listens on it). Target it specifically — a bare
-    // 'canvas' selector grabs a hidden atlas canvas.
-    const canvas = await page.$('#viewport canvas');
-    const box = canvas ? await canvas.boundingBox() : null;
-    if (!box) fail('viewer', 'no #viewport renderer canvas found for view capture');
+    // #viewport (OrbitControls listens on it). Puppeteer's boundingBox() can
+    // return null for it depending on layout, so read the largest visible canvas
+    // rect via getBoundingClientRect in-page and drag by absolute coords.
+    const box = await page.evaluate(() => {
+      const canvases = [...document.querySelectorAll('#viewport canvas, canvas')];
+      let best = null;
+      for (const c of canvases) {
+        const r = c.getBoundingClientRect();
+        if (r.width > 200 && r.height > 200 && (!best || r.width * r.height > best.width * best.height)) {
+          best = { x: r.x, y: r.y, width: r.width, height: r.height };
+        }
+      }
+      return best;
+    });
+    if (!box) fail('viewer', 'no visible renderer canvas (>200px) found for view capture');
     const dragOrbit = async (dx, dy) => {
       // Start in the upper-left quadrant of the canvas — empty sky, no gizmo.
       const sx = box.x + box.width * 0.30, sy = box.y + box.height * 0.22;
