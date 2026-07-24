@@ -217,51 +217,85 @@ export async function runCooperativeDino(opts) {
 
   let result = null;
 
+  // Production run: create a real execution and drive the SHARED boundary
+  // driver against the facade the execution hands to run(). The driver's
+  // encode/submit produce real WebGPU command buffers on the real device queue.
   await execution.run(async cooperative => {
-    const gpu = cooperative.startBoundary(DINO_BOUNDARY_ID);
-
-    // Drive the tokenizer's block loop through the cooperative boundary. The
-    // tokenizer owns all encoding, bindings, buffers, dispatch geometry, and
-    // ping-pong; the driver only decides WHERE the command buffer is cut and
-    // WHEN to submit + yield. When schedulingMode is 'disabled' the facade
-    // still requires the same coverage but skips per-duty yields and takes one
-    // terminal fence, giving the A/B comparison over identical declared work.
-    result = await tokenizer.encodeCooperative({
-      imageBuf,
-      cameraEmbedBuf,
-      weights,
+    result = await driveDinoCooperativeBoundary(cooperative, {
       numBlocks,
       chunkBlocks,
-      // driver.runChunk(blockStart, blockEnd, encodeChunk) is called by the
-      // tokenizer once per fixed chunk of blocks, in order. encodeChunk(encoder)
-      // records that chunk's dispatches into the supplied command encoder.
-      driver: async (blockStart, blockEnd, encodeChunk) => {
-        const range = gpu.nextRange();
-        if (!range) {
-          throw new Error(
-            `cooperative DINO boundary exhausted ranges before block ${blockStart}`,
-          );
-        }
-        await gpu.runGpuDuty(range, {
-          encode() {
-            const encoder = device.createCommandEncoder({
-              label: `dino-blocks-${blockStart}-${blockEnd}`,
-            });
-            encodeChunk(encoder);
-            return encoder.finish();
-          },
-          submit(commandBuffer) {
-            runtime.queue.submit([commandBuffer]);
-          },
+      encodeChunk: ({ blockStart, blockEnd, encodeInto }) => {
+        const encoder = device.createCommandEncoder({
+          label: `dino-blocks-${blockStart}-${blockEnd}`,
         });
+        encodeInto(encoder);
+        return encoder.finish();
       },
+      submitChunk: (commandBuffer) => runtime.queue.submit([commandBuffer]),
+      encodeTokenizer: (driver) => tokenizer.encodeCooperative({
+        imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver,
+      }),
     });
-
-    // Boundary must be fully consumed for the facade to accept completion.
-    if (gpu.nextRange() != null) {
-      throw new Error('cooperative DINO boundary left ranges unconsumed');
-    }
   });
 
   return { result, report: execution.finish() };
+}
+
+/**
+ * SHARED cooperative-DINO boundary driver.
+ *
+ * Consumes the supplied cooperative facade DIRECTLY (the object passed to
+ * `execution.run`'s callback — with `startBoundary`). It does NOT create a
+ * nested cooperative execution: production and conformance both hand this driver
+ * a facade whose runtime they own, so all declared work, cancellation, failure
+ * injection, progress, and settlement stay inside that one facade's authority.
+ *
+ * The driver decides WHERE the command buffer is cut (per fixed chunk of blocks)
+ * and delegates HOW a chunk is encoded/submitted to the caller via injected
+ * `encodeChunk`/`submitChunk`. This is the only seam that differs between:
+ *   - production: real GPUCommandEncoder + real device.queue.submit;
+ *   - conformance: deterministic instrumented encode/submit tokens (no GPU).
+ *
+ * Block order, chunk boundaries, and the tokenizer's ping-pong are identical on
+ * both paths, so the canonical orchestration trace (and its fingerprint) match.
+ *
+ * @param {object} cooperative                 facade from execution.run callback
+ * @param {object} o
+ * @param {number} o.numBlocks
+ * @param {number} o.chunkBlocks
+ * @param {(ctx:{blockStart:number,blockEnd:number,encodeInto:(enc:any)=>void})=>any} o.encodeChunk
+ *        returns the "command buffer" (real GPUCommandBuffer or a deterministic token)
+ * @param {(commandBuffer:any)=>void} o.submitChunk
+ * @param {(driver:Function)=>Promise<any>} o.encodeTokenizer
+ *        invokes tokenizer.encodeCooperative with the per-chunk driver we build
+ * @returns {Promise<any>} the tokenizer.encode() output ({ tokensBuf, N, tokenH, tokenW })
+ */
+export async function driveDinoCooperativeBoundary(cooperative, o) {
+  const { encodeChunk, submitChunk, encodeTokenizer } = o;
+  const gpu = cooperative.startBoundary(DINO_BOUNDARY_ID);
+
+  // The tokenizer calls this once per fixed chunk of blocks, in order. We map
+  // each chunk to exactly one cooperative range + gpu duty.
+  const perChunkDriver = async (blockStart, blockEnd, encodeInto) => {
+    const range = gpu.nextRange();
+    if (!range) {
+      throw new Error(`cooperative DINO boundary exhausted ranges before block ${blockStart}`);
+    }
+    await gpu.runGpuDuty(range, {
+      encode() {
+        return encodeChunk({ blockStart, blockEnd, encodeInto });
+      },
+      submit(commandBuffer) {
+        submitChunk(commandBuffer);
+      },
+    });
+  };
+
+  const result = await encodeTokenizer(perChunkDriver);
+
+  // Boundary must be fully consumed for the facade to accept completion.
+  if (gpu.nextRange() != null) {
+    throw new Error('cooperative DINO boundary left ranges unconsumed');
+  }
+  return result;
 }
