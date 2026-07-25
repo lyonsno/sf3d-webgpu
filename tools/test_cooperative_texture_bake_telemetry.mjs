@@ -54,7 +54,7 @@ async function runArm(schedulingMode) {
   assert.equal(submitted.length, 2);
   assert.equal(scratch.every(buffer => buffer.destroyed), true);
   assert.ok(report.textureBakeTelemetry, 'texture-bake telemetry must be present');
-  assert.equal(report.textureBakeTelemetry.schema, 'sf3d.texture-bake-duty-telemetry.v0');
+  assert.equal(report.textureBakeTelemetry.schema, 'sf3d.texture-bake-duty-telemetry.v1');
   assert.equal(report.textureBakeTelemetry.ranges.length, 2);
   assert.equal(report.textureBakeTelemetry.scratch.allocatedCount, 2);
   assert.equal(report.textureBakeTelemetry.scratch.allocatedBytes, 128);
@@ -70,8 +70,20 @@ async function runArm(schedulingMode) {
   assert.equal(
     report.textureBakeTelemetry.ranges.every(range => (
       range.hostEncodeMs >= 0
+      && range.dutyLifecycleMs >= 0
       && range.dutyWallMs >= 0
       && range.browserYieldMs >= 0
+      && range.prepareEncodeInterval?.endMs >= range.prepareEncodeInterval?.startMs
+      && range.submitInterval?.endMs >= range.submitInterval?.startMs
+      && range.dutyLifecycleInterval?.endMs >= range.dutyLifecycleInterval?.startMs
+      && range.browserYieldIntervals.every(interval => interval.endMs >= interval.startMs)
+    )),
+    true,
+  );
+  assert.equal(
+    report.textureBakeTelemetry.queueFences.every(fence => (
+      fence.queueInterval.endMs >= fence.queueInterval.startMs
+      && fence.retirementInterval.endMs >= fence.retirementInterval.startMs
     )),
     true,
   );

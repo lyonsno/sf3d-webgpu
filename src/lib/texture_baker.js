@@ -896,7 +896,12 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
       normalsAll.destroy();
     }
     if (options.telemetry) {
-      options.telemetry.readbackMs = performance.now() - readbackStartedAtMs;
+      const readbackCompletedAtMs = performance.now();
+      options.telemetry.readbackMs = readbackCompletedAtMs - readbackStartedAtMs;
+      options.telemetry.readbackInterval = {
+        startMs: readbackStartedAtMs,
+        endMs: readbackCompletedAtMs,
+      };
       options.telemetry.aggregateOutputBytes = numOccupied * 3 * 4 * 2;
       options.telemetry.aggregateOutputsRetired = true;
     }
@@ -945,12 +950,20 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
   // Decode features + perturb_normal for every occupied texel. Per-texel decode
   // is fully independent, so this is monolithic by default but can be driven in
   // cooperative batches via options.cooperativeBatch (see decodeTexelFeatures).
-  if (options.telemetry) options.telemetry.cpuPrepMs = performance.now() - cpuPrepStartedAtMs;
+  if (options.telemetry) {
+    const cpuPrepCompletedAtMs = performance.now();
+    options.telemetry.cpuPrepMs = cpuPrepCompletedAtMs - cpuPrepStartedAtMs;
+    options.telemetry.cpuPrepInterval = {
+      startMs: cpuPrepStartedAtMs,
+      endMs: cpuPrepCompletedAtMs,
+    };
+  }
   const { featuresCPU, normalsCPU } = await decodeTexelFeatures(
     device, triplaneDecoder, triplanesBuf, decoderWeights, queryPositions, numOccupied, options);
   const materializationStartedAtMs = performance.now();
 
   // Build albedo RGBA texture
+  const albedoStartedAtMs = performance.now();
   const albedo = new Uint8Array(resolution * resolution * 4);
   for (let i = 0; i < numOccupied; i++) {
     const texIdx = occupiedIndices[i];
@@ -959,15 +972,19 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     albedo[texIdx * 4 + 2] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3 + 2] * 255)));
     albedo[texIdx * 4 + 3] = 255;
   }
+  const albedoCompletedAtMs = performance.now();
 
   // Build normal map: transform perturb_normal from world space to tangent space
+  const normalDefaultStartedAtMs = performance.now();
   const normalMap = new Uint8Array(resolution * resolution * 4);
   // Default normal (pointing straight out): [0.5, 0.5, 1.0] in encoded space
   for (let i = 0; i < resolution * resolution; i++) {
     normalMap[i * 4 + 2] = 255; // blue channel = 1.0 (pointing along surface normal)
     normalMap[i * 4 + 3] = 255;
   }
+  const normalDefaultCompletedAtMs = performance.now();
 
+  const normalOccupiedStartedAtMs = performance.now();
   for (let i = 0; i < numOccupied; i++) {
     const texIdx = occupiedIndices[i];
     const tbnBase = texIdx * 9;
@@ -997,14 +1014,36 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     normalMap[texIdx * 4 + 2] = b;
     normalMap[texIdx * 4 + 3] = 255;
   }
+  const normalOccupiedCompletedAtMs = performance.now();
 
   // Dilate both textures (matching PyTorch: resolution // 150 ≈ 7 at 1024)
   const dilateIters = Math.max(1, Math.round(resolution / 150));
+  const albedoDilationStartedAtMs = performance.now();
   _dilateTexture(albedo, mask, resolution, dilateIters);
+  const albedoDilationCompletedAtMs = performance.now();
+  const normalDilationStartedAtMs = performance.now();
   _dilateTexture(normalMap, mask, resolution, dilateIters);
+  const normalDilationCompletedAtMs = performance.now();
 
   if (options.telemetry) {
-    options.telemetry.cpuMaterializationMs = performance.now() - materializationStartedAtMs;
+    options.telemetry.cpuMaterializationMs = normalDilationCompletedAtMs - materializationStartedAtMs;
+    options.telemetry.cpuMaterializationInterval = {
+      startMs: materializationStartedAtMs,
+      endMs: normalDilationCompletedAtMs,
+    };
+    options.telemetry.materializationIntervals = {
+      albedo: { startMs: albedoStartedAtMs, endMs: albedoCompletedAtMs },
+      normalDefault: { startMs: normalDefaultStartedAtMs, endMs: normalDefaultCompletedAtMs },
+      normalOccupied: { startMs: normalOccupiedStartedAtMs, endMs: normalOccupiedCompletedAtMs },
+      albedoDilation: {
+        startMs: albedoDilationStartedAtMs,
+        endMs: albedoDilationCompletedAtMs,
+      },
+      normalDilation: {
+        startMs: normalDilationStartedAtMs,
+        endMs: normalDilationCompletedAtMs,
+      },
+    };
   }
   return { albedo, normalMap };
 }
