@@ -14,7 +14,7 @@
  * Asserts: albedo+normal textures byte-identical across all three; coop-on
  * reports per-gpu-duty fence; measures texture-bake-window rAF gaps per arm.
  *
- * Usage: node tools/smoke_cooperative_bake_ab.mjs [--image PATH] [--batch N]
+ * Usage: node tools/smoke_cooperative_bake_ab.mjs --expected-revision SHA [--image PATH] [--batch N]
  */
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
@@ -29,21 +29,79 @@ const argVal = (f, d) => { const i = process.argv.indexOf(f); return i >= 0 && p
 const IMAGE = path.resolve(argVal('--image', path.join(process.env.HOME, '.local/state/gpu-greenroom/outputs/b4fe3aa9e629/input.png')));
 const BATCH = Number(argVal('--batch', '16384')) || 16384;
 const REPORT_PATH = path.resolve(argVal('--report', '/tmp/sf3d-cooperative-bake-ab.json'));
+const EXPECTED_REVISION = argVal('--expected-revision', process.env.SF3D_EXPECTED_REVISION || '');
+const ALLOW_DIRTY_SOURCE = process.argv.includes('--allow-dirty-source');
 const WEIGHT_PATH = path.join(REPO, 'public', 'weights.bin');
+const dirtyStatus = execFileSync('git', ['status', '--short'], {
+  cwd: REPO,
+  encoding: 'utf8',
+}).trim();
+const dirtyPaths = dirtyStatus.split('\n').filter(Boolean);
+let dirtyDiffSha256 = null;
+if (dirtyPaths.length > 0) {
+  const dirtyHash = crypto.createHash('sha256');
+  dirtyHash.update(execFileSync('git', ['diff', 'HEAD', '--binary'], { cwd: REPO }));
+  const untracked = execFileSync(
+    'git',
+    ['ls-files', '--others', '--exclude-standard', '-z'],
+    { cwd: REPO },
+  ).toString().split('\0').filter(Boolean).sort();
+  for (const relativePath of untracked) {
+    dirtyHash.update(relativePath);
+    const absolutePath = path.join(REPO, relativePath);
+    if (fs.statSync(absolutePath).isFile()) dirtyHash.update(fs.readFileSync(absolutePath));
+  }
+  dirtyDiffSha256 = dirtyHash.digest('hex');
+}
 const sourceIdentity = {
   revision: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim(),
-  dirtyPaths: execFileSync('git', ['status', '--short'], { cwd: REPO, encoding: 'utf8' })
-    .trim().split('\n').filter(Boolean),
+  requestedRevision: EXPECTED_REVISION || null,
+  matchesRequestedRevision: Boolean(EXPECTED_REVISION)
+    && execFileSync('git', ['rev-parse', EXPECTED_REVISION], { cwd: REPO, encoding: 'utf8' }).trim()
+      === execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim(),
+  clean: dirtyPaths.length === 0,
+  dirtyModeExplicit: ALLOW_DIRTY_SOURCE,
+  dirtyDiffSha256,
+  dirtyPaths,
   worktree: REPO,
 };
+const sourceAccepted = sourceIdentity.matchesRequestedRevision
+  && (sourceIdentity.clean || sourceIdentity.dirtyModeExplicit);
 
 const allocatePort = () => new Promise((res, rej) => { const s = net.createServer(); s.unref(); s.on('error', rej); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => res(port)); }); });
 const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch {} } };
-const fail = (m) => { fs.writeFileSync(REPORT_PATH, JSON.stringify({ ok: false, error: m }, null, 2)); console.error(`\n✗ SMOKE FAILED: ${m}`); cleanup(); process.exit(1); };
+let activeRouteIdentity = { source: sourceIdentity, requestedBatchTexels: BATCH };
+const fail = (m, failurePhase = 'unknown', failureDetails = null) => {
+  fs.writeFileSync(REPORT_PATH, JSON.stringify({
+    ok: false,
+    failurePhase,
+    lastTrustworthyEvidence: activeRouteIdentity,
+    failureDetails,
+    error: m,
+  }, null, 2));
+  console.error(`\n✗ SMOKE FAILED: ${m}`);
+  cleanup();
+  process.exit(1);
+};
 
 (async () => {
-  if (!fs.existsSync(WEIGHT_PATH)) fail(`setup: missing model weights at ${WEIGHT_PATH}`);
+  if (!EXPECTED_REVISION) {
+    fail('setup: --expected-revision or SF3D_EXPECTED_REVISION is required', 'source-identity');
+  }
+  if (!sourceIdentity.matchesRequestedRevision) {
+    fail(
+      `setup: effective revision ${sourceIdentity.revision} does not match requested ${EXPECTED_REVISION}`,
+      'source-identity',
+    );
+  }
+  if (!sourceIdentity.clean && !ALLOW_DIRTY_SOURCE) {
+    fail(
+      `setup: worktree is dirty; diff sha256=${dirtyDiffSha256}`,
+      'source-identity',
+    );
+  }
+  if (!fs.existsSync(WEIGHT_PATH)) fail(`setup: missing model weights at ${WEIGHT_PATH}`, 'weights');
   const weightTarget = fs.realpathSync(WEIGHT_PATH);
   const weightStat = fs.statSync(weightTarget);
   const weightSha256 = execFileSync('shasum', ['-a', '256', weightTarget], { encoding: 'utf8' })
@@ -59,6 +117,7 @@ const fail = (m) => { fs.writeFileSync(REPORT_PATH, JSON.stringify({ ok: false, 
     },
     requestedBatchTexels: BATCH,
   };
+  activeRouteIdentity = routeIdentity;
   const port = await allocatePort();
   const vite = spawn('npx', ['vite', '--port', String(port), '--strictPort'], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
   procs.push(vite);
@@ -104,28 +163,64 @@ const fail = (m) => { fs.writeFileSync(REPORT_PATH, JSON.stringify({ ok: false, 
   await page.evaluate(async (b64) => { await new Promise((res, rej) => { const img = new Image(); img.onload = () => { window._img = img; res(); }; img.onerror = rej; img.src = 'data:image/png;base64,' + b64; }); }, imageB64);
 
   const result = await page.evaluate(async (BATCH) => {
-    const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
-    const device = window._sf3d_device, weights = window._sf3d_weights, pipelines = window._sf3d_pipelines;
-    const img = window._img;
-    const toB64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+    try {
+      const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
+      const device = window._sf3d_device, weights = window._sf3d_weights, pipelines = window._sf3d_pipelines;
+      const img = window._img;
+      const toB64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
 
-    async function arm(opts) {
+      async function arm(opts) {
       // rAF gap probe scoped to the texture-bake window via stageSpans.
       const frames = []; let on = true, last = null;
       const tick = (t) => { if (last != null) frames.push({ start: last, end: t, gap: t - last }); last = t; if (on) requestAnimationFrame(tick); };
       requestAnimationFrame(tick);
       const out = await runFullPipelineToGlb(device, pipelines, weights, img, opts);
       on = false; await new Promise(r => setTimeout(r, 60));
-      // texture-bake gap = max gap whose midpoint is in the texture-bake span
+      const frameGapOverlaps = (frame, interval) => (
+        interval
+        && frame.start < (interval.endMs ?? interval.end)
+        && frame.end > (interval.startMs ?? interval.start)
+      );
+      const maxGapOverlapping = interval => frames.reduce(
+        (maxGap, frame) => frameGapOverlaps(frame, interval) ? Math.max(maxGap, frame.gap) : maxGap,
+        0,
+      );
       const span = (out.stageSpans || []).find(s => s.name === 'texture-bake');
-      let bakeMaxGap = 0;
-      if (span) for (const f of frames) { const mid = (f.start + f.end) / 2; if (mid >= span.start && mid < span.end) bakeMaxGap = Math.max(bakeMaxGap, f.gap); }
+      const bakeMaxGap = maxGapOverlapping(span);
       // hash the GLB (contains albedo+normal textures) for exact-output equality
       const glbHashSrc = new Uint8Array(out.glb);
       const coop = out.cooperativeReports?.['texture-bake'] || null;
+      const telemetry = coop?.textureBakeTelemetry ?? null;
+      const phases = telemetry?.phases ?? null;
+      const materializationIntervals = phases?.materializationIntervals ?? {};
+      const frameGapAttribution = {
+        textureBake: bakeMaxGap,
+        readback: maxGapOverlapping(phases?.readbackInterval),
+        cpuMaterialization: maxGapOverlapping(phases?.cpuMaterializationInterval),
+        albedo: maxGapOverlapping(materializationIntervals.albedo),
+        normalDefault: maxGapOverlapping(materializationIntervals.normalDefault),
+        normalOccupied: maxGapOverlapping(materializationIntervals.normalOccupied),
+        albedoDilation: maxGapOverlapping(materializationIntervals.albedoDilation),
+        normalDilation: maxGapOverlapping(materializationIntervals.normalDilation),
+        ranges: (telemetry?.ranges ?? []).map(range => ({
+          rangeIndex: range.rangeIndex,
+          prepareEncode: maxGapOverlapping(range.prepareEncodeInterval),
+          submit: maxGapOverlapping(range.submitInterval),
+          browserYield: Math.max(
+            0,
+            ...(range.browserYieldIntervals ?? []).map(maxGapOverlapping),
+          ),
+        })),
+        queueFences: (telemetry?.queueFences ?? []).map(fence => ({
+          rangeIndex: fence.rangeIndex,
+          queueWait: maxGapOverlapping(fence.queueInterval),
+          retirement: maxGapOverlapping(fence.retirementInterval),
+        })),
+      };
       return {
         glbBytes: out.glb.byteLength, glbB64: toB64(glbHashSrc),
         bakeMaxGap, bakeStageMs: span ? +(span.end - span.start).toFixed(1) : null,
+        frameGapAttribution,
         cooperative: coop ? {
           schedulingMode: coop.schedulingMode,
           status: coop.status,
@@ -136,14 +231,26 @@ const fail = (m) => { fs.writeFileSync(REPORT_PATH, JSON.stringify({ ok: false, 
           textureBakeTelemetry: coop.textureBakeTelemetry ?? null,
         } : null,
       };
-    }
+      }
 
-    const mono = await arm({ cooperativeDino: false });
-    const off = await arm({ cooperativeDino: false, cooperativeBake: true, bakeSchedulingMode: 'disabled', bakeBatchTexels: BATCH });
-    const on = await arm({ cooperativeDino: false, cooperativeBake: true, bakeSchedulingMode: 'cooperative', bakeBatchTexels: BATCH });
-    return { mono, off, on };
+      const mono = await arm({ cooperativeDino: false });
+      const off = await arm({ cooperativeDino: false, cooperativeBake: true, bakeSchedulingMode: 'disabled', bakeBatchTexels: BATCH });
+      const on = await arm({ cooperativeDino: false, cooperativeBake: true, bakeSchedulingMode: 'cooperative', bakeBatchTexels: BATCH });
+      return { mono, off, on };
+    } catch (error) {
+      return {
+        assayFailure: {
+          message: error?.message ?? String(error),
+          stack: error?.stack ?? null,
+          textureBakeCleanup: error?.textureBakeCleanup ?? null,
+        },
+      };
+    }
   }, BATCH);
 
+  if (result.assayFailure) {
+    fail(result.assayFailure.message, 'browser-assay', result.assayFailure);
+  }
   await browser.close().catch(() => {}); cleanup();
   if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 
@@ -152,8 +259,12 @@ const fail = (m) => { fs.writeFileSync(REPORT_PATH, JSON.stringify({ ok: false, 
   const identical = hMono === hOff && hMono === hOn;
 
   const report = {
-    ok: identical && result.on.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence' && result.on.cooperative?.completed === result.on.cooperative?.total,
+    ok: sourceAccepted
+      && identical
+      && result.on.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence'
+      && result.on.cooperative?.completed === result.on.cooperative?.total,
     routeIdentity,
+    evidenceAuthority: sourceIdentity.clean ? 'clean-commit' : 'explicit-dirty-diff',
     batchTexels: BATCH,
     outputIdentical: identical,
     glbSha256: { mono: hMono, off: hOff, on: hOn },

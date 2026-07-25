@@ -83,6 +83,7 @@ export function makeCooperativeTextureBake(device, opts = {}) {
     onProgress,
     signal,
     invocationId = `sf3d:texture-bake:${schedulingMode}`,
+    onBrowserYield,
   } = opts;
 
   return async function cooperativeBatch(numOccupied, makeBatch) {
@@ -91,6 +92,7 @@ export function makeCooperativeTextureBake(device, opts = {}) {
     const manifest = defineTextureBakeManifest(numOccupied, batch);
     const ranges = [];
     const queueFences = [];
+    const cleanupEvents = [];
     const scratch = {
       allocatedCount: 0,
       allocatedBytes: 0,
@@ -100,104 +102,214 @@ export function makeCooperativeTextureBake(device, opts = {}) {
       activeBytes: 0,
     };
     let activeRange = null;
-    let pendingScratch = [];
+    const unsubmittedScratch = [];
+    const submittedScratch = [];
+
+    const retireScratch = (resources, reason) => {
+      const startedAtMs = now();
+      let retiredBytes = 0;
+      let retiredCount = 0;
+      while (resources.length > 0) {
+        const resource = resources[0];
+        if (!resource || typeof resource.buffer?.destroy !== 'function') {
+          throw new TypeError('scratch resource must expose buffer.destroy()');
+        }
+        resource.buffer.destroy();
+        resources.shift();
+        retiredBytes += resource.size;
+        retiredCount += 1;
+        scratch.retiredCount += 1;
+        scratch.retiredBytes += resource.size;
+        scratch.activeCount -= 1;
+        scratch.activeBytes -= resource.size;
+      }
+      const completedAtMs = now();
+      cleanupEvents.push({
+        reason,
+        retiredCount,
+        retiredBytes,
+        interval: { startMs: startedAtMs, endMs: completedAtMs },
+      });
+      return {
+        retiredCount,
+        retiredBytes,
+        interval: { startMs: startedAtMs, endMs: completedAtMs },
+      };
+    };
 
     const runtime = createSf3dCooperativeRuntime(device, {
       async onQueueFenceResolved(fence) {
-        const retirementStartedAtMs = now();
-        const retiring = pendingScratch;
-        pendingScratch = [];
-        let retiredBytes = 0;
-        for (const resource of retiring) {
-          if (!resource || typeof resource.buffer?.destroy !== 'function') {
-            throw new TypeError('scratch resource must expose buffer.destroy()');
-          }
-          resource.buffer.destroy();
-          retiredBytes += resource.size;
-        }
-        scratch.retiredCount += retiring.length;
-        scratch.retiredBytes += retiredBytes;
-        scratch.activeCount -= retiring.length;
-        scratch.activeBytes -= retiredBytes;
+        const retirement = retireScratch(submittedScratch, 'queue-prefix-resolved');
         queueFences.push({
           rangeIndex: activeRange?.rangeIndex ?? null,
           itemStart: activeRange?.itemStart ?? null,
           itemEnd: activeRange?.itemEnd ?? null,
           queueWaitMs: fence.queueWaitMs,
-          retirementMs: now() - retirementStartedAtMs,
-          retiredCount: retiring.length,
-          retiredBytes,
+          queueInterval: {
+            startMs: fence.startedAtMs,
+            endMs: fence.completedAtMs,
+          },
+          retirementMs: retirement.interval.endMs - retirement.interval.startMs,
+          retirementInterval: retirement.interval,
+          retiredCount: retirement.retiredCount,
+          retiredBytes: retirement.retiredBytes,
         });
       },
       async onBrowserYield(yieldEvent) {
-        if (activeRange) activeRange.browserYieldMs += yieldEvent.elapsedMs;
+        if (activeRange) {
+          activeRange.browserYieldMs += yieldEvent.elapsedMs;
+          activeRange.browserYieldIntervals.push({
+            startMs: yieldEvent.startedAtMs,
+            endMs: yieldEvent.completedAtMs,
+          });
+        }
+        if (typeof onBrowserYield === 'function') await onBrowserYield(yieldEvent);
       },
     });
     const execution = createWebGpuCooperativeExecution({
       runtime, manifest, invocationId, schedulingMode, onProgress, signal,
     });
 
-    await execution.run(async (cooperative) => {
-      const gpu = cooperative.startBoundary(TEXTURE_BAKE_BOUNDARY_ID);
-      let range;
-      while ((range = gpu.nextRange()) != null) {
-        const start = range.itemStart, end = range.itemEnd;
-        const encodeStartedAtMs = now();
-        const b = await makeBatch(start, end);
-        const resources = Array.isArray(b.scratchResources) ? b.scratchResources : [];
-        for (const resource of resources) {
-          if (!Number.isFinite(resource?.size) || resource.size < 0) {
-            throw new TypeError('scratch resource size must be a non-negative finite number');
+    try {
+      await execution.run(async (cooperative) => {
+        const gpu = cooperative.startBoundary(TEXTURE_BAKE_BOUNDARY_ID);
+        let range;
+        while ((range = gpu.nextRange()) != null) {
+          const start = range.itemStart, end = range.itemEnd;
+          const prepareEncodeStartedAtMs = now();
+          const b = await makeBatch(start, end);
+          const resources = Array.isArray(b.scratchResources) ? b.scratchResources : [];
+          for (const resource of resources) {
+            if (!Number.isFinite(resource?.size) || resource.size < 0) {
+              throw new TypeError('scratch resource size must be a non-negative finite number');
+            }
           }
-        }
-        const allocatedBytes = resources.reduce((sum, resource) => sum + resource.size, 0);
-        pendingScratch.push(...resources);
-        scratch.allocatedCount += resources.length;
-        scratch.allocatedBytes += allocatedBytes;
-        scratch.activeCount += resources.length;
-        scratch.activeBytes += allocatedBytes;
+          const allocatedBytes = resources.reduce((sum, resource) => sum + resource.size, 0);
+          unsubmittedScratch.push(...resources);
+          scratch.allocatedCount += resources.length;
+          scratch.allocatedBytes += allocatedBytes;
+          scratch.activeCount += resources.length;
+          scratch.activeBytes += allocatedBytes;
 
-        const rangeTelemetry = {
-          rangeIndex: range.rangeIndex,
-          itemStart: start,
-          itemEnd: end,
-          itemCount: range.itemCount,
-          hostEncodeMs: Number.isFinite(b.hostEncodeMs)
-            ? b.hostEncodeMs
-            : now() - encodeStartedAtMs,
-          dutyWallMs: 0,
-          browserYieldMs: 0,
-          scratchAllocatedCount: resources.length,
-          scratchAllocatedBytes: allocatedBytes,
-        };
-        activeRange = rangeTelemetry;
-        const dutyStartedAtMs = now();
-        try {
-          await gpu.runGpuDuty(range, {
-            encode: () => b.encode(),
-            submit: (cb) => b.submit(cb),
-          });
-        } finally {
-          rangeTelemetry.dutyWallMs = now() - dutyStartedAtMs;
-          ranges.push(rangeTelemetry);
-          activeRange = null;
+          const rangeTelemetry = {
+            rangeIndex: range.rangeIndex,
+            itemStart: start,
+            itemEnd: end,
+            itemCount: range.itemCount,
+            modelEncodeMs: Number.isFinite(b.hostEncodeMs) ? b.hostEncodeMs : null,
+            hostEncodeMs: 0,
+            dutyLifecycleMs: 0,
+            dutyWallMs: 0,
+            browserYieldMs: 0,
+            prepareEncodeInterval: {
+              startMs: prepareEncodeStartedAtMs,
+              endMs: prepareEncodeStartedAtMs,
+            },
+            submitInterval: null,
+            dutyLifecycleInterval: {
+              startMs: 0,
+              endMs: 0,
+            },
+            browserYieldIntervals: [],
+            scratchAllocatedCount: resources.length,
+            scratchAllocatedBytes: allocatedBytes,
+          };
+          activeRange = rangeTelemetry;
+          const dutyStartedAtMs = now();
+          rangeTelemetry.dutyLifecycleInterval.startMs = dutyStartedAtMs;
+          try {
+            await gpu.runGpuDuty(range, {
+              encode: () => {
+                try {
+                  return b.encode();
+                } finally {
+                  rangeTelemetry.prepareEncodeInterval.endMs = now();
+                  rangeTelemetry.hostEncodeMs = (
+                    rangeTelemetry.prepareEncodeInterval.endMs
+                    - rangeTelemetry.prepareEncodeInterval.startMs
+                  );
+                }
+              },
+              submit: (commandBuffer) => {
+                const submitStartedAtMs = now();
+                try {
+                  const result = b.submit(commandBuffer);
+                  submittedScratch.push(...unsubmittedScratch);
+                  unsubmittedScratch.length = 0;
+                  return result;
+                } finally {
+                  rangeTelemetry.submitInterval = {
+                    startMs: submitStartedAtMs,
+                    endMs: now(),
+                  };
+                }
+              },
+            });
+          } finally {
+            rangeTelemetry.dutyLifecycleInterval.endMs = now();
+            rangeTelemetry.dutyLifecycleMs = (
+              rangeTelemetry.dutyLifecycleInterval.endMs
+              - rangeTelemetry.dutyLifecycleInterval.startMs
+            );
+            rangeTelemetry.dutyWallMs = rangeTelemetry.dutyLifecycleMs;
+            ranges.push(rangeTelemetry);
+            activeRange = null;
+          }
+          // No per-batch readback: each batch copies its decode into a shared GPU
+          // buffer and the whole texture is read back once after the boundary.
         }
-        // No per-batch readback: each batch copies its decode into a shared GPU
-        // buffer (in decodeTexelFeatures) and the whole texture is read back once
-        // after the boundary completes, so cooperation yields between decode
-        // duties without paying a map-sync per batch.
+      });
+    } catch (error) {
+      const cleanup = {
+        unsubmitted: null,
+        recoveryFence: null,
+        submitted: null,
+      };
+      try {
+        if (unsubmittedScratch.length > 0) {
+          cleanup.unsubmitted = retireScratch(unsubmittedScratch, 'failure-before-submit');
+        }
+        if (submittedScratch.length > 0) {
+          const startedAtMs = now();
+          let fenceError = null;
+          try {
+            await device.queue.onSubmittedWorkDone();
+          } catch (recoveryError) {
+            fenceError = recoveryError;
+          }
+          cleanup.recoveryFence = {
+            startMs: startedAtMs,
+            endMs: now(),
+            status: fenceError ? 'rejected-device-unavailable' : 'resolved',
+            error: fenceError?.message ?? null,
+          };
+          cleanup.submitted = retireScratch(
+            submittedScratch,
+            fenceError ? 'device-unavailable-after-recovery-fence' : 'terminal-recovery-fence',
+          );
+        }
+      } catch (cleanupError) {
+        cleanup.error = cleanupError.message;
       }
-    });
+      error.textureBakeCleanup = Object.freeze(cleanup);
+      throw error;
+    }
 
-    if (pendingScratch.length !== 0 || scratch.activeCount !== 0 || scratch.activeBytes !== 0) {
+    if (
+      unsubmittedScratch.length !== 0
+      || submittedScratch.length !== 0
+      || scratch.activeCount !== 0
+      || scratch.activeBytes !== 0
+    ) {
       throw new Error('texture-bake scratch resources remained active after queue completion');
     }
     return Object.freeze({
       ...execution.finish(),
       textureBakeTelemetry: Object.freeze({
-        schema: 'sf3d.texture-bake-duty-telemetry.v0',
+        schema: 'sf3d.texture-bake-duty-telemetry.v1',
         ranges: Object.freeze(ranges.map(range => Object.freeze({ ...range }))),
         queueFences: Object.freeze(queueFences.map(fence => Object.freeze({ ...fence }))),
+        cleanupEvents: Object.freeze(cleanupEvents.map(event => Object.freeze({ ...event }))),
         scratch: Object.freeze({ ...scratch }),
       }),
     });
