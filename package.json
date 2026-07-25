@@ -9,7 +9,8 @@
     "build": "vite build",
     "test:kit-route-contract": "node tools/test_kit_route_contract.mjs",
     "test:cooperative-dino": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_dino_contract.mjs",
-    "test:cooperative-dino-conformance": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_dino_conformance.mjs"
+    "test:cooperative-dino-conformance": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_dino_conformance.mjs",
+    "test:cooperative-texture-telemetry": "node tools/test_cooperative_texture_bake_telemetry.mjs"
   },
   "devDependencies": {
     "@kaminos/webgpu-inference-kit": "0.1.38",

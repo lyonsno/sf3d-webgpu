@@ -10,7 +10,12 @@
  * The triplane query and decoder reuse triplane_decoder.js.
  */
 
-import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import {
+  captureGpuBufferAllocations,
+  createStorageBuffer,
+  createEmptyBuffer,
+  readBuffer,
+} from './gpu.js';
 
 /**
  * UV unwrap a mesh using cube projection with bounding-box normalization.
@@ -839,11 +844,19 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
   const decodeRange = async (start, end) => {
     const count = end - start;
     const sub = queryPositions.subarray(start * 3, end * 3);
-    const posBuf = createStorageBuffer(device, sub);
-    const encoder = device.createCommandEncoder({ label: `texel-decode-${start}-${end}` });
-    const decoded = triplaneDecoder.decode(
-      encoder, posBuf, triplanesBuf, count, decoderWeights, ['features', 'perturb_normal']);
-    return { encoder, decoded, count };
+    const startedAtMs = performance.now();
+    const { value, allocations } = captureGpuBufferAllocations(() => {
+      const posBuf = createStorageBuffer(device, sub);
+      const encoder = device.createCommandEncoder({ label: `texel-decode-${start}-${end}` });
+      const decoded = triplaneDecoder.decode(
+        encoder, posBuf, triplanesBuf, count, decoderWeights, ['features', 'perturb_normal']);
+      return { encoder, decoded, count };
+    });
+    return {
+      ...value,
+      hostEncodeMs: performance.now() - startedAtMs,
+      scratchResources: allocations,
+    };
   };
 
   const featuresCPU = new Float32Array(numOccupied * 3);
@@ -859,7 +872,7 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
     const featuresAll = createEmptyBuffer(device, numOccupied * 3 * 4);
     const normalsAll = createEmptyBuffer(device, numOccupied * 3 * 4);
     await options.cooperativeBatch(numOccupied, async (start, end) => {
-      const { encoder, decoded, count } = await decodeRange(start, end);
+      const { encoder, decoded, count, hostEncodeMs, scratchResources } = await decodeRange(start, end);
       // Copy this batch's decode outputs into their slice of the shared buffers,
       // in the SAME command buffer, so no extra submit/sync is needed.
       encoder.copyBufferToBuffer(decoded.features, 0, featuresAll, start * 3 * 4, count * 3 * 4);
@@ -867,11 +880,26 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
       return {
         encode: () => encoder.finish(),
         submit: (cb) => device.queue.submit([cb]),
+        hostEncodeMs,
+        scratchResources,
       };
     });
     // Single coalesced readback of all batches.
-    const f = await readBuffer(device, featuresAll, numOccupied * 3 * 4);
-    const n = await readBuffer(device, normalsAll, numOccupied * 3 * 4);
+    const readbackStartedAtMs = performance.now();
+    let f;
+    let n;
+    try {
+      f = await readBuffer(device, featuresAll, numOccupied * 3 * 4);
+      n = await readBuffer(device, normalsAll, numOccupied * 3 * 4);
+    } finally {
+      featuresAll.destroy();
+      normalsAll.destroy();
+    }
+    if (options.telemetry) {
+      options.telemetry.readbackMs = performance.now() - readbackStartedAtMs;
+      options.telemetry.aggregateOutputBytes = numOccupied * 3 * 4 * 2;
+      options.telemetry.aggregateOutputsRetired = true;
+    }
     featuresCPU.set(f.subarray(0, numOccupied * 3));
     normalsCPU.set(n.subarray(0, numOccupied * 3));
     return { featuresCPU, normalsCPU };
@@ -890,6 +918,7 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
 
 export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoderWeights,
                                    positions3D, mask, tbnData, resolution = 1024, options = {}) {
+  const cpuPrepStartedAtMs = performance.now();
   // Collect occupied texel positions
   const occupiedIndices = [];
   for (let i = 0; i < resolution * resolution; i++) {
@@ -916,8 +945,10 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
   // Decode features + perturb_normal for every occupied texel. Per-texel decode
   // is fully independent, so this is monolithic by default but can be driven in
   // cooperative batches via options.cooperativeBatch (see decodeTexelFeatures).
+  if (options.telemetry) options.telemetry.cpuPrepMs = performance.now() - cpuPrepStartedAtMs;
   const { featuresCPU, normalsCPU } = await decodeTexelFeatures(
     device, triplaneDecoder, triplanesBuf, decoderWeights, queryPositions, numOccupied, options);
+  const materializationStartedAtMs = performance.now();
 
   // Build albedo RGBA texture
   const albedo = new Uint8Array(resolution * resolution * 4);
@@ -972,6 +1003,9 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
   _dilateTexture(albedo, mask, resolution, dilateIters);
   _dilateTexture(normalMap, mask, resolution, dilateIters);
 
+  if (options.telemetry) {
+    options.telemetry.cpuMaterializationMs = performance.now() - materializationStartedAtMs;
+  }
   return { albedo, normalMap };
 }
 
