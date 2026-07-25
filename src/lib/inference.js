@@ -15,6 +15,7 @@
 
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
 import { resizeBlendNormalize } from './preprocess_core.js';
+import { callWorker } from './worker_call.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
 import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
@@ -90,18 +91,25 @@ export async function preprocessImage(imageData, width, height, options = {}) {
 
   const worker = options.preprocessWorker;
   if (worker) {
-    return await new Promise((resolve, reject) => {
-      const id = Math.random().toString(36).slice(2);
-      const onMessage = (e) => {
-        if (e.data.id !== id) return;
-        worker.removeEventListener('message', onMessage);
-        if (e.data.ok) resolve(new Float32Array(e.data.chwBuffer));
-        else reject(new Error(`preprocess worker failed: ${e.data.error}`));
-      };
-      worker.addEventListener('message', onMessage);
-      // Transfer the source buffer (zero-copy); worker transfers the result back.
-      worker.postMessage({ srcBuffer: srcFloat.buffer, srcW, srcH, size, bg, imageMean, imageStd, id }, [srcFloat.buffer]);
-    });
+    const id = `pp-${Math.random().toString(36).slice(2)}`;
+    const expectedLen = 3 * size * size;
+    // Fail-loud: a worker crash / malformed reply / wedge rejects (never hangs,
+    // never silently falls back). The caller owns any main-thread retry policy.
+    return await callWorker(
+      worker,
+      { srcBuffer: srcFloat.buffer, srcW, srcH, size, bg, imageMean, imageStd, id },
+      [srcFloat.buffer],
+      {
+        timeoutMs: options.workerTimeoutMs || 30000,
+        onResult: (data) => {
+          const chw = new Float32Array(data.chwBuffer);
+          if (chw.length !== expectedLen) {
+            throw new Error(`CHW length ${chw.length} != expected ${expectedLen}`);
+          }
+          return chw;
+        },
+      },
+    );
   }
 
   // Main-thread path (unchanged output).
@@ -188,7 +196,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const imageData = await preprocessImage(imageElement,
     imageElement.naturalWidth || imageElement.width,
     imageElement.naturalHeight || imageElement.height,
-    { preprocessWorker: options.preprocessWorker });
+    { preprocessWorker: options.preprocessWorker, workerTimeoutMs: options.workerTimeoutMs });
   const imageBuf = createStorageBuffer(device, imageData);
 
   // 2. Camera embedding (GPU) — counted as part of image-preprocess

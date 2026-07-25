@@ -17,6 +17,7 @@ import { runInference } from './inference.js';
 import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './texture_baker.js';
 import { estimateMaterials } from './clip_estimator.js';
 import { makeCooperativeTextureBake } from './cooperative_texture_bake.js';
+import { callWorker } from './worker_call.js';
 
 const COND_SIZE = 512;
 const TEX_RESOLUTION = 1024;
@@ -26,30 +27,42 @@ const TEX_RESOLUTION = 1024;
  * Byte-identical output either way (same unwrapUV code). Vertices/faces are
  * transferred zero-copy to the worker; outputs transferred back.
  */
-async function runUvUnwrap(vertices, faces, numVertices, numFaces, worker) {
+async function runUvUnwrap(vertices, faces, numVertices, numFaces, worker, workerTimeoutMs) {
   if (!worker) return unwrapUV(vertices, faces, numVertices, numFaces);
-  return await new Promise((resolve, reject) => {
-    const id = Math.random().toString(36).slice(2);
-    const onMessage = (e) => {
-      if (e.data.id !== id) return;
-      worker.removeEventListener('message', onMessage);
-      if (!e.data.ok) { reject(new Error(`uv-unwrap worker failed: ${e.data.error}`)); return; }
-      resolve({
-        uvs: new Float32Array(e.data.uvs),
-        newVertices: new Float32Array(e.data.newVertices),
-        newNormals: new Float32Array(e.data.newNormals),
-        newFaces: new Uint32Array(e.data.newFaces),
-        faceAssignment: new Uint8Array(e.data.faceAssignment),
-        newNumVertices: e.data.newNumVertices,
-        newNumFaces: e.data.newNumFaces,
-      });
-    };
-    worker.addEventListener('message', onMessage);
-    // Transfer sliced copies (one copy) so the caller's arrays stay intact for
-    // any downstream use while the worker gets zero-copy ownership.
-    const vBuf = vertices.slice().buffer, fBuf = faces.slice().buffer;
-    worker.postMessage({ vertices: vBuf, faces: fBuf, numVertices, numFaces, id }, [vBuf, fBuf]);
-  });
+  // Transfer sliced copies (one copy) so the caller's arrays stay intact while
+  // the worker gets zero-copy ownership.
+  const vBuf = vertices.slice().buffer, fBuf = faces.slice().buffer;
+  const id = `uv-${Math.random().toString(36).slice(2)}`;
+  // Fail-loud lifecycle (crash / malformed / wedge) via callWorker.
+  return await callWorker(
+    worker,
+    { vertices: vBuf, faces: fBuf, numVertices, numFaces, id },
+    [vBuf, fBuf],
+    {
+      timeoutMs: workerTimeoutMs || 30000,
+      onResult: (d) => {
+        const r = {
+          uvs: new Float32Array(d.uvs),
+          newVertices: new Float32Array(d.newVertices),
+          newNormals: new Float32Array(d.newNormals),
+          newFaces: new Uint32Array(d.newFaces),
+          faceAssignment: new Uint8Array(d.faceAssignment),
+          newNumVertices: d.newNumVertices,
+          newNumFaces: d.newNumFaces,
+        };
+        // Output-shape validation: reject malformed replies rather than pass
+        // corrupt geometry downstream.
+        if (!Number.isSafeInteger(r.newNumVertices) || r.newNumVertices <= 0
+          || !Number.isSafeInteger(r.newNumFaces) || r.newNumFaces <= 0
+          || r.newVertices.length !== r.newNumVertices * 3
+          || r.newFaces.length !== r.newNumFaces * 3
+          || r.uvs.length !== r.newNumVertices * 2) {
+          throw new Error(`uv-unwrap shapes invalid: v=${r.newVertices.length}/${r.newNumVertices} f=${r.newFaces.length}/${r.newNumFaces} uv=${r.uvs.length}`);
+        }
+        return r;
+      },
+    },
+  );
 }
 
 export async function runFullPipelineToGlb(device, pipelines, weights, inputImage, options = {}, onProgress) {
@@ -93,7 +106,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   // byte-identical output (same unwrapUV code).
   const uvResult = await timed('uv-unwrap', () => runUvUnwrap(
     meshResult.vertices, meshResult.faces, meshResult.numVertices, meshResult.numFaces,
-    options.uvUnwrapWorker));
+    options.uvUnwrapWorker, options.workerTimeoutMs));
 
   // Step 4: rasterize UV → per-texel 3D positions (CPU, synchronous)
   const rasterResult = await timed('uv-rasterize', async () => rasterizeUV(
