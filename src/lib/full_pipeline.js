@@ -16,6 +16,7 @@
 import { runInference } from './inference.js';
 import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './texture_baker.js';
 import { estimateMaterials } from './clip_estimator.js';
+import { makeCooperativeTextureBake } from './cooperative_texture_bake.js';
 
 const COND_SIZE = 512;
 const TEX_RESOLUTION = 1024;
@@ -65,11 +66,22 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     uvResult.uvs, uvResult.newVertices, uvResult.newFaces,
     uvResult.newNumFaces, TEX_RESOLUTION, uvResult.faceAssignment));
 
-  // Step 5: texture bake (GPU triplane query)
+  // Step 5: texture bake (GPU triplane query). Optionally cooperative — batch
+  // the per-texel decode into yieldable GPU duties (options.cooperativeBake).
+  let bakeReport = null;
+  const bakeOptions = {};
+  if (options.cooperativeBake) {
+    const cooperativeBatch = makeCooperativeTextureBake(device, {
+      batchTexels: options.bakeBatchTexels || 16384,
+      schedulingMode: options.bakeSchedulingMode === 'disabled' ? 'disabled' : 'cooperative',
+      onProgress: (p) => { if (p.percent != null) report(`Texture bake ${p.completedItems}/${p.totalItems} (${p.percent.toFixed(0)}%)`); },
+    });
+    bakeOptions.cooperativeBatch = async (numOccupied, makeBatch) => { bakeReport = await cooperativeBatch(numOccupied, makeBatch); };
+  }
   const bakeResult = await timed('texture-bake', () => bakeTexture(
     device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
     meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
-    rasterResult.tbnData, TEX_RESOLUTION));
+    rasterResult.tbnData, TEX_RESOLUTION, bakeOptions));
 
   // Step 6: GLB export
   const glb = await timed('glb-export', () => exportGLB(
@@ -87,7 +99,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     uvNumFaces: uvResult.newNumFaces,
     roughness,
     metallic,
-    cooperativeReports: meshResult._cooperativeReports || {},
+    cooperativeReports: { ...(meshResult._cooperativeReports || {}), ...(bakeReport ? { 'texture-bake': bakeReport } : {}) },
     dinoPayload: meshResult._dinoPayload || null,   // { shape, length, tokens } or null
     sdf: meshResult._sdf,
     isosurfaceThreshold: meshResult._isosurfaceThreshold,
