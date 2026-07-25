@@ -3,6 +3,10 @@
 import assert from 'node:assert/strict';
 
 import { makeCooperativeTextureBake } from '../src/lib/cooperative_texture_bake.js';
+import {
+  captureGpuBufferAllocations,
+  createEmptyBuffer,
+} from '../src/lib/gpu.js';
 
 function makeScratch(label) {
   return {
@@ -14,6 +18,38 @@ function makeScratch(label) {
       this.destroyed = true;
     },
   };
+}
+
+globalThis.GPUBufferUsage = globalThis.GPUBufferUsage || {
+  STORAGE: 1,
+  COPY_SRC: 2,
+  COPY_DST: 4,
+};
+
+{
+  const allocated = [];
+  const device = {
+    createBuffer(descriptor) {
+      const buffer = makeScratch('pre-descriptor-builder');
+      buffer.label = descriptor.label;
+      allocated.push(buffer);
+      return buffer;
+    },
+  };
+
+  assert.throws(
+    () => captureGpuBufferAllocations(() => {
+      createEmptyBuffer(device, 64, 0, 'pre-descriptor-builder');
+      throw new Error('batch builder failed before ownership transfer');
+    }),
+    /batch builder failed before ownership transfer/,
+  );
+  assert.equal(allocated.length, 1);
+  assert.equal(
+    allocated[0].destroyed,
+    true,
+    'captured unsubmitted scratch must retire when its allocation scope throws',
+  );
 }
 
 async function expectCleanup({

@@ -53,12 +53,33 @@ if (dirtyPaths.length > 0) {
   }
   dirtyDiffSha256 = dirtyHash.digest('hex');
 }
+const effectiveRevision = execFileSync('git', ['rev-parse', 'HEAD'], {
+  cwd: REPO,
+  encoding: 'utf8',
+}).trim();
+let requestedRevisionResolution = null;
+let requestedRevisionError = null;
+if (EXPECTED_REVISION) {
+  try {
+    requestedRevisionResolution = execFileSync(
+      'git',
+      ['rev-parse', '--verify', `${EXPECTED_REVISION}^{commit}`],
+      {
+        cwd: REPO,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    ).trim();
+  } catch (error) {
+    requestedRevisionError = error.stderr?.toString().trim() || error.message;
+  }
+}
 const sourceIdentity = {
-  revision: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim(),
+  revision: effectiveRevision,
   requestedRevision: EXPECTED_REVISION || null,
+  requestedRevisionResolution,
   matchesRequestedRevision: Boolean(EXPECTED_REVISION)
-    && execFileSync('git', ['rev-parse', EXPECTED_REVISION], { cwd: REPO, encoding: 'utf8' }).trim()
-      === execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim(),
+    && requestedRevisionResolution === effectiveRevision,
   clean: dirtyPaths.length === 0,
   dirtyModeExplicit: ALLOW_DIRTY_SOURCE,
   dirtyDiffSha256,
@@ -88,6 +109,12 @@ const fail = (m, failurePhase = 'unknown', failureDetails = null) => {
 (async () => {
   if (!EXPECTED_REVISION) {
     fail('setup: --expected-revision or SF3D_EXPECTED_REVISION is required', 'source-identity');
+  }
+  if (requestedRevisionError) {
+    fail(
+      `setup: cannot resolve requested revision ${EXPECTED_REVISION}: ${requestedRevisionError}`,
+      'source-identity',
+    );
   }
   if (!sourceIdentity.matchesRequestedRevision) {
     fail(
