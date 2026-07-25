@@ -850,21 +850,30 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
   const normalsCPU = new Float32Array(numOccupied * 3);
 
   if (typeof options.cooperativeBatch === 'function') {
-    // Cooperative path: the driver decides submit + browser yield per batch.
+    // Cooperative path: each batch's decode is a GPU duty (submit + facade
+    // fence + browser yield). Crucially, batch outputs are copied into ONE
+    // shared persistent buffer on the GPU (no per-batch readback) and read back
+    // exactly ONCE at the end — otherwise a per-batch mapAsync forces a GPU sync
+    // per batch and fine batching regresses badly (measured 1808ms at 61
+    // batches). Coalesced readback keeps cooperation between decode duties only.
+    const featuresAll = createEmptyBuffer(device, numOccupied * 3 * 4);
+    const normalsAll = createEmptyBuffer(device, numOccupied * 3 * 4);
     await options.cooperativeBatch(numOccupied, async (start, end) => {
       const { encoder, decoded, count } = await decodeRange(start, end);
+      // Copy this batch's decode outputs into their slice of the shared buffers,
+      // in the SAME command buffer, so no extra submit/sync is needed.
+      encoder.copyBufferToBuffer(decoded.features, 0, featuresAll, start * 3 * 4, count * 3 * 4);
+      encoder.copyBufferToBuffer(decoded.perturb_normal, 0, normalsAll, start * 3 * 4, count * 3 * 4);
       return {
         encode: () => encoder.finish(),
         submit: (cb) => device.queue.submit([cb]),
-        // readback after this batch's queue prefix has been fenced by the facade
-        readback: async () => {
-          const f = await readBuffer(device, decoded.features, count * 3 * 4);
-          const n = await readBuffer(device, decoded.perturb_normal, count * 3 * 4);
-          featuresCPU.set(f.subarray(0, count * 3), start * 3);
-          normalsCPU.set(n.subarray(0, count * 3), start * 3);
-        },
       };
     });
+    // Single coalesced readback of all batches.
+    const f = await readBuffer(device, featuresAll, numOccupied * 3 * 4);
+    const n = await readBuffer(device, normalsAll, numOccupied * 3 * 4);
+    featuresCPU.set(f.subarray(0, numOccupied * 3));
+    normalsCPU.set(n.subarray(0, numOccupied * 3));
     return { featuresCPU, normalsCPU };
   }
 

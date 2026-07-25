@@ -103,9 +103,10 @@ export function makeCooperativeTextureBake(device, opts = {}) {
           encode: () => b.encode(),
           submit: (cb) => b.submit(cb),
         });
-        // The facade has fenced this batch's queue prefix (cooperative mode) or
-        // will take one terminal fence (disabled); read back the batch outputs.
-        await b.readback();
+        // No per-batch readback: each batch copies its decode into a shared GPU
+        // buffer (in decodeTexelFeatures) and the whole texture is read back once
+        // after the boundary completes, so cooperation yields between decode
+        // duties without paying a map-sync per batch.
       }
     });
 
