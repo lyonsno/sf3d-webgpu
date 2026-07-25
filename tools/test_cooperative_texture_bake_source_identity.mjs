@@ -15,6 +15,11 @@ assert.match(source, /sourceIdentity\.matchesRequestedRevision/, 'pass predicate
 assert.match(source, /sourceIdentity\.clean/, 'pass predicate must bind clean source state');
 assert.match(source, /dirtyDiffSha256/, 'explicit dirty evidence must carry an inspectable diff identity');
 assert.match(source, /frameGapOverlaps/, 'frame attribution must use interval overlap');
+assert.match(
+  source,
+  /frameGapAttribution:\s*result\.on\.frameGapAttribution/,
+  'persisted cooperative arm must retain its overlap attribution',
+);
 
 function runPreflight(args) {
   const reportPath = path.join(
