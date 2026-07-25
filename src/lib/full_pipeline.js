@@ -24,10 +24,21 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   const report = (msg) => { if (onProgress) onProgress(msg); };
   const t0 = performance.now();
 
+  // Absolute-timestamp stage spans on the same performance.now() clock as any
+  // caller-side rAF probe, so each foreground frame gap can be attributed to the
+  // stage executing during it. Inference substages (dinov2/two-stream/triplane/
+  // marching) come back from runInference; the outer steps are marked here.
+  const spans = [];
+  const mark = (name, start, end) => spans.push({ name, start, end });
+  const timed = async (name, fn) => { const s = performance.now(); const r = await fn(); mark(name, s, performance.now()); return r; };
+
   // Step 1: inference → untextured mesh + triplane data (+ optional DINO payload)
-  const meshResult = await runInference(device, pipelines, weights, inputImage, report, options);
+  const meshResult = await runInference(
+    device, pipelines, weights, inputImage, report,
+    { ...options, recordStageSpans: spans });
 
   // Step 2: CLIP material estimation (exact PyTorch preprocessing order)
+  const clipStart = performance.now();
   const clipCanvas = document.createElement('canvas');
   clipCanvas.width = COND_SIZE;
   clipCanvas.height = COND_SIZE;
@@ -43,30 +54,32 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     clipPixels[i * 4 + 2] = (clipPixels[i * 4 + 2] * a + 0.5 * (1 - a)) * a;
   }
   const { roughness, metallic } = await estimateMaterials(device, clipPixels, COND_SIZE, COND_SIZE, weights);
+  mark('clip-material-estimate', clipStart, performance.now());
 
-  // Step 3: UV unwrap
-  const uvResult = unwrapUV(
-    meshResult.vertices, meshResult.faces, meshResult.numVertices, meshResult.numFaces);
+  // Step 3: UV unwrap (CPU, synchronous)
+  const uvResult = await timed('uv-unwrap', async () => unwrapUV(
+    meshResult.vertices, meshResult.faces, meshResult.numVertices, meshResult.numFaces));
 
-  // Step 4: rasterize UV → per-texel 3D positions
-  const rasterResult = rasterizeUV(
+  // Step 4: rasterize UV → per-texel 3D positions (CPU, synchronous)
+  const rasterResult = await timed('uv-rasterize', async () => rasterizeUV(
     uvResult.uvs, uvResult.newVertices, uvResult.newFaces,
-    uvResult.newNumFaces, TEX_RESOLUTION, uvResult.faceAssignment);
+    uvResult.newNumFaces, TEX_RESOLUTION, uvResult.faceAssignment));
 
   // Step 5: texture bake (GPU triplane query)
-  const bakeResult = await bakeTexture(
+  const bakeResult = await timed('texture-bake', () => bakeTexture(
     device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
     meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
-    rasterResult.tbnData, TEX_RESOLUTION);
+    rasterResult.tbnData, TEX_RESOLUTION));
 
   // Step 6: GLB export
-  const glb = await exportGLB(
+  const glb = await timed('glb-export', () => exportGLB(
     uvResult.newVertices, uvResult.newNormals, uvResult.newFaces, uvResult.uvs,
     bakeResult.albedo, bakeResult.normalMap,
     uvResult.newNumVertices, uvResult.newNumFaces, TEX_RESOLUTION,
-    roughness, metallic);
+    roughness, metallic));
 
   return {
+    stageSpans: spans,
     glb,                                   // ArrayBuffer
     numVertices: meshResult.numVertices,
     numFaces: meshResult.numFaces,

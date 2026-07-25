@@ -242,6 +242,9 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const _cooperativeReports = {};
   // Exact DINO numerical payload (only when options.captureDinoPayload).
   let _dinoPayload = null;
+  // Absolute-timestamp stage spans for foreground-tail attribution (opt-in).
+  const _spans = Array.isArray(options.recordStageSpans) ? options.recordStageSpans : null;
+  const _markSpan = (name, start) => { if (_spans) _spans.push({ name, start, end: performance.now() }); };
 
   // 1. Preprocess image (CPU)
   _stageStart = performance.now();
@@ -284,6 +287,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
 
   _stageTimings['image-preprocess'] = performance.now() - _stageStart;
+  _markSpan('image-preprocess', _stageStart);
 
   // 3. DINOv2 image tokenization (GPU)
   _stageStart = performance.now();
@@ -354,6 +358,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
 
   _stageTimings['dinov2-tokenizer'] = performance.now() - _stageStart;
+  _markSpan('dinov2-tokenizer', _stageStart);
 
   // 4. Two-stream backbone (GPU)
   _stageStart = performance.now();
@@ -496,6 +501,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   //   final (with residual): min=-5.67, max=5.45, std=0.36
 
   _stageTimings['two-stream-backbone'] = performance.now() - _stageStart;
+  _markSpan('two-stream-backbone', _stageStart);
 
   // 5. PixelShuffle post-processing (counted as part of triplane-decode)
   _stageStart = performance.now();
@@ -648,6 +654,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
 
   _stageTimings['triplane-decode'] = performance.now() - _stageStart;
+  _markSpan('triplane-decode', _stageStart);
 
   // 7. Marching tetrahedra (CPU)
   _stageStart = performance.now();
@@ -660,6 +667,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   report(`Mesh extracted: ${mesh.numVertices} vertices, ${mesh.numFaces} faces`);
 
   _stageTimings['marching-tet'] = performance.now() - _stageStart;
+  _markSpan('marching-tet', _stageStart);
 
   // Mesh vertices are already in bbox space (from gridPositions which was pre-scaled)
   return {
