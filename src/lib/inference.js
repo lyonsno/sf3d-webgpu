@@ -14,6 +14,7 @@
  */
 
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import { resizeBlendNormalize } from './preprocess_core.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
 import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
@@ -53,83 +54,13 @@ const CONFIG = {
  * Preprocess an image for SF3D input.
  * Returns Float32Array in CHW format, normalized with ImageNet stats.
  */
+
 /**
- * Lanczos-3 resampler matching PIL's Image.resize behavior.
- * Operates on float32 RGBA data.
+ * Extract raw float32 RGBA source pixels from an image element via canvas.
+ * Cheap (a getImageData copy); the expensive resize/blend/normalize is separate
+ * so it can run on either the main thread or a worker.
  */
-function lanczosKernel(x, a = 3) {
-  if (x === 0) return 1;
-  if (Math.abs(x) >= a) return 0;
-  const px = Math.PI * x;
-  return (a * Math.sin(px) * Math.sin(px / a)) / (px * px);
-}
-
-function lanczosResize(src, srcW, srcH, dstW, dstH) {
-  // src is Float32Array [srcH, srcW, 4] RGBA
-  const a = 3; // Lanczos-3
-  const dst = new Float32Array(dstH * dstW * 4);
-
-  // Two-pass separable: horizontal then vertical
-  const tmp = new Float32Array(dstW * srcH * 4);
-
-  // Horizontal pass
-  const xScale = srcW / dstW;
-  for (let y = 0; y < srcH; y++) {
-    for (let x = 0; x < dstW; x++) {
-      const center = (x + 0.5) * xScale - 0.5;
-      const left = Math.ceil(center - a);
-      const right = Math.floor(center + a);
-      let sumR = 0, sumG = 0, sumB = 0, sumA = 0, sumW = 0;
-      for (let i = left; i <= right; i++) {
-        const si = Math.min(Math.max(i, 0), srcW - 1);
-        const w = lanczosKernel(center - i, a);
-        const off = (y * srcW + si) * 4;
-        sumR += src[off] * w;
-        sumG += src[off + 1] * w;
-        sumB += src[off + 2] * w;
-        sumA += src[off + 3] * w;
-        sumW += w;
-      }
-      const off = (y * dstW + x) * 4;
-      tmp[off] = sumR / sumW;
-      tmp[off + 1] = sumG / sumW;
-      tmp[off + 2] = sumB / sumW;
-      tmp[off + 3] = sumA / sumW;
-    }
-  }
-
-  // Vertical pass
-  const yScale = srcH / dstH;
-  for (let y = 0; y < dstH; y++) {
-    const center = (y + 0.5) * yScale - 0.5;
-    const top = Math.ceil(center - a);
-    const bottom = Math.floor(center + a);
-    for (let x = 0; x < dstW; x++) {
-      let sumR = 0, sumG = 0, sumB = 0, sumA = 0, sumW = 0;
-      for (let j = top; j <= bottom; j++) {
-        const sj = Math.min(Math.max(j, 0), srcH - 1);
-        const w = lanczosKernel(center - j, a);
-        const off = (sj * dstW + x) * 4;
-        sumR += tmp[off] * w;
-        sumG += tmp[off + 1] * w;
-        sumB += tmp[off + 2] * w;
-        sumA += tmp[off + 3] * w;
-        sumW += w;
-      }
-      const off = (y * dstW + x) * 4;
-      dst[off] = sumR / sumW;
-      dst[off + 1] = sumG / sumW;
-      dst[off + 2] = sumB / sumW;
-      dst[off + 3] = sumA / sumW;
-    }
-  }
-  return dst;
-}
-
-export async function preprocessImage(imageData, width, height) {
-  const size = CONFIG.condImageSize;
-
-  // Step 1: Get original pixels at full resolution
+function extractSourcePixels(imageData) {
   const canvas = document.createElement('canvas');
   const srcW = imageData.naturalWidth || imageData.width;
   const srcH = imageData.naturalHeight || imageData.height;
@@ -138,38 +69,43 @@ export async function preprocessImage(imageData, width, height) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(imageData, 0, 0);
   const srcPixels = ctx.getImageData(0, 0, srcW, srcH).data;
-
-  // Convert to float32 RGBA for Lanczos
   const srcFloat = new Float32Array(srcW * srcH * 4);
-  for (let i = 0; i < srcPixels.length; i++) {
-    srcFloat[i] = srcPixels[i] / 255.0;
+  for (let i = 0; i < srcPixels.length; i++) srcFloat[i] = srcPixels[i] / 255.0;
+  return { srcFloat, srcW, srcH };
+}
+
+/**
+ * Preprocess an image for SF3D input → CHW float32 tensor.
+ *
+ * @param {object} [options.preprocessWorker]  a live Worker running
+ *   preprocess_worker.js; when supplied, the Lanczos resize + blend + normalize
+ *   (the ~700ms main-thread gap) runs OFF the main thread. Output is
+ *   byte-identical to the main-thread path (same preprocess_core math). Without
+ *   it, behavior is unchanged.
+ */
+export async function preprocessImage(imageData, width, height, options = {}) {
+  const size = CONFIG.condImageSize;
+  const { srcFloat, srcW, srcH } = extractSourcePixels(imageData);
+  const bg = CONFIG.bgColor, imageMean = CONFIG.imageMean, imageStd = CONFIG.imageStd;
+
+  const worker = options.preprocessWorker;
+  if (worker) {
+    return await new Promise((resolve, reject) => {
+      const id = Math.random().toString(36).slice(2);
+      const onMessage = (e) => {
+        if (e.data.id !== id) return;
+        worker.removeEventListener('message', onMessage);
+        if (e.data.ok) resolve(new Float32Array(e.data.chwBuffer));
+        else reject(new Error(`preprocess worker failed: ${e.data.error}`));
+      };
+      worker.addEventListener('message', onMessage);
+      // Transfer the source buffer (zero-copy); worker transfers the result back.
+      worker.postMessage({ srcBuffer: srcFloat.buffer, srcW, srcH, size, bg, imageMean, imageStd, id }, [srcFloat.buffer]);
+    });
   }
 
-  // Step 2: Lanczos-3 resize to 512x512 (matching PIL's default)
-  const resized = lanczosResize(srcFloat, srcW, srcH, size, size);
-
-  // Step 3: Alpha blend with background in float32
-  const bg = CONFIG.bgColor;
-  const chw = new Float32Array(3 * size * size);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const off = (y * size + x) * 4;
-      const r = resized[off];
-      const g = resized[off + 1];
-      const b = resized[off + 2];
-      const a = Math.max(0, Math.min(1, resized[off + 3]));
-
-      const blendR = bg[0] * (1 - a) + r * a;
-      const blendG = bg[1] * (1 - a) + g * a;
-      const blendB = bg[2] * (1 - a) + b * a;
-
-      chw[0 * size * size + y * size + x] = (blendR - CONFIG.imageMean[0]) / CONFIG.imageStd[0];
-      chw[1 * size * size + y * size + x] = (blendG - CONFIG.imageMean[1]) / CONFIG.imageStd[1];
-      chw[2 * size * size + y * size + x] = (blendB - CONFIG.imageMean[2]) / CONFIG.imageStd[2];
-    }
-  }
-
-  return chw;
+  // Main-thread path (unchanged output).
+  return resizeBlendNormalize(srcFloat, srcW, srcH, size, bg, imageMean, imageStd);
 }
 
 /**
@@ -251,7 +187,8 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   report('Preprocessing image...');
   const imageData = await preprocessImage(imageElement,
     imageElement.naturalWidth || imageElement.width,
-    imageElement.naturalHeight || imageElement.height);
+    imageElement.naturalHeight || imageElement.height,
+    { preprocessWorker: options.preprocessWorker });
   const imageBuf = createStorageBuffer(device, imageData);
 
   // 2. Camera embedding (GPU) — counted as part of image-preprocess
