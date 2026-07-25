@@ -269,9 +269,24 @@ const fail = (m, failurePhase = 'unknown', failureDetails = null) => {
     outputIdentical: identical,
     glbSha256: { mono: hMono, off: hOff, on: hOn },
     textureBake: {
-      monolithic: { maxGapMs: result.mono.bakeMaxGap, stageMs: result.mono.bakeStageMs, cooperative: null },
-      coopOff: { maxGapMs: result.off.bakeMaxGap, stageMs: result.off.bakeStageMs, cooperative: result.off.cooperative },
-      coopOn: { maxGapMs: result.on.bakeMaxGap, stageMs: result.on.bakeStageMs, cooperative: result.on.cooperative },
+      monolithic: {
+        maxGapMs: result.mono.bakeMaxGap,
+        stageMs: result.mono.bakeStageMs,
+        frameGapAttribution: result.mono.frameGapAttribution,
+        cooperative: null,
+      },
+      coopOff: {
+        maxGapMs: result.off.bakeMaxGap,
+        stageMs: result.off.bakeStageMs,
+        frameGapAttribution: result.off.frameGapAttribution,
+        cooperative: result.off.cooperative,
+      },
+      coopOn: {
+        maxGapMs: result.on.bakeMaxGap,
+        stageMs: result.on.bakeStageMs,
+        frameGapAttribution: result.on.frameGapAttribution,
+        cooperative: result.on.cooperative,
+      },
     },
   };
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
