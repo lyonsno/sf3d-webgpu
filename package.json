@@ -10,7 +10,8 @@
     "test:build-weight-exclusion": "node tools/test_build_weight_exclusion.mjs && node tools/test_build_without_public_dir.mjs",
     "test:kit-route-contract": "node tools/test_kit_route_contract.mjs",
     "test:cooperative-dino": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_dino_contract.mjs",
-    "test:cooperative-dino-conformance": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_dino_conformance.mjs"
+    "test:cooperative-dino-conformance": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_dino_conformance.mjs",
+    "test:worker-lifecycle": "node tools/test_worker_call_lifecycle.mjs"
   },
   "devDependencies": {
     "@kaminos/webgpu-inference-kit": "0.1.38",
