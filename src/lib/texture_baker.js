@@ -821,8 +821,66 @@ export function rasterizeUV(uvs, positions, faces, numFaces, resolution = 1024, 
  * @param {number} resolution
  * @returns {{ albedo: Uint8Array, normalMap: Uint8Array }} - [res, res, 4] RGBA textures
  */
+/**
+ * Decode features + perturb_normal for numOccupied query positions.
+ *
+ * Monolithic by default (one decode dispatch + one fence + one readback).
+ * When `options.cooperativeBatch(batchStart, batchEnd, decodeBatch)` is supplied,
+ * the texels are split into fixed batches and each batch is decoded as its own
+ * GPU command duty via the caller's cooperative driver — collapsing the single
+ * ~231ms contiguous decode+readback into yieldable batches. Per-texel decode is
+ * independent, so batch outputs concatenated in order are byte-identical to the
+ * monolithic path.
+ *
+ * @returns {Promise<{featuresCPU: Float32Array, normalsCPU: Float32Array}>}
+ */
+export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf, decoderWeights,
+                                          queryPositions, numOccupied, options = {}) {
+  const decodeRange = async (start, end) => {
+    const count = end - start;
+    const sub = queryPositions.subarray(start * 3, end * 3);
+    const posBuf = createStorageBuffer(device, sub);
+    const encoder = device.createCommandEncoder({ label: `texel-decode-${start}-${end}` });
+    const decoded = triplaneDecoder.decode(
+      encoder, posBuf, triplanesBuf, count, decoderWeights, ['features', 'perturb_normal']);
+    return { encoder, decoded, count };
+  };
+
+  const featuresCPU = new Float32Array(numOccupied * 3);
+  const normalsCPU = new Float32Array(numOccupied * 3);
+
+  if (typeof options.cooperativeBatch === 'function') {
+    // Cooperative path: the driver decides submit + browser yield per batch.
+    await options.cooperativeBatch(numOccupied, async (start, end) => {
+      const { encoder, decoded, count } = await decodeRange(start, end);
+      return {
+        encode: () => encoder.finish(),
+        submit: (cb) => device.queue.submit([cb]),
+        // readback after this batch's queue prefix has been fenced by the facade
+        readback: async () => {
+          const f = await readBuffer(device, decoded.features, count * 3 * 4);
+          const n = await readBuffer(device, decoded.perturb_normal, count * 3 * 4);
+          featuresCPU.set(f.subarray(0, count * 3), start * 3);
+          normalsCPU.set(n.subarray(0, count * 3), start * 3);
+        },
+      };
+    });
+    return { featuresCPU, normalsCPU };
+  }
+
+  // Monolithic default (unchanged behavior).
+  const { encoder, decoded } = await decodeRange(0, numOccupied);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  const f = await readBuffer(device, decoded.features, numOccupied * 3 * 4);
+  const n = await readBuffer(device, decoded.perturb_normal, numOccupied * 3 * 4);
+  featuresCPU.set(f.subarray(0, numOccupied * 3));
+  normalsCPU.set(n.subarray(0, numOccupied * 3));
+  return { featuresCPU, normalsCPU };
+}
+
 export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoderWeights,
-                                   positions3D, mask, tbnData, resolution = 1024) {
+                                   positions3D, mask, tbnData, resolution = 1024, options = {}) {
   // Collect occupied texel positions
   const occupiedIndices = [];
   for (let i = 0; i < resolution * resolution; i++) {
@@ -846,19 +904,11 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     queryPositions[i * 3 + 2] = positions3D[idx * 3 + 2];
   }
 
-  // Upload to GPU and decode features + perturb_normal
-  const queryPosBuf = createStorageBuffer(device, queryPositions);
-
-  const encoder = device.createCommandEncoder();
-  const decoded = triplaneDecoder.decode(
-    encoder, queryPosBuf, triplanesBuf, numOccupied,
-    decoderWeights, ['features', 'perturb_normal']);
-  device.queue.submit([encoder.finish()]);
-  await device.queue.onSubmittedWorkDone();
-
-  // Read back both outputs
-  const featuresCPU = await readBuffer(device, decoded.features, numOccupied * 3 * 4);
-  const normalsCPU = await readBuffer(device, decoded.perturb_normal, numOccupied * 3 * 4);
+  // Decode features + perturb_normal for every occupied texel. Per-texel decode
+  // is fully independent, so this is monolithic by default but can be driven in
+  // cooperative batches via options.cooperativeBatch (see decodeTexelFeatures).
+  const { featuresCPU, normalsCPU } = await decodeTexelFeatures(
+    device, triplaneDecoder, triplanesBuf, decoderWeights, queryPositions, numOccupied, options);
 
   // Build albedo RGBA texture
   const albedo = new Uint8Array(resolution * resolution * 4);
