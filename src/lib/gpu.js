@@ -26,6 +26,31 @@ export function captureGpuBufferAllocations(fn) {
   activeBufferAllocationSink = allocations;
   try {
     return { value: fn(), allocations };
+  } catch (error) {
+    const cleanupErrors = [];
+    for (const allocation of allocations) {
+      try {
+        allocation.buffer.destroy();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError.message);
+      }
+    }
+    const cleanup = Object.freeze({
+      retiredCount: allocations.length - cleanupErrors.length,
+      cleanupErrors: Object.freeze(cleanupErrors),
+    });
+    if ((typeof error === 'object' && error !== null) || typeof error === 'function') {
+      try {
+        Object.defineProperty(error, 'gpuAllocationCleanup', {
+          configurable: true,
+          enumerable: true,
+          value: cleanup,
+        });
+      } catch {
+        // Cleanup remains complete even when the thrown object is immutable.
+      }
+    }
+    throw error;
   } finally {
     activeBufferAllocationSink = previous;
   }

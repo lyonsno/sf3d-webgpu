@@ -41,6 +41,16 @@ assert.notEqual(missing.result.status, 0);
 assert.equal(missing.report.failurePhase, 'source-identity');
 assert.match(missing.report.error, /expected-revision/);
 
+const unresolvable = runPreflight(['--expected-revision', 'definitely-not-a-real-revision']);
+assert.notEqual(unresolvable.result.status, 0);
+assert.equal(unresolvable.report.failurePhase, 'source-identity');
+assert.equal(
+  unresolvable.report.lastTrustworthyEvidence.source.requestedRevision,
+  'definitely-not-a-real-revision',
+);
+assert.equal(unresolvable.report.lastTrustworthyEvidence.source.matchesRequestedRevision, false);
+assert.match(unresolvable.report.error, /cannot resolve requested revision/);
+
 const parentRevision = execFileSync('git', ['rev-parse', 'HEAD^'], {
   cwd: repo,
   encoding: 'utf8',
