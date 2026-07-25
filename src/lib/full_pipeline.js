@@ -21,6 +21,37 @@ import { makeCooperativeTextureBake } from './cooperative_texture_bake.js';
 const COND_SIZE = 512;
 const TEX_RESOLUTION = 1024;
 
+/**
+ * Run UV unwrap on the main thread, or on a Web Worker when one is supplied.
+ * Byte-identical output either way (same unwrapUV code). Vertices/faces are
+ * transferred zero-copy to the worker; outputs transferred back.
+ */
+async function runUvUnwrap(vertices, faces, numVertices, numFaces, worker) {
+  if (!worker) return unwrapUV(vertices, faces, numVertices, numFaces);
+  return await new Promise((resolve, reject) => {
+    const id = Math.random().toString(36).slice(2);
+    const onMessage = (e) => {
+      if (e.data.id !== id) return;
+      worker.removeEventListener('message', onMessage);
+      if (!e.data.ok) { reject(new Error(`uv-unwrap worker failed: ${e.data.error}`)); return; }
+      resolve({
+        uvs: new Float32Array(e.data.uvs),
+        newVertices: new Float32Array(e.data.newVertices),
+        newNormals: new Float32Array(e.data.newNormals),
+        newFaces: new Uint32Array(e.data.newFaces),
+        faceAssignment: new Uint8Array(e.data.faceAssignment),
+        newNumVertices: e.data.newNumVertices,
+        newNumFaces: e.data.newNumFaces,
+      });
+    };
+    worker.addEventListener('message', onMessage);
+    // Transfer sliced copies (one copy) so the caller's arrays stay intact for
+    // any downstream use while the worker gets zero-copy ownership.
+    const vBuf = vertices.slice().buffer, fBuf = faces.slice().buffer;
+    worker.postMessage({ vertices: vBuf, faces: fBuf, numVertices, numFaces, id }, [vBuf, fBuf]);
+  });
+}
+
 export async function runFullPipelineToGlb(device, pipelines, weights, inputImage, options = {}, onProgress) {
   const report = (msg) => { if (onProgress) onProgress(msg); };
   const t0 = performance.now();
@@ -57,9 +88,12 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   const { roughness, metallic } = await estimateMaterials(device, clipPixels, COND_SIZE, COND_SIZE, weights);
   mark('clip-material-estimate', clipStart, performance.now());
 
-  // Step 3: UV unwrap (CPU, synchronous)
-  const uvResult = await timed('uv-unwrap', async () => unwrapUV(
-    meshResult.vertices, meshResult.faces, meshResult.numVertices, meshResult.numFaces));
+  // Step 3: UV unwrap (CPU). Optionally offloaded to a Web Worker
+  // (options.uvUnwrapWorker) — the second-largest CPU foreground gap (~216ms);
+  // byte-identical output (same unwrapUV code).
+  const uvResult = await timed('uv-unwrap', () => runUvUnwrap(
+    meshResult.vertices, meshResult.faces, meshResult.numVertices, meshResult.numFaces,
+    options.uvUnwrapWorker));
 
   // Step 4: rasterize UV → per-texel 3D positions (CPU, synchronous)
   const rasterResult = await timed('uv-rasterize', async () => rasterizeUV(
