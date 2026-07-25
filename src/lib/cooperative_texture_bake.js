@@ -86,9 +86,53 @@ export function makeCooperativeTextureBake(device, opts = {}) {
   } = opts;
 
   return async function cooperativeBatch(numOccupied, makeBatch) {
+    const now = () => globalThis.performance?.now?.() ?? Date.now();
     const batch = Math.min(batchTexels, numOccupied);
     const manifest = defineTextureBakeManifest(numOccupied, batch);
-    const runtime = createSf3dCooperativeRuntime(device);
+    const ranges = [];
+    const queueFences = [];
+    const scratch = {
+      allocatedCount: 0,
+      allocatedBytes: 0,
+      retiredCount: 0,
+      retiredBytes: 0,
+      activeCount: 0,
+      activeBytes: 0,
+    };
+    let activeRange = null;
+    let pendingScratch = [];
+
+    const runtime = createSf3dCooperativeRuntime(device, {
+      async onQueueFenceResolved(fence) {
+        const retirementStartedAtMs = now();
+        const retiring = pendingScratch;
+        pendingScratch = [];
+        let retiredBytes = 0;
+        for (const resource of retiring) {
+          if (!resource || typeof resource.buffer?.destroy !== 'function') {
+            throw new TypeError('scratch resource must expose buffer.destroy()');
+          }
+          resource.buffer.destroy();
+          retiredBytes += resource.size;
+        }
+        scratch.retiredCount += retiring.length;
+        scratch.retiredBytes += retiredBytes;
+        scratch.activeCount -= retiring.length;
+        scratch.activeBytes -= retiredBytes;
+        queueFences.push({
+          rangeIndex: activeRange?.rangeIndex ?? null,
+          itemStart: activeRange?.itemStart ?? null,
+          itemEnd: activeRange?.itemEnd ?? null,
+          queueWaitMs: fence.queueWaitMs,
+          retirementMs: now() - retirementStartedAtMs,
+          retiredCount: retiring.length,
+          retiredBytes,
+        });
+      },
+      async onBrowserYield(yieldEvent) {
+        if (activeRange) activeRange.browserYieldMs += yieldEvent.elapsedMs;
+      },
+    });
     const execution = createWebGpuCooperativeExecution({
       runtime, manifest, invocationId, schedulingMode, onProgress, signal,
     });
@@ -98,11 +142,46 @@ export function makeCooperativeTextureBake(device, opts = {}) {
       let range;
       while ((range = gpu.nextRange()) != null) {
         const start = range.itemStart, end = range.itemEnd;
+        const encodeStartedAtMs = now();
         const b = await makeBatch(start, end);
-        await gpu.runGpuDuty(range, {
-          encode: () => b.encode(),
-          submit: (cb) => b.submit(cb),
-        });
+        const resources = Array.isArray(b.scratchResources) ? b.scratchResources : [];
+        for (const resource of resources) {
+          if (!Number.isFinite(resource?.size) || resource.size < 0) {
+            throw new TypeError('scratch resource size must be a non-negative finite number');
+          }
+        }
+        const allocatedBytes = resources.reduce((sum, resource) => sum + resource.size, 0);
+        pendingScratch.push(...resources);
+        scratch.allocatedCount += resources.length;
+        scratch.allocatedBytes += allocatedBytes;
+        scratch.activeCount += resources.length;
+        scratch.activeBytes += allocatedBytes;
+
+        const rangeTelemetry = {
+          rangeIndex: range.rangeIndex,
+          itemStart: start,
+          itemEnd: end,
+          itemCount: range.itemCount,
+          hostEncodeMs: Number.isFinite(b.hostEncodeMs)
+            ? b.hostEncodeMs
+            : now() - encodeStartedAtMs,
+          dutyWallMs: 0,
+          browserYieldMs: 0,
+          scratchAllocatedCount: resources.length,
+          scratchAllocatedBytes: allocatedBytes,
+        };
+        activeRange = rangeTelemetry;
+        const dutyStartedAtMs = now();
+        try {
+          await gpu.runGpuDuty(range, {
+            encode: () => b.encode(),
+            submit: (cb) => b.submit(cb),
+          });
+        } finally {
+          rangeTelemetry.dutyWallMs = now() - dutyStartedAtMs;
+          ranges.push(rangeTelemetry);
+          activeRange = null;
+        }
         // No per-batch readback: each batch copies its decode into a shared GPU
         // buffer (in decodeTexelFeatures) and the whole texture is read back once
         // after the boundary completes, so cooperation yields between decode
@@ -110,6 +189,17 @@ export function makeCooperativeTextureBake(device, opts = {}) {
       }
     });
 
-    return execution.finish();
+    if (pendingScratch.length !== 0 || scratch.activeCount !== 0 || scratch.activeBytes !== 0) {
+      throw new Error('texture-bake scratch resources remained active after queue completion');
+    }
+    return Object.freeze({
+      ...execution.finish(),
+      textureBakeTelemetry: Object.freeze({
+        schema: 'sf3d.texture-bake-duty-telemetry.v0',
+        ranges: Object.freeze(ranges.map(range => Object.freeze({ ...range }))),
+        queueFences: Object.freeze(queueFences.map(fence => Object.freeze({ ...fence }))),
+        scratch: Object.freeze({ ...scratch }),
+      }),
+    });
   };
 }

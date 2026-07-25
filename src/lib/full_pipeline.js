@@ -118,17 +118,29 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   let bakeReport = null;
   const bakeOptions = {};
   if (options.cooperativeBake) {
+    const bakeTelemetry = {};
     const cooperativeBatch = makeCooperativeTextureBake(device, {
       batchTexels: options.bakeBatchTexels || 16384,
       schedulingMode: options.bakeSchedulingMode === 'disabled' ? 'disabled' : 'cooperative',
       onProgress: (p) => { if (p.percent != null) report(`Texture bake ${p.completedItems}/${p.totalItems} (${p.percent.toFixed(0)}%)`); },
     });
     bakeOptions.cooperativeBatch = async (numOccupied, makeBatch) => { bakeReport = await cooperativeBatch(numOccupied, makeBatch); };
+    bakeOptions.telemetry = bakeTelemetry;
+    bakeOptions.finalizeTelemetry = () => bakeTelemetry;
   }
   const bakeResult = await timed('texture-bake', () => bakeTexture(
     device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
     meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
     rasterResult.tbnData, TEX_RESOLUTION, bakeOptions));
+  if (bakeReport && bakeOptions.finalizeTelemetry) {
+    bakeReport = Object.freeze({
+      ...bakeReport,
+      textureBakeTelemetry: Object.freeze({
+        ...bakeReport.textureBakeTelemetry,
+        phases: Object.freeze({ ...bakeOptions.finalizeTelemetry() }),
+      }),
+    });
+  }
 
   // Step 6: GLB export
   const glb = await timed('glb-export', () => exportGLB(

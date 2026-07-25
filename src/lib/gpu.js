@@ -2,6 +2,35 @@
  * WebGPU initialization and device management.
  */
 
+let activeBufferAllocationSink = null;
+
+function recordBufferAllocation(buffer, size, label) {
+  if (activeBufferAllocationSink) {
+    activeBufferAllocationSink.push({
+      buffer,
+      size: Math.ceil(size / 4) * 4,
+      label: label || buffer.label || '',
+    });
+  }
+  return buffer;
+}
+
+/**
+ * Capture buffers allocated synchronously through this module while `fn` runs.
+ * The caller owns retirement; nested scopes restore the outer sink afterward.
+ */
+export function captureGpuBufferAllocations(fn) {
+  if (typeof fn !== 'function') throw new TypeError('fn must be a function');
+  const previous = activeBufferAllocationSink;
+  const allocations = [];
+  activeBufferAllocationSink = allocations;
+  try {
+    return { value: fn(), allocations };
+  } finally {
+    activeBufferAllocationSink = previous;
+  }
+}
+
 export async function initGPU() {
   if (!navigator.gpu) {
     throw new Error('WebGPU is not supported in this browser. Try Chrome 113+ or Edge 113+.');
@@ -43,15 +72,16 @@ export function createStorageBuffer(device, data, usage = 0, label = '') {
   if (data.byteLength % 4 !== 0) {
     console.warn(`createStorageBuffer: non-4-aligned size ${data.byteLength} (label: ${label})`);
   }
+  const size = Math.ceil(data.byteLength / 4) * 4;
   const buffer = device.createBuffer({
-    size: Math.ceil(data.byteLength / 4) * 4, // ensure 4-byte alignment
+    size, // ensure 4-byte alignment
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | usage,
     mappedAtCreation: true,
     label: label || `storage_${data.byteLength}`,
   });
   new (data.constructor)(buffer.getMappedRange()).set(data);
   buffer.unmap();
-  return buffer;
+  return recordBufferAllocation(buffer, size, label);
 }
 
 /**
@@ -61,12 +91,14 @@ export function createEmptyBuffer(device, size, usage = 0, label = '') {
   if (size % 4 !== 0) {
     console.warn(`createEmptyBuffer: non-4-aligned size ${size} (label: ${label})`);
   }
-  return device.createBuffer({
-    size: Math.ceil(size / 4) * 4,
+  const alignedSize = Math.ceil(size / 4) * 4;
+  const buffer = device.createBuffer({
+    size: alignedSize,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | usage,
     mappedAtCreation: false,
     label: label || `empty_${size}`,
   });
+  return recordBufferAllocation(buffer, alignedSize, label);
 }
 
 /**
