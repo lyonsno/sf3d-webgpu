@@ -96,16 +96,30 @@ const fail = (m) => { fs.writeFileSync(REPORT_PATH, JSON.stringify({ ok: false, 
 
   const capacityAt = (N) => slots.reduce((sum, s) => sum + Math.max(0, Math.round(s.baseBytes + s.perTexelBytes * N)), 0);
 
+  // DRIFT GATE (review residual-risk #2): the captured real-decoder slot graph
+  // must exactly match the frozen DECODER_BAKE_SLOT_GRAPH the arena pre-allocates
+  // against. If a decoder change adds/renames a slot or changes a per-texel size,
+  // this diverges and fails loud at test time (rather than a silent output
+  // change or a runtime-only throw). Compare by ordered (slotKey, perTexelBytes,
+  // baseBytes).
+  const { DECODER_BAKE_SLOT_GRAPH } = await import('../src/lib/decoder_scratch_arena.js');
+  const capturedKeyed = slots.map(s => ({ slotKey: s.label, perTexelBytes: Math.round(s.perTexelBytes), baseBytes: s.baseBytes }));
+  const frozen = DECODER_BAKE_SLOT_GRAPH.map(s => ({ slotKey: s.slotKey, perTexelBytes: s.perTexelBytes, baseBytes: s.baseBytes }));
+  const driftMismatch = JSON.stringify(capturedKeyed) !== JSON.stringify(frozen);
+
   const report = {
-    ok: true,
+    ok: !driftMismatch,
     slotCount: slots.length,
-    matchesAssay31: slots.length === 31,
+    frozenSlotCount: frozen.length,
+    driftMismatch,
+    driftDetail: driftMismatch ? { captured: capturedKeyed, frozen } : null,
     duplicateLabels,
     slots,
     arenaCapacityBytes: { at4096: capacityAt(4096), at16384: capacityAt(16384) },
     note: 'Each slot size = baseBytes + perTexelBytes*N; a maxBatch-capacity arena holds all slots and is reused across ranges.',
   };
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+  if (driftMismatch) fail(`SLOT GRAPH DRIFT: captured decoder slots != frozen DECODER_BAKE_SLOT_GRAPH — arena would allocate the wrong slots. See ${REPORT_PATH}`);
 
   console.log('\n=== Decoder scratch slot graph ===');
   console.log(`slots captured: ${slots.length} ${slots.length === 31 ? '(matches Cranial assay 31)' : '(DIFFERS from assay 31 — investigate)'}`);

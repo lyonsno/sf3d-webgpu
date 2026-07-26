@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * SF3D exact-source FIVE-ARM texture-bake A/B (Cranial arena assay contract #7 /
+ * SF3D exact-source SIX-ARM texture-bake A/B (Cranial arena assay contract #7 /
  * Wake required consumer evidence).
  *
  * One loaded model, five arms over the exact same route:
@@ -109,6 +109,10 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
     results.push(await arm('arena-only', { ...coop, decoderArena: true }));
     results.push(await arm('worker-only', { ...coop, materializeWorker: getMatWorker() }));
     results.push(await arm('arena-plus-worker', { ...coop, decoderArena: true, materializeWorker: getMatWorker() }));
+    // Review residual-risk #1: arena under DISABLED scheduling relies on WebGPU
+    // queue-submission ordering (not the per-duty fence) for slot-reuse safety.
+    // Prove that path is also byte-identical.
+    results.push(await arm('arena-disabled', { ...coop, decoderArena: true, bakeSchedulingMode: 'disabled' }));
     if (matWorker) matWorker.terminate();
     return results;
   }, BATCH);
