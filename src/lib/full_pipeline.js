@@ -16,7 +16,7 @@
 import { runInference } from './inference.js';
 import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './texture_baker.js';
 import { estimateMaterials } from './clip_estimator.js';
-import { makeCooperativeTextureBake } from './cooperative_texture_bake.js';
+import { makeCooperativeTextureBake, withDecoderArenaLease } from './cooperative_texture_bake.js';
 import { callWorker } from './worker_call.js';
 
 const COND_SIZE = 512;
@@ -128,10 +128,28 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     bakeOptions.telemetry = bakeTelemetry;
     bakeOptions.finalizeTelemetry = () => bakeTelemetry;
   }
-  const bakeResult = await timed('texture-bake', () => bakeTexture(
+  // Optional decoder scratch arena (options.decoderArena): removes ~1.015GB
+  // per-route decode allocation churn by reusing one buffer per slot across
+  // ranges, held under the phase-resource working-set lease. maxBatch is the
+  // cooperative batch size (the largest N any range decodes).
+  const runBake = () => bakeTexture(
     device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
     meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
-    rasterResult.tbnData, TEX_RESOLUTION, bakeOptions));
+    rasterResult.tbnData, TEX_RESOLUTION, bakeOptions);
+  let arenaSnapshot = null;
+  const bakeResult = await timed('texture-bake', async () => {
+    if (options.decoderArena && options.cooperativeBake) {
+      const maxBatch = options.bakeBatchTexels || 16384;
+      return await withDecoderArenaLease(device, { maxBatch }, async (arena, snap) => {
+        bakeOptions.arena = arena;
+        arenaSnapshot = snap;
+        const r = await runBake();
+        arenaSnapshot = arena.snapshot();
+        return r;
+      });
+    }
+    return runBake();
+  });
   if (bakeReport && bakeOptions.finalizeTelemetry) {
     bakeReport = Object.freeze({
       ...bakeReport,
@@ -159,6 +177,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     roughness,
     metallic,
     cooperativeReports: { ...(meshResult._cooperativeReports || {}), ...(bakeReport ? { 'texture-bake': bakeReport } : {}) },
+    arenaSnapshot,
     dinoPayload: meshResult._dinoPayload || null,   // { shape, length, tokens } or null
     sdf: meshResult._sdf,
     isosurfaceThreshold: meshResult._isosurfaceThreshold,

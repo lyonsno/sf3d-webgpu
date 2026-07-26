@@ -19,11 +19,56 @@
 import {
   createWebGpuCooperativeExecution,
   defineWebGpuCooperativeBoundaryManifest,
+  createWebGpuPhaseResourceWorkingSet,
 } from '@kaminos/webgpu-inference-kit';
 import { createSf3dCooperativeRuntime, SF3D_ROUTE_ID } from './cooperative_dino.js';
+import { createDecoderScratchArena, decoderArenaCapacityBytes } from './decoder_scratch_arena.js';
 
 export const TEXTURE_BAKE_MANIFEST_ID = 'sf3d.texture-bake-cooperative-boundaries.v0';
 export const TEXTURE_BAKE_BOUNDARY_ID = 'texture-bake-texel-batches';
+export const DECODER_ARENA_RESOURCE_ID = 'sf3d.decoder-scratch-arena';
+
+/**
+ * Run `fn(arena)` with a decoder scratch arena held under the kit's phase-
+ * resource working-set lease (Cranial's constraint: one managed resource, no
+ * competing manager). The working set acquires the arena when transitioning into
+ * the texture-bake phase and retires it on close — giving the arena lawful
+ * lease-owned lifetime, cancellation, and terminal retirement.
+ *
+ * @param {GPUDevice} device
+ * @param {object} o { maxBatch, signal }
+ * @param {(arena, workingSetSnapshot)=>Promise<any>} fn
+ */
+export async function withDecoderArenaLease(device, { maxBatch, signal }, fn) {
+  const declaredBytes = decoderArenaCapacityBytes(maxBatch);
+  let arena = null;
+  const workingSet = createWebGpuPhaseResourceWorkingSet({
+    controllerId: 'sf3d.texture-bake.decoder-arena',
+    plan: {
+      planId: 'sf3d.texture-bake.decoder-arena.v0',
+      resources: [{ resourceId: DECODER_ARENA_RESOURCE_ID, declaredBytes }],
+      phases: [{ phaseId: 'texture-bake', requiredResourceIds: [DECODER_ARENA_RESOURCE_ID] }],
+    },
+    acquireResource: ({ resource }) => {
+      arena = createDecoderScratchArena(device, { maxBatch });
+      return {
+        resourceId: resource.resourceId,
+        value: arena,
+        release: () => {
+          const r = arena.destroy();
+          return r.retired >= 0 ? 'released' : 'released';
+        },
+      };
+    },
+    residencySnapshot: () => (arena ? arena.snapshot() : { slotCount: 0, totalBytes: 0 }),
+  });
+  try {
+    await workingSet.transitionToPhase('texture-bake', { signal });
+    return await fn(arena, workingSet.snapshot());
+  } finally {
+    workingSet.close();
+  }
+}
 
 /**
  * Declare the texture-bake cooperative boundary manifest: one gpu-command
