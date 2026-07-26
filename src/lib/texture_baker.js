@@ -869,8 +869,19 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
     // exactly ONCE at the end — otherwise a per-batch mapAsync forces a GPU sync
     // per batch and fine batching regresses badly (measured 1808ms at 61
     // batches). Coalesced readback keeps cooperation between decode duties only.
+    //
+    // Optional decoder scratch arena (options.arena): when present, the decoder
+    // reuses one pre-allocated buffer per slot across all ranges instead of
+    // rebuilding ~30 transient buffers per range (~1.015GB churn per Cranial's
+    // assay). Arena slots bypass createEmptyBuffer, so captureGpuBufferAllocations
+    // no longer records them — per-range scratchResources collapses to just the
+    // small query-position buffer, and the existing per-prefix retire logic
+    // still lawfully retires that. Exact per-range prefix completion is unchanged.
+    const priorSlotProvider = triplaneDecoder._slotProvider;
+    if (options.arena) triplaneDecoder._slotProvider = options.arena;
     const featuresAll = createEmptyBuffer(device, numOccupied * 3 * 4);
     const normalsAll = createEmptyBuffer(device, numOccupied * 3 * 4);
+    try {
     await options.cooperativeBatch(numOccupied, async (start, end) => {
       const { encoder, decoded, count, hostEncodeMs, scratchResources } = await decodeRange(start, end);
       // Copy this batch's decode outputs into their slice of the shared buffers,
@@ -908,6 +919,12 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
     featuresCPU.set(f.subarray(0, numOccupied * 3));
     normalsCPU.set(n.subarray(0, numOccupied * 3));
     return { featuresCPU, normalsCPU };
+    } finally {
+      // Restore the decoder's slot provider so a non-arena decode later is
+      // unaffected. The arena's own lifetime (allocation/retirement) is owned by
+      // the phase-resource lease at the call site, not here.
+      triplaneDecoder._slotProvider = priorSlotProvider;
+    }
   }
 
   // Monolithic default (unchanged behavior).
