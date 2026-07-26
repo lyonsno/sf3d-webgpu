@@ -44,6 +44,25 @@ export class TriplaneDecoder {
     this.device = device;
     this.pipelines = {};
     this._uniformCache = new Map();
+    // Optional scratch-slot provider. When set (during an arena-backed decode),
+    // _alloc(slotKey, size) returns a reusable pre-allocated buffer bound to that
+    // stable slot key instead of allocating a fresh transient buffer. Default
+    // null → createEmptyBuffer (unchanged behavior). Slot keys are deterministic
+    // per decode call site (+ plane/head/layer index), which is exactly the
+    // reusable slot graph the arena is proven against.
+    this._slotProvider = null;
+  }
+
+  /**
+   * Allocate (or reuse) a scratch buffer for a decode dispatch.
+   * @param {string} slotKey  stable slot identity (arena binding key)
+   * @param {number} size     byte size needed for this range's N
+   */
+  _alloc(slotKey, size) {
+    if (this._slotProvider) return this._slotProvider.acquire(slotKey, size);
+    // Pass the slot key as the buffer label so allocation capture records slot
+    // identity (the arena binding key), not just the byte size.
+    return createEmptyBuffer(this.device, size, 0, slotKey);
   }
 
   init() {
@@ -182,22 +201,22 @@ export class TriplaneDecoder {
     // 1. Scale positions from model space to [-1, 1] for grid_sample
     //    PyTorch: scale_tensor(positions, (-radius, radius), (-1, 1))
     //    → pos_norm = pos / radius
-    const scaledPosBuf = this._dispatchScalePositions(encoder, positionsBuf, N, radius);
+    const scaledPosBuf = this._dispatchScalePositions(encoder, positionsBuf, N, radius, 'scaledPos');
 
     // 2. Create grid coordinates for each plane
     //    XY plane: (x, y), XZ plane: (x, z), YZ plane: (y, z)
-    const gridXY = this._dispatchExtractGrid(encoder, scaledPosBuf, N, 0, 1); // x, y
-    const gridXZ = this._dispatchExtractGrid(encoder, scaledPosBuf, N, 0, 2); // x, z
-    const gridYZ = this._dispatchExtractGrid(encoder, scaledPosBuf, N, 1, 2); // y, z
+    const gridXY = this._dispatchExtractGrid(encoder, scaledPosBuf, N, 0, 1, 'grid:XY'); // x, y
+    const gridXZ = this._dispatchExtractGrid(encoder, scaledPosBuf, N, 0, 2, 'grid:XZ'); // x, z
+    const gridYZ = this._dispatchExtractGrid(encoder, scaledPosBuf, N, 1, 2, 'grid:YZ'); // y, z
 
     // 3. Grid sample each plane
     const planeSize = C * H * W * 4; // bytes per plane
-    const sampledXY = this._dispatchGridSample(encoder, triplanesBuf, 0, gridXY, C, H, W, N);
-    const sampledXZ = this._dispatchGridSample(encoder, triplanesBuf, planeSize, gridXZ, C, H, W, N);
-    const sampledYZ = this._dispatchGridSample(encoder, triplanesBuf, planeSize * 2, gridYZ, C, H, W, N);
+    const sampledXY = this._dispatchGridSample(encoder, triplanesBuf, 0, gridXY, C, H, W, N, 'sampled:XY');
+    const sampledXZ = this._dispatchGridSample(encoder, triplanesBuf, planeSize, gridXZ, C, H, W, N, 'sampled:XZ');
+    const sampledYZ = this._dispatchGridSample(encoder, triplanesBuf, planeSize * 2, gridYZ, C, H, W, N, 'sampled:YZ');
 
     // 4. Concatenate: [N, 40] × 3 → [N, 120]
-    const featuresBuf = this._dispatchConcatPlanes(encoder, sampledXY, sampledXZ, sampledYZ, N, C);
+    const featuresBuf = this._dispatchConcatPlanes(encoder, sampledXY, sampledXZ, sampledYZ, N, C, 'concatFeatures');
 
     // 5. Run MLP heads
     const results = {};
@@ -212,7 +231,7 @@ export class TriplaneDecoder {
   }
 
   // --- Scale positions: pos / radius ---
-  _dispatchScalePositions(encoder, posBuf, N, radius) {
+  _dispatchScalePositions(encoder, posBuf, N, radius, slotKey = 'scaledPos') {
     if (!this.pipelines.scalePos) {
       this.pipelines.scalePos = this.device.createComputePipeline({
         layout: 'auto',
@@ -245,7 +264,7 @@ export class TriplaneDecoder {
     u32[0] = count; f32[1] = 1.0 / radius; u32[2] = wgX;
     const params = this._cachedUniform(new Uint8Array(paramsData));
 
-    const outBuf = createEmptyBuffer(this.device, count * 4);
+    const outBuf = this._alloc(slotKey, count * 4);
     const bg = this.device.createBindGroup({
       layout: this.pipelines.scalePos.getBindGroupLayout(0),
       entries: [
@@ -263,7 +282,7 @@ export class TriplaneDecoder {
   }
 
   // --- Extract 2D grid from 3D positions ---
-  _dispatchExtractGrid(encoder, posBuf, N, dim0, dim1) {
+  _dispatchExtractGrid(encoder, posBuf, N, dim0, dim1, slotKey = 'grid') {
     if (!this.pipelines.extractGrid) {
       this.pipelines.extractGrid = this.device.createComputePipeline({
         layout: 'auto',
@@ -291,7 +310,7 @@ export class TriplaneDecoder {
     const totalWG = ceilDiv(N, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([N, dim0, dim1, wgX]));
-    const gridBuf = createEmptyBuffer(this.device, N * 2 * 4);
+    const gridBuf = this._alloc(slotKey, N * 2 * 4);
 
     const bg = this.device.createBindGroup({
       layout: this.pipelines.extractGrid.getBindGroupLayout(0),
@@ -310,12 +329,12 @@ export class TriplaneDecoder {
   }
 
   // --- Grid sample from one triplane plane ---
-  _dispatchGridSample(encoder, triplanesBuf, planeOffsetBytes, gridBuf, C, H, W, N) {
+  _dispatchGridSample(encoder, triplanesBuf, planeOffsetBytes, gridBuf, C, H, W, N, slotKey = 'sampled') {
     const totalWG = ceilDiv(N * C, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([C, H, W, N, wgX]));
 
-    const outBuf = createEmptyBuffer(this.device, N * C * 4);
+    const outBuf = this._alloc(slotKey, N * C * 4);
     const bg = this.device.createBindGroup({
       layout: this.pipelines.gridSample.getBindGroupLayout(0),
       entries: [
@@ -335,13 +354,13 @@ export class TriplaneDecoder {
   }
 
   // --- Concat 3 planes → [N, 120] ---
-  _dispatchConcatPlanes(encoder, plane0, plane1, plane2, N, C) {
+  _dispatchConcatPlanes(encoder, plane0, plane1, plane2, N, C, slotKey = 'concatFeatures') {
     const total = N * C * 3;
     const totalWG = ceilDiv(total, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([N, C, wgX]));
 
-    const outBuf = createEmptyBuffer(this.device, total * 4);
+    const outBuf = this._alloc(slotKey, total * 4);
     const bg = this.device.createBindGroup({
       layout: this.pipelines.concatPlanes.getBindGroupLayout(0),
       entries: [
@@ -372,21 +391,24 @@ export class TriplaneDecoder {
     let current = inputBuf;
     let currentDim = inChannels;
 
-    // Hidden layers: Linear + SiLU (all but the last layer)
+    // Hidden layers: Linear + SiLU (all but the last layer). Slot keys are
+    // stable per head+layer so the arena reuses the same physical buffer for the
+    // same layer across ranges.
+    const hk = `head:${headName}`;
     for (let i = 0; i < headLayers.length - 1; i++) {
       const layer = headLayers[i];
-      const outBuf = createEmptyBuffer(this.device, N * nNeurons * 4);
+      const outBuf = this._alloc(`${hk}:lin:${i}`, N * nNeurons * 4);
       this._dispatchLinear(encoder, current, outBuf, layer.weight, layer.bias, N, currentDim, nNeurons);
 
       // SiLU activation
-      const siluBuf = this._dispatchSiLU(encoder, outBuf, N * nNeurons);
+      const siluBuf = this._dispatchSiLU(encoder, outBuf, N * nNeurons, `${hk}:silu:${i}`);
       current = siluBuf;
       currentDim = nNeurons;
     }
 
     // Final layer: Linear (no activation yet)
     const lastLayer = headLayers[headLayers.length - 1];
-    const rawOutBuf = createEmptyBuffer(this.device, N * outChannels * 4);
+    const rawOutBuf = this._alloc(`${hk}:rawOut`, N * outChannels * 4);
     this._dispatchLinear(encoder, current, rawOutBuf, lastLayer.weight, lastLayer.bias, N, currentDim, outChannels);
 
     // Apply output bias and activation
@@ -395,14 +417,14 @@ export class TriplaneDecoder {
     if (headName === 'density') {
       // bias(-1.0) then trunc_exp
       this._dispatchAddBias(encoder, resultBuf, N * outChannels, -1.0);
-      const expBuf = this._dispatchTruncExp(encoder, resultBuf, N * outChannels);
+      const expBuf = this._dispatchTruncExp(encoder, resultBuf, N * outChannels, `${hk}:truncExp`);
       resultBuf = expBuf;
     } else if (headName === 'features') {
       // sigmoid
-      resultBuf = this._dispatchSigmoid(encoder, resultBuf, N * outChannels);
+      resultBuf = this._dispatchSigmoid(encoder, resultBuf, N * outChannels, `${hk}:sigmoid`);
     } else if (headName === 'perturb_normal') {
       // normalize per-vector (3 components)
-      resultBuf = this._dispatchNormalize3(encoder, resultBuf, N);
+      resultBuf = this._dispatchNormalize3(encoder, resultBuf, N, `${hk}:normalize3`);
     }
     // vertex_offset: no output activation
 
@@ -432,12 +454,12 @@ export class TriplaneDecoder {
     pass.end();
   }
 
-  _dispatchSiLU(encoder, inputBuf, count) {
+  _dispatchSiLU(encoder, inputBuf, count, slotKey = 'silu') {
     const totalWG = ceilDiv(count, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([count, 1, wgX])); // op=1 = SiLU
-    const dummyBuf = createEmptyBuffer(this.device, 4);
-    const outBuf = createEmptyBuffer(this.device, count * 4);
+    const dummyBuf = this._alloc(slotKey + ':dummy', 4);
+    const outBuf = this._alloc(slotKey, count * 4);
     const bg = this.device.createBindGroup({
       layout: this.pipelines.activation.getBindGroupLayout(0),
       entries: [
@@ -455,11 +477,11 @@ export class TriplaneDecoder {
     return outBuf;
   }
 
-  _dispatchTruncExp(encoder, inputBuf, count) {
+  _dispatchTruncExp(encoder, inputBuf, count, slotKey = 'truncExp') {
     const totalWG = ceilDiv(count, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([count, wgX]));
-    const outBuf = createEmptyBuffer(this.device, count * 4);
+    const outBuf = this._alloc(slotKey, count * 4);
     const bg = this.device.createBindGroup({
       layout: this.pipelines.truncExp.getBindGroupLayout(0),
       entries: [
@@ -476,11 +498,11 @@ export class TriplaneDecoder {
     return outBuf;
   }
 
-  _dispatchSigmoid(encoder, inputBuf, count) {
+  _dispatchSigmoid(encoder, inputBuf, count, slotKey = 'sigmoid') {
     const totalWG = ceilDiv(count, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([count, wgX]));
-    const outBuf = createEmptyBuffer(this.device, count * 4);
+    const outBuf = this._alloc(slotKey, count * 4);
     const bg = this.device.createBindGroup({
       layout: this.pipelines.sigmoid.getBindGroupLayout(0),
       entries: [
@@ -497,11 +519,11 @@ export class TriplaneDecoder {
     return outBuf;
   }
 
-  _dispatchNormalize3(encoder, inputBuf, N) {
+  _dispatchNormalize3(encoder, inputBuf, N, slotKey = 'normalize3') {
     const totalWG = ceilDiv(N, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([N, wgX]));
-    const outBuf = createEmptyBuffer(this.device, N * 3 * 4);
+    const outBuf = this._alloc(slotKey, N * 3 * 4);
     const bg = this.device.createBindGroup({
       layout: this.pipelines.normalize3.getBindGroupLayout(0),
       entries: [
