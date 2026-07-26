@@ -93,9 +93,9 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
         scratchAllocatedBytes: tel?.scratch?.allocatedBytes ?? null,
         scratchAllocatedCount: tel?.scratch?.allocatedCount ?? null,
         queueWaitTotalMs: tel?.queueFences ? +tel.queueFences.reduce((s, q) => s + (q.queueWaitMs || 0), 0).toFixed(1) : null,
-        cpuMaterializationMs: bake?.telemetry?.cpuMaterializationMs ?? tel?.cpuMaterializationMs ?? null,
-        materializationOffloaded: bake?.telemetry?.materializationOffloaded ?? null,
-        workerTransferMs: bake?.telemetry?.materializationWorkerTransferMs ?? null,
+        cpuMaterializationMs: tel?.phases?.cpuMaterializationMs ?? null,
+        materializationOffloaded: tel?.phases?.materializationOffloaded ?? null,
+        workerTransferMs: tel?.phases?.materializationWorkerTransferMs ?? null,
         arenaSnapshot: out.arenaSnapshot || null,
         rangeCount: bake?.boundaries?.[0]?.actualRangeCount ?? null,
       };
@@ -121,12 +121,26 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
   const shas = new Set(withSha.map(a => a.glbSha));
   const identical = shas.size === 1;
 
+  // Acceptance: arena+worker (the winning arm) must (a) collapse scratch vs the
+  // current-cooperative churn, and (b) collapse the foreground gap vs monolithic.
+  const byName = Object.fromEntries(withSha.map(a => [a.name, a]));
+  const cur = byName['current-cooperative'], mono = byName['monolithic'], best = byName['arena-plus-worker'];
+  const scratchCollapsed = best.scratchAllocatedBytes != null && cur.scratchAllocatedBytes != null
+    && best.scratchAllocatedBytes < cur.scratchAllocatedBytes * 0.2;
+  const gapCollapsed = best.bakeMaxGapMs != null && mono.bakeMaxGapMs != null
+    && best.bakeMaxGapMs < mono.bakeMaxGapMs * 0.5;
+
   const report = {
-    ok: identical,
+    ok: identical && scratchCollapsed && gapCollapsed,
     source,
     outputIdentical: identical,
     canonicalGlbSha: withSha[0].glbSha,
     distinctShas: [...shas],
+    winning: {
+      arm: 'arena-plus-worker',
+      bakeMaxGapMs: best.bakeMaxGapMs, scratchAllocatedBytes: best.scratchAllocatedBytes,
+      scratchCollapsedVsCurrent: scratchCollapsed, gapCollapsedVsMonolithic: gapCollapsed,
+    },
     arms: withSha,
   };
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
@@ -146,6 +160,9 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
     );
   }
   if (!identical) fail(`GLB DIFFERS across arms: ${[...shas].map(s => s.slice(0, 10)).join(', ')}`, 'output-identity');
-  console.log(`\n✓ SMOKE PASSED — five arms byte-identical. report: ${REPORT_PATH}`);
+  console.log(`\narena+worker: scratchCollapsed=${scratchCollapsed} gapCollapsed=${gapCollapsed}`);
+  if (!scratchCollapsed) fail(`arena+worker did not collapse scratch: ${best.scratchAllocatedBytes} vs current ${cur.scratchAllocatedBytes}`, 'acceptance');
+  if (!gapCollapsed) fail(`arena+worker did not collapse gap: ${best.bakeMaxGapMs}ms vs monolithic ${mono.bakeMaxGapMs}ms`, 'acceptance');
+  console.log(`✓ SMOKE PASSED — five arms byte-identical; arena+worker collapses scratch AND foreground gap. report: ${REPORT_PATH}`);
   process.exit(0);
 })().catch(e => fail(e.message, 'exception'));
