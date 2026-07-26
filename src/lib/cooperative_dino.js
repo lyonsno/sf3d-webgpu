@@ -88,13 +88,24 @@ export function defineDinoEncoderManifest(numBlocks, chunkBlocks = 1) {
  * the facade never calls yieldToBrowser, so both arms declare identical work
  * but only the cooperative arm actually cedes the main thread per duty.
  */
-export function createSf3dCooperativeRuntime(device) {
+export function createSf3dCooperativeRuntime(device, hooks = {}) {
+  const now = () => globalThis.performance?.now?.() ?? Date.now();
   const queue = {
     submit(commandBuffers) {
       device.queue.submit(commandBuffers);
     },
-    onSubmittedWorkDone() {
-      return device.queue.onSubmittedWorkDone();
+    async onSubmittedWorkDone() {
+      const startedAtMs = now();
+      const result = await device.queue.onSubmittedWorkDone();
+      const completedAtMs = now();
+      if (typeof hooks.onQueueFenceResolved === 'function') {
+        await hooks.onQueueFenceResolved({
+          startedAtMs,
+          completedAtMs,
+          queueWaitMs: completedAtMs - startedAtMs,
+        });
+      }
+      return result;
     },
   };
 
@@ -141,10 +152,18 @@ export function createSf3dCooperativeRuntime(device) {
           phaseChunkSize: {},
         },
         async yieldToBrowser() {
-          const start = globalThis.performance?.now?.() ?? Date.now();
+          const start = now();
           await macrotaskYield();
-          const end = globalThis.performance?.now?.() ?? Date.now();
-          return { reason: 'cooperative-boundary-duty-complete', elapsedMs: end - start };
+          const end = now();
+          const result = { reason: 'cooperative-boundary-duty-complete', elapsedMs: end - start };
+          if (typeof hooks.onBrowserYield === 'function') {
+            await hooks.onBrowserYield({
+              startedAtMs: start,
+              completedAtMs: end,
+              elapsedMs: end - start,
+            });
+          }
+          return result;
         },
       });
     },
