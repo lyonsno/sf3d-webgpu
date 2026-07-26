@@ -128,6 +128,11 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     bakeOptions.telemetry = bakeTelemetry;
     bakeOptions.finalizeTelemetry = () => bakeTelemetry;
   }
+  // Optional worker materialization of albedo/normal/dilation (~752ms CPU tail).
+  if (options.materializeWorker) {
+    bakeOptions.materializeWorker = options.materializeWorker;
+    bakeOptions.workerTimeoutMs = options.workerTimeoutMs;
+  }
   // Optional decoder scratch arena (options.decoderArena): removes ~1.015GB
   // per-route decode allocation churn by reusing one buffer per slot across
   // ranges, held under the phase-resource working-set lease. maxBatch is the
