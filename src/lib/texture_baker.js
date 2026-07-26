@@ -16,6 +16,8 @@ import {
   createEmptyBuffer,
   readBuffer,
 } from './gpu.js';
+import { materializeTextures } from './materialize_core.js';
+import { callWorker } from './worker_call.js';
 
 /**
  * UV unwrap a mesh using cube projection with bounding-box normalization.
@@ -979,140 +981,59 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     device, triplaneDecoder, triplanesBuf, decoderWeights, queryPositions, numOccupied, options);
   const materializationStartedAtMs = performance.now();
 
-  // Build albedo RGBA texture
-  const albedoStartedAtMs = performance.now();
-  const albedo = new Uint8Array(resolution * resolution * 4);
-  for (let i = 0; i < numOccupied; i++) {
-    const texIdx = occupiedIndices[i];
-    albedo[texIdx * 4] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3] * 255)));
-    albedo[texIdx * 4 + 1] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3 + 1] * 255)));
-    albedo[texIdx * 4 + 2] = Math.max(0, Math.min(255, Math.round(featuresCPU[i * 3 + 2] * 255)));
-    albedo[texIdx * 4 + 3] = 255;
+  // Materialize albedo + normal textures (+ dilation). Cranial's assay's ~752ms
+  // single-threaded CPU tail. Optionally offloaded to a Web Worker
+  // (options.materializeWorker) — byte-identical (same materialize_core math),
+  // with no GPU sync and no per-duty fence floor. Main-thread path is the same
+  // pure function.
+  let albedo, normalMap, workerTransferMs = null;
+  const matInput = { featuresCPU, normalsCPU, occupiedIndices, tbnData, mask, resolution, numOccupied };
+
+  if (options.materializeWorker) {
+    const worker = options.materializeWorker;
+    const id = `mat-${Math.random().toString(36).slice(2)}`;
+    // Copy the transferables so the caller's arrays stay intact; one copy each.
+    const featuresBuf = featuresCPU.slice().buffer;
+    const normalsBuf = normalsCPU.slice().buffer;
+    const occupiedBuf = (occupiedIndices instanceof Uint32Array ? occupiedIndices : Uint32Array.from(occupiedIndices)).slice().buffer;
+    const tbnBuf = tbnData.slice().buffer;
+    const maskBuf = mask.slice().buffer;
+    const transferStart = performance.now();
+    const out = await callWorker(
+      worker,
+      { featuresBuf, normalsBuf, occupiedBuf, tbnBuf, maskBuf, resolution, numOccupied, id },
+      [featuresBuf, normalsBuf, occupiedBuf, tbnBuf, maskBuf],
+      {
+        timeoutMs: options.workerTimeoutMs || 60000,
+        onResult: (d) => {
+          const a = new Uint8Array(d.albedo);
+          const n = new Uint8Array(d.normalMap);
+          const expected = resolution * resolution * 4;
+          if (a.length !== expected || n.length !== expected) {
+            throw new Error(`materialize output size ${a.length}/${n.length} != ${expected}`);
+          }
+          return { albedo: a, normalMap: n };
+        },
+      },
+    );
+    albedo = out.albedo; normalMap = out.normalMap;
+    workerTransferMs = performance.now() - transferStart;
+  } else {
+    const m = materializeTextures(matInput);
+    albedo = m.albedo; normalMap = m.normalMap;
   }
-  const albedoCompletedAtMs = performance.now();
-
-  // Build normal map: transform perturb_normal from world space to tangent space
-  const normalDefaultStartedAtMs = performance.now();
-  const normalMap = new Uint8Array(resolution * resolution * 4);
-  // Default normal (pointing straight out): [0.5, 0.5, 1.0] in encoded space
-  for (let i = 0; i < resolution * resolution; i++) {
-    normalMap[i * 4 + 2] = 255; // blue channel = 1.0 (pointing along surface normal)
-    normalMap[i * 4 + 3] = 255;
-  }
-  const normalDefaultCompletedAtMs = performance.now();
-
-  const normalOccupiedStartedAtMs = performance.now();
-  for (let i = 0; i < numOccupied; i++) {
-    const texIdx = occupiedIndices[i];
-    const tbnBase = texIdx * 9;
-
-    // World-space perturb_normal (already normalized by decoder)
-    const nx = normalsCPU[i * 3];
-    const ny = normalsCPU[i * 3 + 1];
-    const nz = normalsCPU[i * 3 + 2];
-
-    // TBN basis vectors
-    const tx = tbnData[tbnBase], ty = tbnData[tbnBase+1], tz = tbnData[tbnBase+2];
-    const bx = tbnData[tbnBase+3], by = tbnData[tbnBase+4], bz = tbnData[tbnBase+5];
-    const fnx = tbnData[tbnBase+6], fny = tbnData[tbnBase+7], fnz = tbnData[tbnBase+8];
-
-    // Transform to tangent space: n_tangent = TBN^T * n_world
-    let ntx = tx*nx + ty*ny + tz*nz;     // dot(tangent, normal_world)
-    let nty = bx*nx + by*ny + bz*nz;     // dot(bitangent, normal_world)
-    let ntz = fnx*nx + fny*ny + fnz*nz;  // dot(face_normal, normal_world)
-
-    // Encode from [-1,1] to [0,1]: encoded = n * 0.5 + 0.5
-    const r = Math.max(0, Math.min(255, Math.round((ntx * 0.5 + 0.5) * 255)));
-    const g = Math.max(0, Math.min(255, Math.round((nty * 0.5 + 0.5) * 255)));
-    const b = Math.max(0, Math.min(255, Math.round((ntz * 0.5 + 0.5) * 255)));
-
-    normalMap[texIdx * 4] = r;
-    normalMap[texIdx * 4 + 1] = g;
-    normalMap[texIdx * 4 + 2] = b;
-    normalMap[texIdx * 4 + 3] = 255;
-  }
-  const normalOccupiedCompletedAtMs = performance.now();
-
-  // Dilate both textures (matching PyTorch: resolution // 150 ≈ 7 at 1024)
-  const dilateIters = Math.max(1, Math.round(resolution / 150));
-  const albedoDilationStartedAtMs = performance.now();
-  _dilateTexture(albedo, mask, resolution, dilateIters);
-  const albedoDilationCompletedAtMs = performance.now();
-  const normalDilationStartedAtMs = performance.now();
-  _dilateTexture(normalMap, mask, resolution, dilateIters);
-  const normalDilationCompletedAtMs = performance.now();
+  const materializationCompletedAtMs = performance.now();
 
   if (options.telemetry) {
-    options.telemetry.cpuMaterializationMs = normalDilationCompletedAtMs - materializationStartedAtMs;
+    options.telemetry.cpuMaterializationMs = materializationCompletedAtMs - materializationStartedAtMs;
     options.telemetry.cpuMaterializationInterval = {
       startMs: materializationStartedAtMs,
-      endMs: normalDilationCompletedAtMs,
+      endMs: materializationCompletedAtMs,
     };
-    options.telemetry.materializationIntervals = {
-      albedo: { startMs: albedoStartedAtMs, endMs: albedoCompletedAtMs },
-      normalDefault: { startMs: normalDefaultStartedAtMs, endMs: normalDefaultCompletedAtMs },
-      normalOccupied: { startMs: normalOccupiedStartedAtMs, endMs: normalOccupiedCompletedAtMs },
-      albedoDilation: {
-        startMs: albedoDilationStartedAtMs,
-        endMs: albedoDilationCompletedAtMs,
-      },
-      normalDilation: {
-        startMs: normalDilationStartedAtMs,
-        endMs: normalDilationCompletedAtMs,
-      },
-    };
+    options.telemetry.materializationOffloaded = Boolean(options.materializeWorker);
+    options.telemetry.materializationWorkerTransferMs = workerTransferMs;
   }
   return { albedo, normalMap };
-}
-
-/**
- * Dilate texture to fill empty pixels by averaging nearest occupied neighbors.
- */
-function _dilateTexture(texture, mask, resolution, iterations = 6) {
-  const workMask = new Uint8Array(mask);
-
-  for (let iter = 0; iter < iterations; iter++) {
-    const newPixels = [];
-
-    for (let y = 0; y < resolution; y++) {
-      for (let x = 0; x < resolution; x++) {
-        const idx = y * resolution + x;
-        if (workMask[idx]) continue;
-
-        let sumR = 0, sumG = 0, sumB = 0, count = 0;
-        const neighbors = [[x-1,y],[x+1,y],[x,y-1],[x,y+1]];
-        for (const [nx, ny] of neighbors) {
-          if (nx < 0 || nx >= resolution || ny < 0 || ny >= resolution) continue;
-          const nIdx = ny * resolution + nx;
-          if (workMask[nIdx]) {
-            sumR += texture[nIdx * 4];
-            sumG += texture[nIdx * 4 + 1];
-            sumB += texture[nIdx * 4 + 2];
-            count++;
-          }
-        }
-
-        if (count > 0) {
-          newPixels.push({
-            idx,
-            r: Math.round(sumR / count),
-            g: Math.round(sumG / count),
-            b: Math.round(sumB / count),
-          });
-        }
-      }
-    }
-
-    for (const p of newPixels) {
-      texture[p.idx * 4] = p.r;
-      texture[p.idx * 4 + 1] = p.g;
-      texture[p.idx * 4 + 2] = p.b;
-      texture[p.idx * 4 + 3] = 255;
-      workMask[p.idx] = 1;
-    }
-
-    if (newPixels.length === 0) break;
-  }
 }
 
 /**
