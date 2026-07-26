@@ -151,7 +151,7 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
 
   console.log('\n=== SF3D five-arm texture-bake A/B ===');
   console.log(`source ${source.revision.slice(0, 10)} clean=${source.clean} ${source.backend.vendor}/${source.backend.arch} batch=${BATCH}`);
-  console.log(`GLB identical across all 5 arms: ${identical} (sha ${withSha[0].glbSha.slice(0, 12)}…)`);
+  console.log(`GLB identical across all arms: ${identical} (sha ${withSha[0].glbSha.slice(0, 12)}…)`);
   console.log('arm'.padEnd(20), 'bakeWall'.padStart(9), 'bakeMaxGap'.padStart(11), 'scratchMB'.padStart(10), 'cpuMatMs'.padStart(9), 'xferMs'.padStart(7));
   for (const a of withSha) {
     console.log(
@@ -167,6 +167,6 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
   console.log(`\narena+worker: scratchCollapsed=${scratchCollapsed} gapCollapsed=${gapCollapsed}`);
   if (!scratchCollapsed) fail(`arena+worker did not collapse scratch: ${best.scratchAllocatedBytes} vs current ${cur.scratchAllocatedBytes}`, 'acceptance');
   if (!gapCollapsed) fail(`arena+worker did not collapse gap: ${best.bakeMaxGapMs}ms vs monolithic ${mono.bakeMaxGapMs}ms`, 'acceptance');
-  console.log(`✓ SMOKE PASSED — five arms byte-identical; arena+worker collapses scratch AND foreground gap. report: ${REPORT_PATH}`);
+  console.log(`✓ SMOKE PASSED — all arms byte-identical; arena+worker collapses scratch AND foreground gap. report: ${REPORT_PATH}`);
   process.exit(0);
 })().catch(e => fail(e.message, 'exception'));
