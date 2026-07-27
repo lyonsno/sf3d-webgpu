@@ -106,8 +106,21 @@ const fail = (m, phase = 'unknown') => {
   procs.push(vite);
   await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error('vite timeout')), 40000); vite.stdout.on('data', d => { if (/Local:|ready/.test(d.toString())) { clearTimeout(to); res(); } }); vite.on('error', e => { clearTimeout(to); rej(e); }); }).catch(e => fail(e.message, 'vite'));
 
-  const browser = await puppeteer.launch({ executablePath: CHROME_PATH, headless: false, protocolTimeout: 1200000, args: ['--enable-unsafe-webgpu', '--use-angle=metal'] });
+  const browserArgs = [
+    '--enable-unsafe-webgpu',
+    '--use-angle=metal',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+  ];
+  const browser = await puppeteer.launch({
+    executablePath: CHROME_PATH,
+    headless: false,
+    protocolTimeout: 1200000,
+    args: browserArgs,
+  });
   const page = await browser.newPage();
+  await page.bringToFront();
   const pageErrors = []; page.on('pageerror', e => pageErrors.push(e.message));
   const setupStartedAt = Date.now();
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -126,6 +139,7 @@ const fail = (m, phase = 'unknown') => {
     armTotalsExcludeSetup: true,
     allArmsShareOneResidentModel: true,
     armOrder: ARM_ORDERS[PROFILE],
+    browserControlArgs: browserArgs,
   };
   source.backend = await page.evaluate(async () => {
     const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
@@ -162,11 +176,21 @@ const fail = (m, phase = 'unknown') => {
     async function arm(name, ordinal, opts) {
       const frames = []; let on = true, last = null;
       const tick = (t) => { if (last != null) frames.push({ start: last, end: t, gap: t - last }); last = t; if (on) requestAnimationFrame(tick); };
-      requestAnimationFrame(tick);
+      const visibilityStart = document.visibilityState;
+      if (visibilityStart !== 'visible') throw new Error(`${name} started with page visibility ${visibilityStart}`);
+      await new Promise(resolve => requestAnimationFrame(t => {
+        last = t;
+        requestAnimationFrame(tick);
+        resolve();
+      }));
       const pipelineStartMs = performance.now();
       const out = await runFullPipelineToGlb(device, pipelines, weights, img, opts);
       const pipelineEndMs = performance.now();
-      on = false; await new Promise(r => setTimeout(r, 60));
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      on = false;
+      await new Promise(r => setTimeout(r, 20));
+      const visibilityEnd = document.visibilityState;
+      if (visibilityEnd !== 'visible') throw new Error(`${name} ended with page visibility ${visibilityEnd}`);
       const route = buildFullRouteArmReceipt({
         name,
         ordinal,
@@ -180,6 +204,10 @@ const fail = (m, phase = 'unknown') => {
       const tel = bake?.textureBakeTelemetry || null;
       return {
         ...route,
+        pageVisibility: {
+          start: visibilityStart,
+          end: visibilityEnd,
+        },
         glbB64: toB64(new Uint8Array(out.glb)),
         bakeStageMs: route.stageDurationsMs['texture-bake'] ?? null,
         bakeMaxGapMs: route.cadence.byStage['texture-bake']?.maxGapMs ?? null,
@@ -228,6 +256,14 @@ const fail = (m, phase = 'unknown') => {
   const withSha = arms.map(a => ({ ...a, glbSha: hash(a.glbB64), glbB64: undefined }));
   const shas = new Set(withSha.map(a => a.glbSha));
   const identical = shas.size === 1;
+  lastEvidence = {
+    schema: 'sf3d.raw-full-route-scheduling-episodes.v1',
+    source,
+    outputIdentical: identical,
+    canonicalGlbSha: withSha[0]?.glbSha ?? null,
+    distinctShas: [...shas],
+    arms: withSha,
+  };
 
   let report;
   let acceptanceError = null;
