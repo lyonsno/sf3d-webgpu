@@ -38,16 +38,36 @@ for (const invalid of ['0', '-1', '1.5', 'NaN', 'nope', '', null, true]) {
   );
 }
 
-const validGlb = new Uint8Array(12);
+const jsonText = JSON.stringify({ asset: { version: '2.0' } });
+const jsonSource = new TextEncoder().encode(jsonText);
+const jsonLength = Math.ceil(jsonSource.byteLength / 4) * 4;
+const validGlb = new Uint8Array(12 + 8 + jsonLength);
 const validGlbView = new DataView(validGlb.buffer);
 validGlbView.setUint32(0, 0x46546c67, true);
 validGlbView.setUint32(4, 2, true);
 validGlbView.setUint32(8, validGlb.byteLength, true);
-assert.deepEqual(validateGlbPayload(validGlb), { byteLength: 12, version: 2 });
+validGlbView.setUint32(12, jsonLength, true);
+validGlbView.setUint32(16, 0x4e4f534a, true);
+validGlb.fill(0x20, 20);
+validGlb.set(jsonSource, 20);
+assert.deepEqual(
+  validateGlbPayload(validGlb),
+  { byteLength: validGlb.byteLength, version: 2, chunkCount: 1 },
+);
 assert.throws(() => validateGlbPayload(new Uint8Array()), /complete 12-byte header/);
+const headerOnlyGlb = validGlb.slice(0, 12);
+new DataView(headerOnlyGlb.buffer).setUint32(8, 12, true);
+assert.throws(
+  () => validateGlbPayload(headerOnlyGlb),
+  /JSON chunk/,
+  'a header-only GLB must not be accepted as a complete artifact',
+);
 const partialGlb = validGlb.slice();
 new DataView(partialGlb.buffer).setUint32(8, 1024, true);
 assert.throws(() => validateGlbPayload(partialGlb), /declares 1024 bytes/);
+const wrongFirstChunk = validGlb.slice();
+new DataView(wrongFirstChunk.buffer).setUint32(16, 0x004e4942, true);
+assert.throws(() => validateGlbPayload(wrongFirstChunk), /first chunk.*JSON/i);
 
 const control = buildFullRouteArmReceipt({
   name: 'monolithic',
@@ -55,7 +75,7 @@ const control = buildFullRouteArmReceipt({
   options: { cooperativeDino: false },
   output: {
     totalMs: 100,
-    glb: { byteLength: 64 },
+    glb: validGlb.buffer.slice(0),
     stageSpans: [
       { name: 'texture-bake', start: 10, end: 50 },
       { name: 'glb-export', start: 50, end: 110 },
@@ -76,7 +96,7 @@ assert.deepEqual(control.execution, {
 });
 assert.equal(control.totalMs, 100);
 assert.equal(control.pipelineIntervalMs, 100);
-assert.equal(control.glbBytes, 64);
+assert.equal(control.glbBytes, validGlb.byteLength);
 assert.deepEqual(control.stageDurationsMs, {
   'texture-bake': 40,
   'glb-export': 60,
@@ -109,7 +129,7 @@ const candidate = buildFullRouteArmReceipt({
   },
   output: {
     totalMs: 110,
-    glb: { byteLength: 64 },
+    glb: validGlb.buffer.slice(0),
     stageSpans: [
       { name: 'texture-bake', start: 10, end: 55 },
       { name: 'glb-export', start: 55, end: 120 },
@@ -180,7 +200,7 @@ assert.throws(
     options: {},
     output: {
       totalMs: 0,
-      glb: { byteLength: 64 },
+      glb: validGlb.buffer.slice(0),
       stageSpans: [{ name: 'texture-bake', start: 0, end: 1 }],
     },
     frames,
@@ -197,7 +217,7 @@ assert.throws(
     options: {},
     output: {
       totalMs: 1,
-      glb: { byteLength: 64 },
+      glb: validGlb.buffer.slice(0),
       stageSpans: [{ name: 'texture-bake', start: 0, end: 1 }],
     },
     frames,
@@ -362,6 +382,11 @@ assert.match(smokeSource, /requestAnimationFrame\(t => \{\s*last = t;/, 'cadence
 assert.match(smokeSource, /schema: 'sf3d\.raw-full-route-scheduling-episodes\.v1'/, 'raw episodes must be preservable before summary');
 assert.match(smokeSource, /requestedBatch/, 'report must preserve requested batch separately from effective batch');
 assert.match(smokeSource, /effectiveKit/, 'report must preserve effective imported kit identity');
+assert.match(
+  smokeSource,
+  /browserExecutedKit/,
+  'the same browser page that runs the route must witness its imported kit module identity',
+);
 assert.match(
   smokeSource,
   /__sf3dBenchmarkCheckpoint/,
