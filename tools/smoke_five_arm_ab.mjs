@@ -3,17 +3,19 @@
  * SF3D exact-source SIX-ARM texture-bake A/B (Cranial arena assay contract #7 /
  * Wake required consumer evidence).
  *
- * One loaded model, five arms over the exact same route:
+ * One loaded model, six arms over the exact same route:
  *   1 monolithic         — legacy single decode dispatch + readback
  *   2 current-cooperative — cooperative batches, per-range transient scratch
  *   3 arena-only          — cooperative + decoder scratch arena (no worker mat)
  *   4 worker-only         — cooperative + worker materialization (no arena)
  *   5 arena-plus-worker   — cooperative + arena + worker materialization
  *
- * Records per arm: output GLB SHA-256 (must be identical across all five),
- * texture-bake stage wall + max foreground rAF gap, queue intervals, scratch
- * allocation count/bytes, worker transfer time. Also carries source identity
- * (commit, kit, input sha, weights sha, browser/adapter).
+ * Records per arm: full-route wall, every stage duration, whole-route and
+ * overlap-attributed stage cadence, effective execution identity, output GLB
+ * SHA-256 (must be identical across all six), queue intervals, scratch
+ * allocation count/bytes, and worker transfer time. Also carries source and
+ * timing-scope identity (commit, input, weights, host, browser/adapter probe,
+ * one resident model, and setup excluded from each arm).
  *
  * Usage: node tools/smoke_five_arm_ab.mjs --expected-revision SHA [--image P] [--batch N]
  */
@@ -22,7 +24,9 @@ import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
+import { compareFullRouteArms } from './full_route_benchmark_contract.mjs';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
@@ -49,7 +53,22 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
   if (dirty && !ALLOW_DIRTY) fail(`worktree dirty:\n${dirty}`, 'source-identity');
   const weightsPath = path.join(REPO, 'public', 'weights.bin');
   if (!fs.existsSync(weightsPath)) fail('weights missing', 'weights');
-  const source = { revision: effectiveRevision, clean: !dirty, inputSha: sha256File(IMAGE), weightsSha: sha256File(fs.realpathSync(weightsPath)), batch: BATCH };
+  const source = {
+    revision: effectiveRevision,
+    clean: !dirty,
+    inputSha: sha256File(IMAGE),
+    weightsSha: sha256File(fs.realpathSync(weightsPath)),
+    batch: BATCH,
+    host: {
+      hostname: os.hostname(),
+      platform: os.platform(),
+      release: os.release(),
+      architecture: os.arch(),
+      logicalCpuCount: os.cpus().length,
+      cpuModel: os.cpus()[0]?.model || 'unknown',
+      totalMemoryBytes: os.totalmem(),
+    },
+  };
   lastEvidence = { source };
 
   const port = await allocatePort();
@@ -60,10 +79,50 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
   const browser = await puppeteer.launch({ executablePath: CHROME_PATH, headless: false, protocolTimeout: 1200000, args: ['--enable-unsafe-webgpu', '--use-angle=metal'] });
   const page = await browser.newPage();
   const pageErrors = []; page.on('pageerror', e => pageErrors.push(e.message));
+  const setupStartedAt = Date.now();
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   const start = Date.now();
-  while (Date.now() - start < 180000) { const s = await page.$eval('#status', el => el.textContent).catch(() => ''); if (s.includes('Ready')) break; await new Promise(r => setTimeout(r, 500)); }
-  source.backend = await page.evaluate(async () => { const a = await navigator.gpu?.requestAdapter(); const info = a?.info; return { ua: navigator.userAgent, vendor: info?.vendor, arch: info?.architecture }; });
+  let readyStatus = '';
+  while (Date.now() - start < 180000) {
+    readyStatus = await page.$eval('#status', el => el.textContent).catch(() => '');
+    if (readyStatus.includes('Ready')) break;
+    if (/error|failed/i.test(readyStatus)) fail(`route setup failed: ${readyStatus}`, 'route-setup');
+    await new Promise(r => setTimeout(r, 500));
+  }
+  if (!readyStatus.includes('Ready')) fail(`route setup timed out: ${readyStatus || 'no status'}`, 'route-setup');
+  source.timingScope = {
+    setupWallMs: Date.now() - setupStartedAt,
+    setupIncludesModelLoadAndPipelineInitialization: true,
+    armTotalsExcludeSetup: true,
+    allArmsShareOneResidentModel: true,
+    armOrder: [
+      'monolithic',
+      'current-cooperative',
+      'arena-only',
+      'worker-only',
+      'arena-plus-worker',
+      'arena-disabled',
+    ],
+  };
+  source.backend = await page.evaluate(async () => {
+    const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+    const info = adapter?.info;
+    return {
+      authority: 'same-browser-capability-probe',
+      ua: navigator.userAgent,
+      vendor: info?.vendor,
+      architecture: info?.architecture,
+      device: info?.device,
+      description: info?.description,
+      features: adapter ? [...adapter.features].sort() : [],
+      limits: adapter ? {
+        maxBufferSize: adapter.limits.maxBufferSize,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxComputeWorkgroupSizeX: adapter.limits.maxComputeWorkgroupSizeX,
+        maxComputeInvocationsPerWorkgroup: adapter.limits.maxComputeInvocationsPerWorkgroup,
+      } : null,
+    };
+  });
   lastEvidence = { source };
 
   const imageB64 = fs.readFileSync(IMAGE).toString('base64');
@@ -71,25 +130,36 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
 
   const arms = await page.evaluate(async (BATCH) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
+    const { buildFullRouteArmReceipt } = await import('/tools/full_route_benchmark_contract.mjs');
     const device = window._sf3d_device, weights = window._sf3d_weights, pipelines = window._sf3d_pipelines, img = window._img;
     const toB64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
     let matWorker = null;
     const getMatWorker = () => (matWorker ||= new Worker(new URL('/src/lib/materialize_worker.js', location.origin), { type: 'module' }));
 
-    async function arm(name, opts) {
+    async function arm(name, ordinal, opts) {
       const frames = []; let on = true, last = null;
       const tick = (t) => { if (last != null) frames.push({ start: last, end: t, gap: t - last }); last = t; if (on) requestAnimationFrame(tick); };
       requestAnimationFrame(tick);
+      const pipelineStartMs = performance.now();
       const out = await runFullPipelineToGlb(device, pipelines, weights, img, opts);
+      const pipelineEndMs = performance.now();
       on = false; await new Promise(r => setTimeout(r, 60));
-      const span = (out.stageSpans || []).find(s => s.name === 'texture-bake');
-      let bakeMaxGap = 0; if (span) for (const f of frames) { const mid = (f.start + f.end) / 2; if (mid >= span.start && mid < span.end) bakeMaxGap = Math.max(bakeMaxGap, f.gap); }
+      const route = buildFullRouteArmReceipt({
+        name,
+        ordinal,
+        options: opts,
+        output: out,
+        frames,
+        pipelineStartMs,
+        pipelineEndMs,
+      });
       const bake = out.cooperativeReports?.['texture-bake'] || null;
       const tel = bake?.textureBakeTelemetry || null;
       return {
-        name, glbB64: toB64(new Uint8Array(out.glb)), glbBytes: out.glb.byteLength,
-        bakeStageMs: span ? +(span.end - span.start).toFixed(1) : null,
-        bakeMaxGapMs: +bakeMaxGap.toFixed(1),
+        ...route,
+        glbB64: toB64(new Uint8Array(out.glb)),
+        bakeStageMs: route.stageDurationsMs['texture-bake'] ?? null,
+        bakeMaxGapMs: route.cadence.byStage['texture-bake']?.maxGapMs ?? null,
         scratchAllocatedBytes: tel?.scratch?.allocatedBytes ?? null,
         scratchAllocatedCount: tel?.scratch?.allocatedCount ?? null,
         queueWaitTotalMs: tel?.queueFences ? +tel.queueFences.reduce((s, q) => s + (q.queueWaitMs || 0), 0).toFixed(1) : null,
@@ -104,15 +174,15 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
     const base = { cooperativeDino: false };
     const coop = { ...base, cooperativeBake: true, bakeSchedulingMode: 'cooperative', bakeBatchTexels: BATCH };
     const results = [];
-    results.push(await arm('monolithic', { ...base }));
-    results.push(await arm('current-cooperative', { ...coop }));
-    results.push(await arm('arena-only', { ...coop, decoderArena: true }));
-    results.push(await arm('worker-only', { ...coop, materializeWorker: getMatWorker() }));
-    results.push(await arm('arena-plus-worker', { ...coop, decoderArena: true, materializeWorker: getMatWorker() }));
+    results.push(await arm('monolithic', 1, { ...base }));
+    results.push(await arm('current-cooperative', 2, { ...coop }));
+    results.push(await arm('arena-only', 3, { ...coop, decoderArena: true }));
+    results.push(await arm('worker-only', 4, { ...coop, materializeWorker: getMatWorker() }));
+    results.push(await arm('arena-plus-worker', 5, { ...coop, decoderArena: true, materializeWorker: getMatWorker() }));
     // Review residual-risk #1: arena under DISABLED scheduling relies on WebGPU
     // queue-submission ordering (not the per-duty fence) for slot-reuse safety.
     // Prove that path is also byte-identical.
-    results.push(await arm('arena-disabled', { ...coop, decoderArena: true, bakeSchedulingMode: 'disabled' }));
+    results.push(await arm('arena-disabled', 6, { ...coop, decoderArena: true, bakeSchedulingMode: 'disabled' }));
     if (matWorker) matWorker.terminate();
     return results;
   }, BATCH);
@@ -133,8 +203,14 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
     && best.scratchAllocatedBytes < cur.scratchAllocatedBytes * 0.2;
   const gapCollapsed = best.bakeMaxGapMs != null && mono.bakeMaxGapMs != null
     && best.bakeMaxGapMs < mono.bakeMaxGapMs * 0.5;
+  const fullRouteComparison = compareFullRouteArms(
+    mono,
+    best,
+    { mechanismStage: 'texture-bake' },
+  );
 
   const report = {
+    schema: 'sf3d.full-route-scheduling-comparison.v1',
     ok: identical && scratchCollapsed && gapCollapsed,
     source,
     outputIdentical: identical,
@@ -142,20 +218,28 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
     distinctShas: [...shas],
     winning: {
       arm: 'arena-plus-worker',
-      bakeMaxGapMs: best.bakeMaxGapMs, scratchAllocatedBytes: best.scratchAllocatedBytes,
+      totalMs: best.totalMs,
+      wholeRouteMaxGapMs: best.cadence.wholeRoute.maxMs,
+      bakeMaxGapMs: best.bakeMaxGapMs,
+      scratchAllocatedBytes: best.scratchAllocatedBytes,
       scratchCollapsedVsCurrent: scratchCollapsed, gapCollapsedVsMonolithic: gapCollapsed,
+    },
+    comparisons: {
+      monolithicVsArenaPlusWorker: fullRouteComparison,
     },
     arms: withSha,
   };
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
 
-  console.log('\n=== SF3D five-arm texture-bake A/B ===');
-  console.log(`source ${source.revision.slice(0, 10)} clean=${source.clean} ${source.backend.vendor}/${source.backend.arch} batch=${BATCH}`);
+  console.log('\n=== SF3D six-arm full-route scheduling A/B ===');
+  console.log(`source ${source.revision.slice(0, 10)} clean=${source.clean} ${source.backend.vendor}/${source.backend.architecture} batch=${BATCH}`);
   console.log(`GLB identical across all arms: ${identical} (sha ${withSha[0].glbSha.slice(0, 12)}…)`);
-  console.log('arm'.padEnd(20), 'bakeWall'.padStart(9), 'bakeMaxGap'.padStart(11), 'scratchMB'.padStart(10), 'cpuMatMs'.padStart(9), 'xferMs'.padStart(7));
+  console.log('arm'.padEnd(20), 'routeWall'.padStart(10), 'routeMaxGap'.padStart(12), 'bakeWall'.padStart(9), 'bakeMaxGap'.padStart(11), 'scratchMB'.padStart(10), 'cpuMatMs'.padStart(9), 'xferMs'.padStart(7));
   for (const a of withSha) {
     console.log(
       a.name.padEnd(20),
+      String(a.totalMs).padStart(10),
+      String(a.cadence.wholeRoute.maxMs).padStart(12),
       String(a.bakeStageMs).padStart(9),
       String(a.bakeMaxGapMs).padStart(11),
       String(a.scratchAllocatedBytes != null ? (a.scratchAllocatedBytes / 1e6).toFixed(1) : 'n/a').padStart(10),
@@ -163,6 +247,9 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
       String(a.workerTransferMs != null ? a.workerTransferMs.toFixed(0) : 'n/a').padStart(7),
     );
   }
+  console.log(`\nobserved full-route delta: ${fullRouteComparison.observedFullRouteDeltaMs}ms (${fullRouteComparison.observedFullRouteRatio}x)`);
+  console.log(`texture-bake mechanism delta: ${fullRouteComparison.mechanismStageDeltaMs}ms (${fullRouteComparison.mechanismStageRatio}x)`);
+  console.log(`outside-texture-bake observed delta: ${fullRouteComparison.outsideMechanismObservedDeltaMs}ms (not scheduler-causal)`);
   if (!identical) fail(`GLB DIFFERS across arms: ${[...shas].map(s => s.slice(0, 10)).join(', ')}`, 'output-identity');
   console.log(`\narena+worker: scratchCollapsed=${scratchCollapsed} gapCollapsed=${gapCollapsed}`);
   if (!scratchCollapsed) fail(`arena+worker did not collapse scratch: ${best.scratchAllocatedBytes} vs current ${cur.scratchAllocatedBytes}`, 'acceptance');

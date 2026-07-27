@@ -15,6 +15,7 @@
     "test:decoder-arena": "node tools/test_decoder_scratch_arena.mjs",
     "smoke:arena-ab": "node tools/smoke_arena_ab.mjs",
     "test:materialize-core": "node tools/test_materialize_core.mjs",
+    "test:full-route-benchmark": "node tools/test_full_route_benchmark_contract.mjs",
     "smoke:five-arm": "node tools/smoke_five_arm_ab.mjs"
   },
   "devDependencies": {
