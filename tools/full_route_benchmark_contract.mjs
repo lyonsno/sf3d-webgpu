@@ -8,6 +8,54 @@ const requireFinite = (value, label) => {
   return value;
 };
 
+export function parsePositiveSafeIntegerOption(rawValue, {
+  label,
+  defaultValue,
+} = {}) {
+  if (typeof label !== 'string' || !label.trim()) {
+    throw new TypeError('option label must be non-empty');
+  }
+  const defaulted = rawValue === undefined;
+  const value = defaulted ? defaultValue : rawValue;
+  if (
+    (typeof value !== 'string' && typeof value !== 'number')
+    || (typeof value === 'string' && !/^[1-9]\d*$/.test(value))
+  ) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+  return Object.freeze({
+    requested: defaulted ? null : String(rawValue),
+    effective: parsed,
+    defaulted,
+  });
+}
+
+export function validateGlbPayload(payload) {
+  if (!(payload instanceof Uint8Array)) {
+    throw new TypeError('GLB payload must be a Uint8Array');
+  }
+  if (payload.byteLength < 12) {
+    throw new TypeError('GLB payload must contain a complete 12-byte header');
+  }
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const magic = view.getUint32(0, true);
+  const version = view.getUint32(4, true);
+  const declaredBytes = view.getUint32(8, true);
+  if (magic !== 0x46546c67) throw new TypeError('GLB payload has invalid magic');
+  if (version !== 2) throw new TypeError(`GLB payload has unsupported version ${version}`);
+  if (declaredBytes !== payload.byteLength) {
+    throw new TypeError(`GLB payload declares ${declaredBytes} bytes but contains ${payload.byteLength}`);
+  }
+  return Object.freeze({
+    byteLength: payload.byteLength,
+    version,
+  });
+}
+
 const intervalOverlap = (startA, endA, startB, endB) => (
   Math.max(0, Math.min(endA, endB) - Math.max(startA, startB))
 );
@@ -94,14 +142,14 @@ export function buildFullRouteArmReceipt({
   if (typeof name !== 'string' || !name.trim()) throw new TypeError('name must be non-empty');
   if (!Number.isSafeInteger(ordinal) || ordinal < 1) throw new TypeError('ordinal must be a positive integer');
   const totalMs = requireFinite(output?.totalMs, 'output.totalMs');
-  if (totalMs < 0) throw new RangeError('output.totalMs must be non-negative');
+  if (totalMs <= 0) throw new RangeError('output.totalMs must be positive');
   const glbBytes = output?.glb?.byteLength;
-  if (!Number.isSafeInteger(glbBytes) || glbBytes < 0) {
-    throw new TypeError('output.glb.byteLength must be a non-negative safe integer');
+  if (!Number.isSafeInteger(glbBytes) || glbBytes <= 0) {
+    throw new TypeError('output.glb.byteLength must be a positive safe integer');
   }
   const routeStart = requireFinite(pipelineStartMs, 'pipelineStartMs');
   const routeEnd = requireFinite(pipelineEndMs, 'pipelineEndMs');
-  if (routeEnd < routeStart) throw new RangeError('pipeline interval is invalid');
+  if (routeEnd <= routeStart) throw new RangeError('pipeline interval must be positive');
 
   const normalizedFrames = normalizeFrames(Array.isArray(frames) ? frames : []);
   const spans = normalizeSpans(output.stageSpans);
@@ -139,6 +187,7 @@ export function buildFullRouteArmReceipt({
     ordinal,
     execution: normalizeArmExecution(options),
     totalMs: round(totalMs),
+    pipelineIntervalMs: round(routeEnd - routeStart),
     glbBytes,
     stageDurationsMs: Object.freeze(stageDurationsMs),
     cadence: Object.freeze({
@@ -195,8 +244,15 @@ export function summarizeCounterbalancedPair(arms, {
   const candidateStageMedian = median(candidateStage, `candidate ${mechanismStage}`);
   const controlGapMedian = median(controlGap, `control ${mechanismStage} attributed gap`);
   const candidateGapMedian = median(candidateGap, `candidate ${mechanismStage} attributed gap`);
-  if (controlTotalMedian <= 0 || controlStageMedian <= 0 || controlGapMedian <= 0) {
-    throw new RangeError('counterbalanced control medians must be positive');
+  if (
+    controlTotalMedian <= 0
+    || candidateTotalMedian <= 0
+    || controlStageMedian <= 0
+    || candidateStageMedian <= 0
+    || controlGapMedian <= 0
+    || candidateGapMedian <= 0
+  ) {
+    throw new RangeError('counterbalanced control and candidate medians must be positive');
   }
   const fullDelta = candidateTotalMedian - controlTotalMedian;
   const stageDelta = candidateStageMedian - controlStageMedian;
