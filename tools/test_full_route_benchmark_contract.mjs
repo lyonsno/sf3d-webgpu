@@ -7,7 +7,9 @@ import {
   buildBenchmarkFailureReport,
   buildFullRouteArmReceipt,
   compareFullRouteArms,
+  parsePositiveSafeIntegerOption,
   summarizeCounterbalancedPair,
+  validateGlbPayload,
 } from './full_route_benchmark_contract.mjs';
 
 const frames = [
@@ -19,6 +21,33 @@ const frames = [
   { start: 100, end: 120, gap: 20 },
   { start: 120, end: 130, gap: 10 },
 ];
+
+assert.deepEqual(
+  parsePositiveSafeIntegerOption(undefined, { label: '--batch', defaultValue: 4096 }),
+  { requested: null, effective: 4096, defaulted: true },
+);
+assert.deepEqual(
+  parsePositiveSafeIntegerOption('16384', { label: '--batch', defaultValue: 4096 }),
+  { requested: '16384', effective: 16384, defaulted: false },
+);
+for (const invalid of ['0', '-1', '1.5', 'NaN', 'nope', '', null, true]) {
+  assert.throws(
+    () => parsePositiveSafeIntegerOption(invalid, { label: '--batch', defaultValue: 4096 }),
+    /positive safe integer/,
+    `invalid requested batch ${String(invalid)} must fail loud`,
+  );
+}
+
+const validGlb = new Uint8Array(12);
+const validGlbView = new DataView(validGlb.buffer);
+validGlbView.setUint32(0, 0x46546c67, true);
+validGlbView.setUint32(4, 2, true);
+validGlbView.setUint32(8, validGlb.byteLength, true);
+assert.deepEqual(validateGlbPayload(validGlb), { byteLength: 12, version: 2 });
+assert.throws(() => validateGlbPayload(new Uint8Array()), /complete 12-byte header/);
+const partialGlb = validGlb.slice();
+new DataView(partialGlb.buffer).setUint32(8, 1024, true);
+assert.throws(() => validateGlbPayload(partialGlb), /declares 1024 bytes/);
 
 const control = buildFullRouteArmReceipt({
   name: 'monolithic',
@@ -46,6 +75,7 @@ assert.deepEqual(control.execution, {
   materializeWorker: false,
 });
 assert.equal(control.totalMs, 100);
+assert.equal(control.pipelineIntervalMs, 100);
 assert.equal(control.glbBytes, 64);
 assert.deepEqual(control.stageDurationsMs, {
   'texture-bake': 40,
@@ -125,6 +155,57 @@ assert.throws(
     pipelineEndMs: 1,
   }),
   /totalMs/,
+);
+assert.throws(
+  () => buildFullRouteArmReceipt({
+    name: 'blank-output',
+    ordinal: 3,
+    options: {},
+    output: {
+      totalMs: 10,
+      glb: { byteLength: 0 },
+      stageSpans: [{ name: 'texture-bake', start: 0, end: 10 }],
+    },
+    frames,
+    pipelineStartMs: 0,
+    pipelineEndMs: 10,
+  }),
+  /glb.*positive/i,
+  'blank output must not enter a successful arm receipt',
+);
+assert.throws(
+  () => buildFullRouteArmReceipt({
+    name: 'cached-zero-wall',
+    ordinal: 3,
+    options: {},
+    output: {
+      totalMs: 0,
+      glb: { byteLength: 64 },
+      stageSpans: [{ name: 'texture-bake', start: 0, end: 1 }],
+    },
+    frames,
+    pipelineStartMs: 0,
+    pipelineEndMs: 1,
+  }),
+  /totalMs.*positive/i,
+  'zero-duration cached output must not enter a successful arm receipt',
+);
+assert.throws(
+  () => buildFullRouteArmReceipt({
+    name: 'empty-route-interval',
+    ordinal: 3,
+    options: {},
+    output: {
+      totalMs: 1,
+      glb: { byteLength: 64 },
+      stageSpans: [{ name: 'texture-bake', start: 0, end: 1 }],
+    },
+    frames,
+    pipelineStartMs: 1,
+    pipelineEndMs: 1,
+  }),
+  /pipeline.*positive/i,
+  'an empty measured route interval must not enter a successful arm receipt',
 );
 assert.throws(
   () => compareFullRouteArms(
@@ -279,6 +360,18 @@ assert.match(smokeSource, /allArmsShareOneResidentModel:\s*true/, 'timing scope 
 assert.match(smokeSource, /visibilityStart !== 'visible'/, 'each episode must require visible-page cadence authority');
 assert.match(smokeSource, /requestAnimationFrame\(t => \{\s*last = t;/, 'cadence probe must be primed before the route');
 assert.match(smokeSource, /schema: 'sf3d\.raw-full-route-scheduling-episodes\.v1'/, 'raw episodes must be preservable before summary');
+assert.match(smokeSource, /requestedBatch/, 'report must preserve requested batch separately from effective batch');
+assert.match(smokeSource, /effectiveKit/, 'report must preserve effective imported kit identity');
+assert.match(
+  smokeSource,
+  /__sf3dBenchmarkCheckpoint/,
+  'each completed browser episode must checkpoint trustworthy evidence to Node',
+);
+assert.match(
+  smokeSource,
+  /expected-output-sha/,
+  'portable paired execution must bind the known canonical output hash',
+);
 assert.ok(
   smokeSource.indexOf("schema: 'sf3d.raw-full-route-scheduling-episodes.v1'")
     < smokeSource.indexOf('summarizeCounterbalancedPair(withSha'),

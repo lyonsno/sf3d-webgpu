@@ -30,17 +30,46 @@ import { spawn, execFileSync } from 'node:child_process';
 import {
   buildBenchmarkFailureReport,
   compareFullRouteArms,
+  parsePositiveSafeIntegerOption,
   summarizeCounterbalancedPair,
+  validateGlbPayload,
 } from './full_route_benchmark_contract.mjs';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
-const argVal = (f, d) => { const i = process.argv.indexOf(f); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
-const IMAGE = path.resolve(argVal('--image', path.join(process.env.HOME, '.local/state/gpu-greenroom/outputs/b4fe3aa9e629/input.png')));
-const BATCH = Number(argVal('--batch', '4096')) || 4096;
-const REPORT_PATH = path.resolve(argVal('--report', '/tmp/sf3d-five-arm-ab.json'));
-const EXPECTED_REVISION = argVal('--expected-revision', process.env.SF3D_EXPECTED_REVISION || '');
-const PROFILE = argVal('--profile', 'six-arm');
+const DEFAULT_IMAGE = path.join(
+  process.env.HOME,
+  '.local/state/gpu-greenroom/outputs/b4fe3aa9e629/input.png',
+);
+const readOption = (flag) => {
+  const indexes = process.argv
+    .map((value, index) => (value === flag ? index : -1))
+    .filter(index => index >= 0);
+  const index = indexes[0] ?? -1;
+  const value = index >= 0 ? process.argv[index + 1] : undefined;
+  return Object.freeze({
+    flag,
+    provided: index >= 0,
+    duplicate: indexes.length > 1,
+    value: value && !value.startsWith('--') ? value : undefined,
+  });
+};
+const requestedOptions = Object.freeze({
+  image: readOption('--image'),
+  batch: readOption('--batch'),
+  report: readOption('--report'),
+  expectedRevision: readOption('--expected-revision'),
+  expectedOutputSha: readOption('--expected-output-sha'),
+  profile: readOption('--profile'),
+});
+const REPORT_PATH = path.resolve(
+  requestedOptions.report.value || '/tmp/sf3d-five-arm-ab.json',
+);
+let IMAGE;
+let BATCH;
+let EXPECTED_REVISION;
+let EXPECTED_OUTPUT_SHA;
+let PROFILE;
 const ALLOW_DIRTY = process.argv.includes('--allow-dirty-source');
 const ARM_ORDERS = Object.freeze({
   'six-arm': Object.freeze([
@@ -61,6 +90,35 @@ const ARM_ORDERS = Object.freeze({
 
 const allocatePort = () => new Promise((res, rej) => { const s = net.createServer(); s.unref(); s.on('error', rej); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => res(port)); }); });
 const sha256File = (p) => execFileSync('shasum', ['-a', '256', p], { encoding: 'utf8' }).trim().split(/\s+/)[0];
+const sha256Text = (value) => crypto.createHash('sha256').update(value).digest('hex');
+const sha256Directory = (root) => {
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) files.push(absolute);
+    }
+  };
+  visit(root);
+  const hash = crypto.createHash('sha256');
+  for (const file of files.sort()) {
+    hash.update(path.relative(root, file));
+    hash.update('\0');
+    hash.update(fs.readFileSync(file));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+};
+const hashGlbArm = (arm) => {
+  const bytes = Buffer.from(arm.glbB64, 'base64');
+  validateGlbPayload(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+  return {
+    ...arm,
+    glbSha: crypto.createHash('sha256').update(bytes).digest('hex'),
+    glbB64: undefined,
+  };
+};
 const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch {} } };
 let lastEvidence = {};
@@ -73,20 +131,109 @@ const fail = (m, phase = 'unknown') => {
 };
 
 (async () => {
+  for (const option of Object.values(requestedOptions)) {
+    if (option.duplicate) fail(`${option.flag} may be provided only once`, 'requested-config');
+    if (option.provided && option.value === undefined) {
+      fail(`${option.flag} requires a value`, 'requested-config');
+    }
+  }
+  let batchIdentity;
+  try {
+    batchIdentity = parsePositiveSafeIntegerOption(
+      requestedOptions.batch.provided ? requestedOptions.batch.value : undefined,
+      { label: '--batch', defaultValue: 4096 },
+    );
+  } catch (error) {
+    fail(error.message, 'requested-config');
+  }
+  BATCH = batchIdentity.effective;
+  IMAGE = path.resolve(requestedOptions.image.value || DEFAULT_IMAGE);
+  EXPECTED_REVISION = requestedOptions.expectedRevision.value
+    || process.env.SF3D_EXPECTED_REVISION
+    || '';
+  EXPECTED_OUTPUT_SHA = requestedOptions.expectedOutputSha.value || '';
+  PROFILE = requestedOptions.profile.value || 'six-arm';
   if (!ARM_ORDERS[PROFILE]) fail(`unknown profile: ${PROFILE}`, 'profile');
+  if (EXPECTED_OUTPUT_SHA && !/^[a-f0-9]{64}$/i.test(EXPECTED_OUTPUT_SHA)) {
+    fail('--expected-output-sha must be a 64-character hexadecimal SHA-256', 'requested-config');
+  }
+  if (PROFILE === 'paired' && !EXPECTED_OUTPUT_SHA) {
+    fail('--expected-output-sha is required for the paired profile', 'requested-config');
+  }
   // Source identity gate.
   const effectiveRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
   const dirty = execFileSync('git', ['status', '--short'], { cwd: REPO, encoding: 'utf8' }).trim();
   if (!EXPECTED_REVISION) fail('--expected-revision required', 'source-identity');
   if (effectiveRevision !== EXPECTED_REVISION) fail(`effective ${effectiveRevision} != requested ${EXPECTED_REVISION}`, 'source-identity');
-  if (dirty && !ALLOW_DIRTY) fail(`worktree dirty:\n${dirty}`, 'source-identity');
-  const weightsPath = path.join(REPO, 'public', 'weights.bin');
-  if (!fs.existsSync(weightsPath)) fail('weights missing', 'weights');
+  if (dirty && (!ALLOW_DIRTY || PROFILE === 'paired')) {
+    fail(`worktree dirty:\n${dirty}`, 'source-identity');
+  }
+  if (!fs.existsSync(IMAGE)) fail(`input missing: ${IMAGE}`, 'input');
+  const effectiveInputPath = fs.realpathSync(IMAGE);
+  const requestedWeightsPath = path.join(REPO, 'public', 'weights.bin');
+  if (!fs.existsSync(requestedWeightsPath)) fail('weights missing', 'weights');
+  const effectiveWeightsPath = fs.realpathSync(requestedWeightsPath);
+  const kitPackagePath = path.join(
+    REPO,
+    'node_modules',
+    '@kaminos',
+    'webgpu-inference-kit',
+    'package.json',
+  );
+  if (!fs.existsSync(kitPackagePath)) fail('installed inference-kit package missing', 'package-identity');
+  const kitPackage = JSON.parse(fs.readFileSync(kitPackagePath, 'utf8'));
+  const kitModule = await import('@kaminos/webgpu-inference-kit');
+  const packageLock = JSON.parse(fs.readFileSync(path.join(REPO, 'package-lock.json'), 'utf8'));
+  const lockedKit = packageLock.packages?.['node_modules/@kaminos/webgpu-inference-kit'];
+  const effectiveKit = {
+    name: kitPackage.name,
+    packageVersion: kitPackage.version,
+    exportedVersion: kitModule.WEBGPU_INFERENCE_KIT_VERSION,
+    packageJsonPath: fs.realpathSync(kitPackagePath),
+    packageJsonSha: sha256File(kitPackagePath),
+    installedTreeSha: sha256Directory(path.dirname(kitPackagePath)),
+    lockVersion: lockedKit?.version ?? null,
+    lockResolved: lockedKit?.resolved ?? null,
+    lockIntegrity: lockedKit?.integrity ?? null,
+  };
+  if (
+    effectiveKit.name !== '@kaminos/webgpu-inference-kit'
+    || effectiveKit.packageVersion !== effectiveKit.exportedVersion
+    || effectiveKit.packageVersion !== effectiveKit.lockVersion
+  ) {
+    fail(`inference-kit identity mismatch: ${JSON.stringify(effectiveKit)}`, 'package-identity');
+  }
+  const dirtyDiff = dirty
+    ? execFileSync('git', ['diff', '--binary', 'HEAD'], { cwd: REPO, encoding: 'utf8' })
+    : '';
   const source = {
+    requested: {
+      revision: EXPECTED_REVISION,
+      inputPath: requestedOptions.image.value || DEFAULT_IMAGE,
+      weightsPath: requestedWeightsPath,
+      requestedBatch: batchIdentity.requested,
+      profile: requestedOptions.profile.value || 'six-arm',
+      expectedOutputSha: EXPECTED_OUTPUT_SHA || null,
+      allowDirtySource: ALLOW_DIRTY,
+    },
+    effective: {
+      worktreePath: fs.realpathSync(REPO),
+      revision: effectiveRevision,
+      inputPath: effectiveInputPath,
+      inputBytes: fs.statSync(effectiveInputPath).size,
+      weightsPath: effectiveWeightsPath,
+      weightsBytes: fs.statSync(effectiveWeightsPath).size,
+      batch: BATCH,
+      profile: PROFILE,
+      browserPath: fs.realpathSync(CHROME_PATH),
+      kit: effectiveKit,
+      dirtyStatus: dirty || null,
+      dirtyDiffSha: dirty ? sha256Text(dirtyDiff) : null,
+    },
     revision: effectiveRevision,
     clean: !dirty,
-    inputSha: sha256File(IMAGE),
-    weightsSha: sha256File(fs.realpathSync(weightsPath)),
+    inputSha: sha256File(effectiveInputPath),
+    weightsSha: sha256File(effectiveWeightsPath),
     batch: BATCH,
     profile: PROFILE,
     host: {
@@ -164,6 +311,20 @@ const fail = (m, phase = 'unknown') => {
 
   const imageB64 = fs.readFileSync(IMAGE).toString('base64');
   await page.evaluate(async (b64) => { await new Promise((res, rej) => { const img = new Image(); img.onload = () => { window._img = img; res(); }; img.onerror = rej; img.src = 'data:image/png;base64,' + b64; }); }, imageB64);
+  const partialArms = [];
+  await page.exposeFunction('__sf3dBenchmarkCheckpoint', rawArm => {
+    const arm = hashGlbArm(rawArm);
+    partialArms.push(arm);
+    lastEvidence = {
+      schema: 'sf3d.partial-full-route-scheduling-episodes.v1',
+      ok: false,
+      status: 'running',
+      source,
+      completedEpisodeCount: partialArms.length,
+      arms: [...partialArms],
+    };
+    fs.writeFileSync(REPORT_PATH, JSON.stringify(lastEvidence, null, 2));
+  });
 
   const arms = await page.evaluate(async (BATCH, PROFILE) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
@@ -243,7 +404,9 @@ const fail = (m, phase = 'unknown') => {
       : ['monolithic', 'current-cooperative', 'arena-only', 'worker-only', 'arena-plus-worker', 'arena-disabled'];
     const results = [];
     for (let index = 0; index < order.length; index++) {
-      results.push(await runByName(order[index], index + 1));
+      const result = await runByName(order[index], index + 1);
+      results.push(result);
+      await globalThis.__sf3dBenchmarkCheckpoint(result);
     }
     if (matWorker) matWorker.terminate();
     return results;
@@ -252,14 +415,27 @@ const fail = (m, phase = 'unknown') => {
   await browser.close().catch(() => {}); cleanup();
   if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`, 'browser');
 
-  const hash = (b64) => crypto.createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex');
-  const withSha = arms.map(a => ({ ...a, glbSha: hash(a.glbB64), glbB64: undefined }));
+  const withSha = arms.map(hashGlbArm);
+  if (
+    withSha.length !== partialArms.length
+    || withSha.some((arm, index) => (
+      arm.ordinal !== partialArms[index]?.ordinal
+      || arm.name !== partialArms[index]?.name
+      || arm.glbSha !== partialArms[index]?.glbSha
+    ))
+  ) {
+    fail('final browser episodes do not match durable per-episode checkpoints', 'episode-checkpoint');
+  }
   const shas = new Set(withSha.map(a => a.glbSha));
   const identical = shas.size === 1;
+  const expectedOutputMatches = !EXPECTED_OUTPUT_SHA
+    || withSha.every(arm => arm.glbSha === EXPECTED_OUTPUT_SHA);
   lastEvidence = {
     schema: 'sf3d.raw-full-route-scheduling-episodes.v1',
     source,
     outputIdentical: identical,
+    expectedOutputSha: EXPECTED_OUTPUT_SHA || null,
+    expectedOutputMatches,
     canonicalGlbSha: withSha[0]?.glbSha ?? null,
     distinctShas: [...shas],
     arms: withSha,
@@ -281,9 +457,14 @@ const fail = (m, phase = 'unknown') => {
     );
     report = {
       schema: 'sf3d.counterbalanced-full-route-scheduling-comparison.v1',
-      ok: identical && pairedComparison.cadenceHypothesisSatisfied && candidateScratchStable,
+      ok: identical
+        && expectedOutputMatches
+        && pairedComparison.cadenceHypothesisSatisfied
+        && candidateScratchStable,
       source,
       outputIdentical: identical,
+      expectedOutputSha: EXPECTED_OUTPUT_SHA,
+      expectedOutputMatches,
       canonicalGlbSha: withSha[0].glbSha,
       distinctShas: [...shas],
       pairedComparison,
@@ -292,6 +473,7 @@ const fail = (m, phase = 'unknown') => {
       arms: withSha,
     };
     if (!identical) acceptanceError = `GLB DIFFERS across episodes: ${[...shas].map(s => s.slice(0, 10)).join(', ')}`;
+    else if (!expectedOutputMatches) acceptanceError = `GLB does not match expected SHA-256 ${EXPECTED_OUTPUT_SHA}`;
     else if (!candidateScratchStable) acceptanceError = `candidate scratch identity changed: ${candidateScratchBytes.join(', ')}`;
     else if (!pairedComparison.cadenceHypothesisSatisfied) {
       acceptanceError = `counterbalanced texture-bake cadence did not collapse: ${pairedComparison.medians.candidateMechanismMaxAttributedGapMs}ms vs ${pairedComparison.medians.controlMechanismMaxAttributedGapMs}ms`;
@@ -314,9 +496,11 @@ const fail = (m, phase = 'unknown') => {
     );
     report = {
       schema: 'sf3d.six-arm-mechanism-comparison.v1',
-      ok: identical && scratchCollapsed && gapCollapsed,
+      ok: identical && expectedOutputMatches && scratchCollapsed && gapCollapsed,
       source,
       outputIdentical: identical,
+      expectedOutputSha: EXPECTED_OUTPUT_SHA || null,
+      expectedOutputMatches,
       canonicalGlbSha: withSha[0].glbSha,
       distinctShas: [...shas],
       winning: {
@@ -335,6 +519,7 @@ const fail = (m, phase = 'unknown') => {
       arms: withSha,
     };
     if (!identical) acceptanceError = `GLB DIFFERS across arms: ${[...shas].map(s => s.slice(0, 10)).join(', ')}`;
+    else if (!expectedOutputMatches) acceptanceError = `GLB does not match expected SHA-256 ${EXPECTED_OUTPUT_SHA}`;
     else if (!scratchCollapsed) acceptanceError = `arena+worker did not collapse scratch: ${best.scratchAllocatedBytes} vs current ${cur.scratchAllocatedBytes}`;
     else if (!gapCollapsed) acceptanceError = `arena+worker did not collapse attributed gap: ${best.bakeMaxAttributedGapMs}ms vs monolithic ${mono.bakeMaxAttributedGapMs}ms`;
   }
