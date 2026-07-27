@@ -523,7 +523,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   report('Querying triplane and decoding...');
 
   // Load tet grid data
-  const tetData = await loadTetData('tets/');
+  const tetData = await loadTetData();
   report(`Loaded tet grid: ${tetData.numVertices} vertices, ${tetData.numTets} tets`);
 
   // Scale grid vertices from [0, 1] to bbox
