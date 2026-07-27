@@ -50,9 +50,59 @@ export function validateGlbPayload(payload) {
   if (declaredBytes !== payload.byteLength) {
     throw new TypeError(`GLB payload declares ${declaredBytes} bytes but contains ${payload.byteLength}`);
   }
+  if (payload.byteLength < 20) {
+    throw new TypeError('GLB payload must contain a JSON chunk');
+  }
+  let offset = 12;
+  let chunkCount = 0;
+  let json = null;
+  while (offset < payload.byteLength) {
+    if (payload.byteLength - offset < 8) {
+      throw new TypeError('GLB payload ends inside a chunk header');
+    }
+    const chunkLength = view.getUint32(offset, true);
+    const chunkType = view.getUint32(offset + 4, true);
+    if (chunkLength === 0 || chunkLength % 4 !== 0) {
+      throw new TypeError(`GLB chunk ${chunkCount} has invalid padded length ${chunkLength}`);
+    }
+    const chunkStart = offset + 8;
+    const chunkEnd = chunkStart + chunkLength;
+    if (chunkEnd > payload.byteLength) {
+      throw new TypeError(`GLB chunk ${chunkCount} exceeds the declared payload length`);
+    }
+    if (chunkCount === 0) {
+      if (chunkType !== 0x4e4f534a) {
+        throw new TypeError('GLB first chunk must be JSON');
+      }
+      let text;
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(
+          payload.subarray(chunkStart, chunkEnd),
+        );
+        json = JSON.parse(text);
+      } catch (error) {
+        throw new TypeError(`GLB JSON chunk is invalid: ${error.message}`);
+      }
+      if (json?.asset?.version !== '2.0') {
+        throw new TypeError('GLB JSON chunk must declare asset.version 2.0');
+      }
+    } else if (chunkCount === 1) {
+      if (chunkType !== 0x004e4942) {
+        throw new TypeError('GLB second chunk must be BIN');
+      }
+    } else {
+      throw new TypeError('GLB payload may contain only JSON and optional BIN chunks');
+    }
+    chunkCount += 1;
+    offset = chunkEnd;
+  }
+  if (offset !== payload.byteLength || chunkCount < 1 || json === null) {
+    throw new TypeError('GLB payload must contain one complete JSON chunk');
+  }
   return Object.freeze({
     byteLength: payload.byteLength,
     version,
+    chunkCount,
   });
 }
 
@@ -143,10 +193,17 @@ export function buildFullRouteArmReceipt({
   if (!Number.isSafeInteger(ordinal) || ordinal < 1) throw new TypeError('ordinal must be a positive integer');
   const totalMs = requireFinite(output?.totalMs, 'output.totalMs');
   if (totalMs <= 0) throw new RangeError('output.totalMs must be positive');
-  const glbBytes = output?.glb?.byteLength;
+  const glb = output?.glb;
+  const glbPayload = glb instanceof ArrayBuffer
+    ? new Uint8Array(glb)
+    : (ArrayBuffer.isView(glb)
+      ? new Uint8Array(glb.buffer, glb.byteOffset, glb.byteLength)
+      : null);
+  const glbBytes = glbPayload?.byteLength;
   if (!Number.isSafeInteger(glbBytes) || glbBytes <= 0) {
     throw new TypeError('output.glb.byteLength must be a positive safe integer');
   }
+  const glbValidation = validateGlbPayload(glbPayload);
   const routeStart = requireFinite(pipelineStartMs, 'pipelineStartMs');
   const routeEnd = requireFinite(pipelineEndMs, 'pipelineEndMs');
   if (routeEnd <= routeStart) throw new RangeError('pipeline interval must be positive');
@@ -189,6 +246,7 @@ export function buildFullRouteArmReceipt({
     totalMs: round(totalMs),
     pipelineIntervalMs: round(routeEnd - routeStart),
     glbBytes,
+    glbValidation,
     stageDurationsMs: Object.freeze(stageDurationsMs),
     cadence: Object.freeze({
       wholeRoute: summarizeGaps(routeFrames.map(frame => frame.gap)),
