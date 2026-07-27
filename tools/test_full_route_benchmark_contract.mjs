@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 import {
+  buildBenchmarkFailureReport,
   buildFullRouteArmReceipt,
   compareFullRouteArms,
+  summarizeCounterbalancedPair,
 } from './full_route_benchmark_contract.mjs';
 
 const frames = [
@@ -131,6 +133,138 @@ assert.throws(
     { mechanismStage: 'texture-bake' },
   ),
   /texture-bake/,
+);
+
+const pairedArms = [
+  {
+    ...control,
+    name: 'monolithic',
+    ordinal: 1,
+    totalMs: 100,
+    stageDurationsMs: { ...control.stageDurationsMs, 'texture-bake': 40 },
+    cadence: {
+      ...control.cadence,
+      byStage: {
+        ...control.cadence.byStage,
+        'texture-bake': {
+          ...control.cadence.byStage['texture-bake'],
+          maxAttributedOverlapMs: 20,
+        },
+      },
+    },
+  },
+  {
+    ...candidate,
+    name: 'arena-plus-worker',
+    ordinal: 2,
+    totalMs: 112,
+    stageDurationsMs: { ...candidate.stageDurationsMs, 'texture-bake': 45 },
+    cadence: {
+      ...candidate.cadence,
+      byStage: {
+        ...candidate.cadence.byStage,
+        'texture-bake': {
+          ...candidate.cadence.byStage['texture-bake'],
+          maxAttributedOverlapMs: 8,
+        },
+      },
+    },
+  },
+  {
+    ...candidate,
+    name: 'arena-plus-worker',
+    ordinal: 3,
+    totalMs: 108,
+    stageDurationsMs: { ...candidate.stageDurationsMs, 'texture-bake': 43 },
+    cadence: {
+      ...candidate.cadence,
+      byStage: {
+        ...candidate.cadence.byStage,
+        'texture-bake': {
+          ...candidate.cadence.byStage['texture-bake'],
+          maxAttributedOverlapMs: 10,
+        },
+      },
+    },
+  },
+  {
+    ...control,
+    name: 'monolithic',
+    ordinal: 4,
+    totalMs: 104,
+    stageDurationsMs: { ...control.stageDurationsMs, 'texture-bake': 42 },
+    cadence: {
+      ...control.cadence,
+      byStage: {
+        ...control.cadence.byStage,
+        'texture-bake': {
+          ...control.cadence.byStage['texture-bake'],
+          maxAttributedOverlapMs: 22,
+        },
+      },
+    },
+  },
+];
+
+assert.deepEqual(
+  summarizeCounterbalancedPair(pairedArms, {
+    controlArm: 'monolithic',
+    candidateArm: 'arena-plus-worker',
+    mechanismStage: 'texture-bake',
+  }),
+  {
+    design: 'A-B-B-A',
+    episodeOrder: [
+      'monolithic',
+      'arena-plus-worker',
+      'arena-plus-worker',
+      'monolithic',
+    ],
+    controlArm: 'monolithic',
+    candidateArm: 'arena-plus-worker',
+    mechanismStage: 'texture-bake',
+    controlEpisodes: {
+      totalMs: [100, 104],
+      mechanismStageMs: [40, 42],
+      mechanismMaxAttributedGapMs: [20, 22],
+    },
+    candidateEpisodes: {
+      totalMs: [112, 108],
+      mechanismStageMs: [45, 43],
+      mechanismMaxAttributedGapMs: [8, 10],
+    },
+    medians: {
+      controlTotalMs: 102,
+      candidateTotalMs: 110,
+      observedFullRouteDeltaMs: 8,
+      observedFullRouteRatio: 1.078431,
+      controlMechanismStageMs: 41,
+      candidateMechanismStageMs: 44,
+      mechanismStageDeltaMs: 3,
+      mechanismStageRatio: 1.073171,
+      outsideMechanismObservedDeltaMs: 5,
+      controlMechanismMaxAttributedGapMs: 21,
+      candidateMechanismMaxAttributedGapMs: 9,
+      mechanismCadenceRatio: 0.428571,
+    },
+    orderDrift: {
+      controlLastMinusFirstMs: 4,
+      candidateSecondMinusFirstMs: -4,
+    },
+    cadenceHypothesisSatisfied: true,
+    causalAuthority: 'counterbalanced-mechanism-stage',
+  },
+);
+
+const trustworthy = { schema: 'example.v1', arms: [{ totalMs: 123 }] };
+assert.deepEqual(
+  buildBenchmarkFailureReport('cadence did not collapse', 'acceptance', trustworthy),
+  {
+    ok: false,
+    failurePhase: 'acceptance',
+    error: 'cadence did not collapse',
+    lastTrustworthyEvidence: trustworthy,
+  },
 );
 
 const smokeSource = fs.readFileSync(
