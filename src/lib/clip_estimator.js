@@ -32,6 +32,114 @@ const CLIP_STD = [0.26862954, 0.26130258, 0.27577711];
 let _pipelines = null;
 let _weightBuffers = null;
 
+const RUNTIME_CLIP_SHADER_URLS = Object.freeze({
+  linear: new URL('../shaders/linear.wgsl', import.meta.url).href,
+  layernorm: new URL('../shaders/layernorm_vit.wgsl', import.meta.url).href,
+});
+
+export function resolveClipShaderUrls(moduleUrl = import.meta.url) {
+  if (moduleUrl === import.meta.url) return RUNTIME_CLIP_SHADER_URLS;
+  return Object.freeze({
+    linear: new URL('../shaders/linear.wgsl', moduleUrl).href,
+    layernorm: new URL('../shaders/layernorm_vit.wgsl', moduleUrl).href,
+  });
+}
+
+async function fetchClipShaderSource(fetchImpl, url) {
+  const response = await fetchImpl(url);
+  if (!response?.ok) {
+    throw new Error(
+      `CLIP shader fetch failed: ${url} returned ${response?.status ?? 'unknown'} ${response?.statusText || ''}`.trim(),
+    );
+  }
+  const contentType = response.headers?.get?.('content-type') || '';
+  if (/text\/html|application\/xhtml\+xml/i.test(contentType)) {
+    throw new Error(`CLIP shader ${url} returned invalid content type ${contentType}`);
+  }
+  const source = await response.text();
+  if (
+    !source.trim()
+    || /^\s*</.test(source)
+    || !/@compute\b/.test(source)
+    || !/\bfn\s+main\s*\(/.test(source)
+  ) {
+    throw new Error(`CLIP shader ${url} is not valid WGSL source`);
+  }
+  return source;
+}
+
+export async function loadClipShaderSources({
+  moduleUrl = import.meta.url,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('CLIP shader fetch implementation is required');
+  const urls = resolveClipShaderUrls(moduleUrl);
+  const [linear, layernorm] = await Promise.all([
+    fetchClipShaderSource(fetchImpl, urls.linear),
+    fetchClipShaderSource(fetchImpl, urls.layernorm),
+  ]);
+  return Object.freeze({ linear, layernorm });
+}
+
+export async function createValidatedClipPipeline(device, source, shaderUrl) {
+  try {
+    device.pushErrorScope('validation');
+  } catch (error) {
+    throw new Error(
+      `CLIP shader validation scope setup failed for ${shaderUrl}: ${error?.message || error}`,
+      { cause: error },
+    );
+  }
+
+  let pipeline = null;
+  let failure = null;
+  try {
+    const module = device.createShaderModule({
+      code: source,
+      label: `SF3D CLIP ${shaderUrl}`,
+    });
+    if (typeof module.getCompilationInfo === 'function') {
+      const info = await module.getCompilationInfo();
+      const errors = (info.messages || []).filter(message => message.type === 'error');
+      if (errors.length) {
+        const detail = errors.map(message => (
+          `${message.lineNum || '?'}:${message.linePos || '?'} ${message.message}`
+        )).join('; ');
+        throw new Error(`CLIP shader compilation failed for ${shaderUrl}: ${detail}`);
+      }
+    }
+    pipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module, entryPoint: 'main' },
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  let validationError = null;
+  let scopeFailure = null;
+  try {
+    validationError = await device.popErrorScope();
+  } catch (error) {
+    scopeFailure = error;
+  }
+
+  if (failure || scopeFailure) {
+    const detail = [
+      failure ? `operation failed: ${failure.message || failure}` : null,
+      scopeFailure ? `validation scope pop failed: ${scopeFailure.message || scopeFailure}` : null,
+    ].filter(Boolean).join('; ');
+    throw new Error(
+      `CLIP shader pipeline failed for ${shaderUrl}: ${detail}`,
+      { cause: failure || scopeFailure },
+    );
+  }
+  if (validationError) {
+    throw new Error(`CLIP shader validation failed for ${shaderUrl}: ${validationError.message || validationError}`);
+  }
+  return pipeline;
+}
+
 function ceilDiv(a, b) { return Math.ceil(a / b); }
 function splitWG(total) {
   const maxX = 65535;
@@ -42,20 +150,12 @@ function splitWG(total) {
 async function _ensurePipelines(device) {
   if (_pipelines) return;
 
-  const [linearSrc, layernormSrc] = await Promise.all([
-    fetch('/src/shaders/linear.wgsl').then(r => r.text()),
-    fetch('/src/shaders/layernorm_vit.wgsl').then(r => r.text()),
-  ]);
+  const urls = resolveClipShaderUrls();
+  const sources = await loadClipShaderSources();
 
   _pipelines = {
-    linear: device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: device.createShaderModule({ code: linearSrc }), entryPoint: 'main' },
-    }),
-    layernorm: device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: device.createShaderModule({ code: layernormSrc }), entryPoint: 'main' },
-    }),
+    linear: await createValidatedClipPipeline(device, sources.linear, urls.linear),
+    layernorm: await createValidatedClipPipeline(device, sources.layernorm, urls.layernorm),
   };
 }
 
