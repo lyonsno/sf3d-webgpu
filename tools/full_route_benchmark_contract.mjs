@@ -17,6 +17,15 @@ const percentile = (sorted, fraction) => {
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
 };
 
+const median = (values, label) => {
+  if (!Array.isArray(values) || values.length === 0) throw new TypeError(`${label} must be non-empty`);
+  const sorted = values.map((value, index) => requireFinite(value, `${label}[${index}]`)).sort((a, b) => a - b);
+  const midpoint = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[midpoint - 1] + sorted[midpoint]) / 2
+    : sorted[midpoint];
+};
+
 const summarizeGaps = (gaps) => {
   const sorted = [...gaps].sort((a, b) => a - b);
   return Object.freeze({
@@ -111,6 +120,9 @@ export function buildFullRouteArmReceipt({
       p95GapMs: gapSummary.p95Ms,
       p99GapMs: gapSummary.p99Ms,
       maxGapMs: gapSummary.maxMs,
+      maxAttributedOverlapMs: overlapping.length
+        ? round(Math.max(...overlapping.map(item => item.overlapMs)))
+        : null,
       overlapMs: round(overlapping.reduce((sum, item) => sum + item.overlapMs, 0)),
       over16_7Count: gapSummary.over16_7Count,
       over33_3Count: gapSummary.over33_3Count,
@@ -133,6 +145,108 @@ export function buildFullRouteArmReceipt({
       wholeRoute: summarizeGaps(routeFrames.map(frame => frame.gap)),
       byStage: Object.freeze(byStage),
     }),
+  });
+}
+
+export function summarizeCounterbalancedPair(arms, {
+  controlArm,
+  candidateArm,
+  mechanismStage,
+}) {
+  if (!Array.isArray(arms) || arms.length !== 4) {
+    throw new TypeError('counterbalanced pair requires exactly four episodes');
+  }
+  const expectedOrder = [controlArm, candidateArm, candidateArm, controlArm];
+  const episodeOrder = arms.map(arm => arm?.name);
+  if (episodeOrder.some((name, index) => name !== expectedOrder[index])) {
+    throw new TypeError(`counterbalanced pair order must be ${expectedOrder.join(' -> ')}`);
+  }
+  const controls = [arms[0], arms[3]];
+  const candidates = [arms[1], arms[2]];
+  const collect = (episodes, field, reader) => episodes.map((episode, index) => (
+    requireFinite(reader(episode), `${field}[${index}]`)
+  ));
+  const controlTotals = collect(controls, 'control totalMs', arm => arm.totalMs);
+  const candidateTotals = collect(candidates, 'candidate totalMs', arm => arm.totalMs);
+  const controlStage = collect(
+    controls,
+    `control ${mechanismStage}`,
+    arm => arm.stageDurationsMs?.[mechanismStage],
+  );
+  const candidateStage = collect(
+    candidates,
+    `candidate ${mechanismStage}`,
+    arm => arm.stageDurationsMs?.[mechanismStage],
+  );
+  const controlGap = collect(
+    controls,
+    `control ${mechanismStage} attributed gap`,
+    arm => arm.cadence?.byStage?.[mechanismStage]?.maxAttributedOverlapMs,
+  );
+  const candidateGap = collect(
+    candidates,
+    `candidate ${mechanismStage} attributed gap`,
+    arm => arm.cadence?.byStage?.[mechanismStage]?.maxAttributedOverlapMs,
+  );
+
+  const controlTotalMedian = median(controlTotals, 'control totalMs');
+  const candidateTotalMedian = median(candidateTotals, 'candidate totalMs');
+  const controlStageMedian = median(controlStage, `control ${mechanismStage}`);
+  const candidateStageMedian = median(candidateStage, `candidate ${mechanismStage}`);
+  const controlGapMedian = median(controlGap, `control ${mechanismStage} attributed gap`);
+  const candidateGapMedian = median(candidateGap, `candidate ${mechanismStage} attributed gap`);
+  if (controlTotalMedian <= 0 || controlStageMedian <= 0 || controlGapMedian <= 0) {
+    throw new RangeError('counterbalanced control medians must be positive');
+  }
+  const fullDelta = candidateTotalMedian - controlTotalMedian;
+  const stageDelta = candidateStageMedian - controlStageMedian;
+  const cadenceRatio = candidateGapMedian / controlGapMedian;
+
+  return Object.freeze({
+    design: 'A-B-B-A',
+    episodeOrder: Object.freeze(episodeOrder),
+    controlArm,
+    candidateArm,
+    mechanismStage,
+    controlEpisodes: Object.freeze({
+      totalMs: Object.freeze(controlTotals),
+      mechanismStageMs: Object.freeze(controlStage),
+      mechanismMaxAttributedGapMs: Object.freeze(controlGap),
+    }),
+    candidateEpisodes: Object.freeze({
+      totalMs: Object.freeze(candidateTotals),
+      mechanismStageMs: Object.freeze(candidateStage),
+      mechanismMaxAttributedGapMs: Object.freeze(candidateGap),
+    }),
+    medians: Object.freeze({
+      controlTotalMs: round(controlTotalMedian),
+      candidateTotalMs: round(candidateTotalMedian),
+      observedFullRouteDeltaMs: round(fullDelta),
+      observedFullRouteRatio: round(candidateTotalMedian / controlTotalMedian, 6),
+      controlMechanismStageMs: round(controlStageMedian),
+      candidateMechanismStageMs: round(candidateStageMedian),
+      mechanismStageDeltaMs: round(stageDelta),
+      mechanismStageRatio: round(candidateStageMedian / controlStageMedian, 6),
+      outsideMechanismObservedDeltaMs: round(fullDelta - stageDelta),
+      controlMechanismMaxAttributedGapMs: round(controlGapMedian),
+      candidateMechanismMaxAttributedGapMs: round(candidateGapMedian),
+      mechanismCadenceRatio: round(cadenceRatio, 6),
+    }),
+    orderDrift: Object.freeze({
+      controlLastMinusFirstMs: round(controlTotals[1] - controlTotals[0]),
+      candidateSecondMinusFirstMs: round(candidateTotals[1] - candidateTotals[0]),
+    }),
+    cadenceHypothesisSatisfied: cadenceRatio < 0.5,
+    causalAuthority: 'counterbalanced-mechanism-stage',
+  });
+}
+
+export function buildBenchmarkFailureReport(error, failurePhase, lastTrustworthyEvidence) {
+  return Object.freeze({
+    ok: false,
+    failurePhase,
+    error: String(error),
+    lastTrustworthyEvidence,
   });
 }
 

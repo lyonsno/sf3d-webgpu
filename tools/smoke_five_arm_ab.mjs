@@ -17,7 +17,8 @@
  * timing-scope identity (commit, input, weights, host, browser/adapter probe,
  * one resident model, and setup excluded from each arm).
  *
- * Usage: node tools/smoke_five_arm_ab.mjs --expected-revision SHA [--image P] [--batch N]
+ * Usage: node tools/smoke_five_arm_ab.mjs --expected-revision SHA
+ *   [--profile six-arm|paired] [--image P] [--batch N]
  */
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
@@ -26,7 +27,11 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
-import { compareFullRouteArms } from './full_route_benchmark_contract.mjs';
+import {
+  buildBenchmarkFailureReport,
+  compareFullRouteArms,
+  summarizeCounterbalancedPair,
+} from './full_route_benchmark_contract.mjs';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
@@ -35,16 +40,40 @@ const IMAGE = path.resolve(argVal('--image', path.join(process.env.HOME, '.local
 const BATCH = Number(argVal('--batch', '4096')) || 4096;
 const REPORT_PATH = path.resolve(argVal('--report', '/tmp/sf3d-five-arm-ab.json'));
 const EXPECTED_REVISION = argVal('--expected-revision', process.env.SF3D_EXPECTED_REVISION || '');
+const PROFILE = argVal('--profile', 'six-arm');
 const ALLOW_DIRTY = process.argv.includes('--allow-dirty-source');
+const ARM_ORDERS = Object.freeze({
+  'six-arm': Object.freeze([
+    'monolithic',
+    'current-cooperative',
+    'arena-only',
+    'worker-only',
+    'arena-plus-worker',
+    'arena-disabled',
+  ]),
+  paired: Object.freeze([
+    'monolithic',
+    'arena-plus-worker',
+    'arena-plus-worker',
+    'monolithic',
+  ]),
+});
 
 const allocatePort = () => new Promise((res, rej) => { const s = net.createServer(); s.unref(); s.on('error', rej); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => res(port)); }); });
 const sha256File = (p) => execFileSync('shasum', ['-a', '256', p], { encoding: 'utf8' }).trim().split(/\s+/)[0];
 const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch {} } };
 let lastEvidence = {};
-const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stringify({ ok: false, failurePhase: phase, error: m, lastEvidence }, null, 2)); console.error(`\n✗ SMOKE FAILED [${phase}]: ${m}`); cleanup(); process.exit(1); };
+const fail = (m, phase = 'unknown') => {
+  const failure = buildBenchmarkFailureReport(m, phase, lastEvidence);
+  fs.writeFileSync(REPORT_PATH, JSON.stringify(failure, null, 2));
+  console.error(`\n✗ SMOKE FAILED [${phase}]: ${m}`);
+  cleanup();
+  process.exit(1);
+};
 
 (async () => {
+  if (!ARM_ORDERS[PROFILE]) fail(`unknown profile: ${PROFILE}`, 'profile');
   // Source identity gate.
   const effectiveRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
   const dirty = execFileSync('git', ['status', '--short'], { cwd: REPO, encoding: 'utf8' }).trim();
@@ -59,6 +88,7 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
     inputSha: sha256File(IMAGE),
     weightsSha: sha256File(fs.realpathSync(weightsPath)),
     batch: BATCH,
+    profile: PROFILE,
     host: {
       hostname: os.hostname(),
       platform: os.platform(),
@@ -95,14 +125,7 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
     setupIncludesModelLoadAndPipelineInitialization: true,
     armTotalsExcludeSetup: true,
     allArmsShareOneResidentModel: true,
-    armOrder: [
-      'monolithic',
-      'current-cooperative',
-      'arena-only',
-      'worker-only',
-      'arena-plus-worker',
-      'arena-disabled',
-    ],
+    armOrder: ARM_ORDERS[PROFILE],
   };
   source.backend = await page.evaluate(async () => {
     const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
@@ -128,7 +151,7 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
   const imageB64 = fs.readFileSync(IMAGE).toString('base64');
   await page.evaluate(async (b64) => { await new Promise((res, rej) => { const img = new Image(); img.onload = () => { window._img = img; res(); }; img.onerror = rej; img.src = 'data:image/png;base64,' + b64; }); }, imageB64);
 
-  const arms = await page.evaluate(async (BATCH) => {
+  const arms = await page.evaluate(async (BATCH, PROFILE) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const { buildFullRouteArmReceipt } = await import('/tools/full_route_benchmark_contract.mjs');
     const device = window._sf3d_device, weights = window._sf3d_weights, pipelines = window._sf3d_pipelines, img = window._img;
@@ -160,6 +183,7 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
         glbB64: toB64(new Uint8Array(out.glb)),
         bakeStageMs: route.stageDurationsMs['texture-bake'] ?? null,
         bakeMaxGapMs: route.cadence.byStage['texture-bake']?.maxGapMs ?? null,
+        bakeMaxAttributedGapMs: route.cadence.byStage['texture-bake']?.maxAttributedOverlapMs ?? null,
         scratchAllocatedBytes: tel?.scratch?.allocatedBytes ?? null,
         scratchAllocatedCount: tel?.scratch?.allocatedCount ?? null,
         queueWaitTotalMs: tel?.queueFences ? +tel.queueFences.reduce((s, q) => s + (q.queueWaitMs || 0), 0).toFixed(1) : null,
@@ -173,19 +197,29 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
 
     const base = { cooperativeDino: false };
     const coop = { ...base, cooperativeBake: true, bakeSchedulingMode: 'cooperative', bakeBatchTexels: BATCH };
+    const runByName = async (name, ordinal) => {
+      if (name === 'monolithic') return arm(name, ordinal, { ...base });
+      if (name === 'current-cooperative') return arm(name, ordinal, { ...coop });
+      if (name === 'arena-only') return arm(name, ordinal, { ...coop, decoderArena: true });
+      if (name === 'worker-only') return arm(name, ordinal, { ...coop, materializeWorker: getMatWorker() });
+      if (name === 'arena-plus-worker') {
+        return arm(name, ordinal, { ...coop, decoderArena: true, materializeWorker: getMatWorker() });
+      }
+      if (name === 'arena-disabled') {
+        return arm(name, ordinal, { ...coop, decoderArena: true, bakeSchedulingMode: 'disabled' });
+      }
+      throw new Error(`unknown arm: ${name}`);
+    };
+    const order = PROFILE === 'paired'
+      ? ['monolithic', 'arena-plus-worker', 'arena-plus-worker', 'monolithic']
+      : ['monolithic', 'current-cooperative', 'arena-only', 'worker-only', 'arena-plus-worker', 'arena-disabled'];
     const results = [];
-    results.push(await arm('monolithic', 1, { ...base }));
-    results.push(await arm('current-cooperative', 2, { ...coop }));
-    results.push(await arm('arena-only', 3, { ...coop, decoderArena: true }));
-    results.push(await arm('worker-only', 4, { ...coop, materializeWorker: getMatWorker() }));
-    results.push(await arm('arena-plus-worker', 5, { ...coop, decoderArena: true, materializeWorker: getMatWorker() }));
-    // Review residual-risk #1: arena under DISABLED scheduling relies on WebGPU
-    // queue-submission ordering (not the per-duty fence) for slot-reuse safety.
-    // Prove that path is also byte-identical.
-    results.push(await arm('arena-disabled', 6, { ...coop, decoderArena: true, bakeSchedulingMode: 'disabled' }));
+    for (let index = 0; index < order.length; index++) {
+      results.push(await runByName(order[index], index + 1));
+    }
     if (matWorker) matWorker.terminate();
     return results;
-  }, BATCH);
+  }, BATCH, PROFILE);
 
   await browser.close().catch(() => {}); cleanup();
   if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`, 'browser');
@@ -195,65 +229,113 @@ const fail = (m, phase = 'unknown') => { fs.writeFileSync(REPORT_PATH, JSON.stri
   const shas = new Set(withSha.map(a => a.glbSha));
   const identical = shas.size === 1;
 
-  // Acceptance: arena+worker (the winning arm) must (a) collapse scratch vs the
-  // current-cooperative churn, and (b) collapse the foreground gap vs monolithic.
-  const byName = Object.fromEntries(withSha.map(a => [a.name, a]));
-  const cur = byName['current-cooperative'], mono = byName['monolithic'], best = byName['arena-plus-worker'];
-  const scratchCollapsed = best.scratchAllocatedBytes != null && cur.scratchAllocatedBytes != null
-    && best.scratchAllocatedBytes < cur.scratchAllocatedBytes * 0.2;
-  const gapCollapsed = best.bakeMaxGapMs != null && mono.bakeMaxGapMs != null
-    && best.bakeMaxGapMs < mono.bakeMaxGapMs * 0.5;
-  const fullRouteComparison = compareFullRouteArms(
-    mono,
-    best,
-    { mechanismStage: 'texture-bake' },
-  );
-
-  const report = {
-    schema: 'sf3d.full-route-scheduling-comparison.v1',
-    ok: identical && scratchCollapsed && gapCollapsed,
-    source,
-    outputIdentical: identical,
-    canonicalGlbSha: withSha[0].glbSha,
-    distinctShas: [...shas],
-    winning: {
-      arm: 'arena-plus-worker',
-      totalMs: best.totalMs,
-      wholeRouteMaxGapMs: best.cadence.wholeRoute.maxMs,
-      bakeMaxGapMs: best.bakeMaxGapMs,
-      scratchAllocatedBytes: best.scratchAllocatedBytes,
-      scratchCollapsedVsCurrent: scratchCollapsed, gapCollapsedVsMonolithic: gapCollapsed,
-    },
-    comparisons: {
-      monolithicVsArenaPlusWorker: fullRouteComparison,
-    },
-    arms: withSha,
-  };
+  let report;
+  let acceptanceError = null;
+  if (PROFILE === 'paired') {
+    const pairedComparison = summarizeCounterbalancedPair(withSha, {
+      controlArm: 'monolithic',
+      candidateArm: 'arena-plus-worker',
+      mechanismStage: 'texture-bake',
+    });
+    const candidateScratchBytes = withSha
+      .filter(arm => arm.name === 'arena-plus-worker')
+      .map(arm => arm.scratchAllocatedBytes);
+    const candidateScratchStable = candidateScratchBytes.every(
+      bytes => Number.isSafeInteger(bytes) && bytes >= 0 && bytes === candidateScratchBytes[0],
+    );
+    report = {
+      schema: 'sf3d.counterbalanced-full-route-scheduling-comparison.v1',
+      ok: identical && pairedComparison.cadenceHypothesisSatisfied && candidateScratchStable,
+      source,
+      outputIdentical: identical,
+      canonicalGlbSha: withSha[0].glbSha,
+      distinctShas: [...shas],
+      pairedComparison,
+      candidateScratchBytes,
+      candidateScratchStable,
+      arms: withSha,
+    };
+    if (!identical) acceptanceError = `GLB DIFFERS across episodes: ${[...shas].map(s => s.slice(0, 10)).join(', ')}`;
+    else if (!candidateScratchStable) acceptanceError = `candidate scratch identity changed: ${candidateScratchBytes.join(', ')}`;
+    else if (!pairedComparison.cadenceHypothesisSatisfied) {
+      acceptanceError = `counterbalanced texture-bake cadence did not collapse: ${pairedComparison.medians.candidateMechanismMaxAttributedGapMs}ms vs ${pairedComparison.medians.controlMechanismMaxAttributedGapMs}ms`;
+    }
+  } else {
+    // Six-arm acceptance retains the mechanism decomposition. Full-route
+    // performance claims belong to the counterbalanced paired profile.
+    const byName = Object.fromEntries(withSha.map(a => [a.name, a]));
+    const cur = byName['current-cooperative'];
+    const mono = byName.monolithic;
+    const best = byName['arena-plus-worker'];
+    const scratchCollapsed = best.scratchAllocatedBytes != null && cur.scratchAllocatedBytes != null
+      && best.scratchAllocatedBytes < cur.scratchAllocatedBytes * 0.2;
+    const gapCollapsed = best.bakeMaxAttributedGapMs != null && mono.bakeMaxAttributedGapMs != null
+      && best.bakeMaxAttributedGapMs < mono.bakeMaxAttributedGapMs * 0.5;
+    const fullRouteComparison = compareFullRouteArms(
+      mono,
+      best,
+      { mechanismStage: 'texture-bake' },
+    );
+    report = {
+      schema: 'sf3d.six-arm-mechanism-comparison.v1',
+      ok: identical && scratchCollapsed && gapCollapsed,
+      source,
+      outputIdentical: identical,
+      canonicalGlbSha: withSha[0].glbSha,
+      distinctShas: [...shas],
+      winning: {
+        arm: 'arena-plus-worker',
+        totalMs: best.totalMs,
+        wholeRouteMaxGapMs: best.cadence.wholeRoute.maxMs,
+        bakeMaxGapMs: best.bakeMaxGapMs,
+        bakeMaxAttributedGapMs: best.bakeMaxAttributedGapMs,
+        scratchAllocatedBytes: best.scratchAllocatedBytes,
+        scratchCollapsedVsCurrent: scratchCollapsed,
+        gapCollapsedVsMonolithic: gapCollapsed,
+      },
+      comparisons: {
+        monolithicVsArenaPlusWorker: fullRouteComparison,
+      },
+      arms: withSha,
+    };
+    if (!identical) acceptanceError = `GLB DIFFERS across arms: ${[...shas].map(s => s.slice(0, 10)).join(', ')}`;
+    else if (!scratchCollapsed) acceptanceError = `arena+worker did not collapse scratch: ${best.scratchAllocatedBytes} vs current ${cur.scratchAllocatedBytes}`;
+    else if (!gapCollapsed) acceptanceError = `arena+worker did not collapse attributed gap: ${best.bakeMaxAttributedGapMs}ms vs monolithic ${mono.bakeMaxAttributedGapMs}ms`;
+  }
+  lastEvidence = report;
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
 
-  console.log('\n=== SF3D six-arm full-route scheduling A/B ===');
+  console.log(`\n=== SF3D ${PROFILE} full-route scheduling comparison ===`);
   console.log(`source ${source.revision.slice(0, 10)} clean=${source.clean} ${source.backend.vendor}/${source.backend.architecture} batch=${BATCH}`);
-  console.log(`GLB identical across all arms: ${identical} (sha ${withSha[0].glbSha.slice(0, 12)}…)`);
-  console.log('arm'.padEnd(20), 'routeWall'.padStart(10), 'routeMaxGap'.padStart(12), 'bakeWall'.padStart(9), 'bakeMaxGap'.padStart(11), 'scratchMB'.padStart(10), 'cpuMatMs'.padStart(9), 'xferMs'.padStart(7));
+  console.log(`GLB identical across all episodes: ${identical} (sha ${withSha[0].glbSha.slice(0, 12)}…)`);
+  console.log('episode'.padEnd(20), 'routeWall'.padStart(10), 'routeMaxGap'.padStart(12), 'bakeWall'.padStart(9), 'bakeAttrib'.padStart(11), 'scratchMB'.padStart(10), 'cpuMatMs'.padStart(9), 'xferMs'.padStart(7));
   for (const a of withSha) {
     console.log(
-      a.name.padEnd(20),
+      `${a.ordinal}:${a.name}`.padEnd(20),
       String(a.totalMs).padStart(10),
       String(a.cadence.wholeRoute.maxMs).padStart(12),
       String(a.bakeStageMs).padStart(9),
-      String(a.bakeMaxGapMs).padStart(11),
+      String(a.bakeMaxAttributedGapMs).padStart(11),
       String(a.scratchAllocatedBytes != null ? (a.scratchAllocatedBytes / 1e6).toFixed(1) : 'n/a').padStart(10),
       String(a.cpuMaterializationMs != null ? a.cpuMaterializationMs.toFixed(0) : 'n/a').padStart(9),
       String(a.workerTransferMs != null ? a.workerTransferMs.toFixed(0) : 'n/a').padStart(7),
     );
   }
-  console.log(`\nobserved full-route delta: ${fullRouteComparison.observedFullRouteDeltaMs}ms (${fullRouteComparison.observedFullRouteRatio}x)`);
-  console.log(`texture-bake mechanism delta: ${fullRouteComparison.mechanismStageDeltaMs}ms (${fullRouteComparison.mechanismStageRatio}x)`);
-  console.log(`outside-texture-bake observed delta: ${fullRouteComparison.outsideMechanismObservedDeltaMs}ms (not scheduler-causal)`);
-  if (!identical) fail(`GLB DIFFERS across arms: ${[...shas].map(s => s.slice(0, 10)).join(', ')}`, 'output-identity');
-  console.log(`\narena+worker: scratchCollapsed=${scratchCollapsed} gapCollapsed=${gapCollapsed}`);
-  if (!scratchCollapsed) fail(`arena+worker did not collapse scratch: ${best.scratchAllocatedBytes} vs current ${cur.scratchAllocatedBytes}`, 'acceptance');
-  if (!gapCollapsed) fail(`arena+worker did not collapse gap: ${best.bakeMaxGapMs}ms vs monolithic ${mono.bakeMaxGapMs}ms`, 'acceptance');
-  console.log(`✓ SMOKE PASSED — all arms byte-identical; arena+worker collapses scratch AND foreground gap. report: ${REPORT_PATH}`);
+  if (PROFILE === 'paired') {
+    const medians = report.pairedComparison.medians;
+    console.log(`\nmedian observed full-route delta: ${medians.observedFullRouteDeltaMs}ms (${medians.observedFullRouteRatio}x)`);
+    console.log(`median texture-bake mechanism delta: ${medians.mechanismStageDeltaMs}ms (${medians.mechanismStageRatio}x)`);
+    console.log(`median outside-texture-bake observed delta: ${medians.outsideMechanismObservedDeltaMs}ms (not scheduler-causal)`);
+    console.log(`median attributed bake cadence: ${medians.controlMechanismMaxAttributedGapMs}ms -> ${medians.candidateMechanismMaxAttributedGapMs}ms (${medians.mechanismCadenceRatio}x)`);
+    console.log(`order drift: control ${report.pairedComparison.orderDrift.controlLastMinusFirstMs}ms, candidate ${report.pairedComparison.orderDrift.candidateSecondMinusFirstMs}ms`);
+  } else {
+    const comparison = report.comparisons.monolithicVsArenaPlusWorker;
+    console.log(`\nobserved full-route delta: ${comparison.observedFullRouteDeltaMs}ms (${comparison.observedFullRouteRatio}x)`);
+    console.log(`texture-bake mechanism delta: ${comparison.mechanismStageDeltaMs}ms (${comparison.mechanismStageRatio}x)`);
+    console.log(`outside-texture-bake observed delta: ${comparison.outsideMechanismObservedDeltaMs}ms (not scheduler-causal)`);
+    console.log(`arena+worker: scratchCollapsed=${report.winning.scratchCollapsedVsCurrent} attributedGapCollapsed=${report.winning.gapCollapsedVsMonolithic}`);
+  }
+  if (acceptanceError) fail(acceptanceError, identical ? 'acceptance' : 'output-identity');
+  console.log(`✓ SMOKE PASSED — ${PROFILE} output and scheduling contracts hold. report: ${REPORT_PATH}`);
   process.exit(0);
 })().catch(e => fail(e.message, 'exception'));
