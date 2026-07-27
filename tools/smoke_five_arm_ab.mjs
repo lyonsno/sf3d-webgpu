@@ -307,6 +307,20 @@ const fail = (m, phase = 'unknown') => {
       } : null,
     };
   });
+  const browserExecutedKit = await page.evaluate(async () => {
+    const witness = await import('/tools/browser_kit_identity.js');
+    return witness.readBrowserKitIdentity();
+  });
+  source.effective.kit.browserExecutedKit = browserExecutedKit;
+  if (
+    browserExecutedKit.packageName !== effectiveKit.name
+    || browserExecutedKit.exportedVersion !== effectiveKit.exportedVersion
+  ) {
+    fail(
+      `browser inference-kit identity mismatch: ${JSON.stringify(browserExecutedKit)}`,
+      'package-identity',
+    );
+  }
   lastEvidence = { source };
 
   const imageB64 = fs.readFileSync(IMAGE).toString('base64');
