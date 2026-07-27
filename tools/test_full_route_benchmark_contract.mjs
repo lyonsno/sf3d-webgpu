@@ -276,5 +276,13 @@ assert.match(smokeSource, /compareFullRouteArms/, 'browser smoke must emit an au
 assert.match(smokeSource, /routeWall/, 'console headline must expose full-route wall time');
 assert.match(smokeSource, /outside-texture-bake observed delta/, 'console must separate unrelated stage variance');
 assert.match(smokeSource, /allArmsShareOneResidentModel:\s*true/, 'timing scope must state resident-model reuse');
+assert.match(smokeSource, /visibilityStart !== 'visible'/, 'each episode must require visible-page cadence authority');
+assert.match(smokeSource, /requestAnimationFrame\(t => \{\s*last = t;/, 'cadence probe must be primed before the route');
+assert.match(smokeSource, /schema: 'sf3d\.raw-full-route-scheduling-episodes\.v1'/, 'raw episodes must be preservable before summary');
+assert.ok(
+  smokeSource.indexOf("schema: 'sf3d.raw-full-route-scheduling-episodes.v1'")
+    < smokeSource.indexOf('summarizeCounterbalancedPair(withSha'),
+  'raw episodes must enter last trustworthy evidence before paired summarization',
+);
 
 console.log('full-route benchmark contract passed');
