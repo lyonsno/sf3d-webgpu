@@ -12,7 +12,12 @@
  */
 
 import { createEmptyBuffer } from './gpu.js';
-import { dispatchConv2d, dispatchActivation, dispatchPixelShuffle } from './shader_ops.js';
+import {
+  dispatchActivation,
+  dispatchConv2d,
+  dispatchConv2dChannelRange,
+  dispatchPixelShuffle,
+} from './shader_ops.js';
 
 const POST_CONFIG = {
   inChannels: 1024,
@@ -32,6 +37,13 @@ export const POST_PROCESSOR_PLANE_STAGE_IDS = Object.freeze([
   'conv-2-relu',
   'conv-3',
   'pixel-shuffle-copy',
+]);
+
+export const POST_PROCESSOR_CONV_OUTPUT_CHANNELS = Object.freeze([
+  POST_CONFIG.inChannels,
+  POST_CONFIG.inChannels,
+  POST_CONFIG.inChannels,
+  POST_CONFIG.lastConvOut,
 ]);
 
 /**
@@ -117,8 +129,153 @@ export function createPostProcessorPlaneState(
     output,
     plane,
     nextStageIndex: 0,
+    channelStage: null,
     current: null,
     complete: false,
+  };
+}
+
+/**
+ * Encode one exact channel-plan duty for one plane.
+ */
+export function dispatchPostProcessorChannelDuty(device, encoder, state, duty) {
+  if (device !== state?.device) {
+    throw new Error('postprocessor plane state belongs to a different GPUDevice');
+  }
+  if (!duty || duty.plane !== state.plane) {
+    throw new Error(`postprocessor channel duty belongs to plane ${duty?.plane}`);
+  }
+  if (duty.kind === 'gather') {
+    if (duty.stageIndex !== 0 || state.nextStageIndex !== 0 || state.channelStage) {
+      throw new Error(`postprocessor plane ${state.plane} expected gather stage 0`);
+    }
+    return dispatchPostProcessorPlaneStage(device, encoder, state, 0);
+  }
+  if (duty.kind === 'pixel-shuffle-copy') {
+    if (duty.stageIndex !== 5 || state.nextStageIndex !== 5 || state.channelStage) {
+      throw new Error(`postprocessor plane ${state.plane} expected PixelShuffle stage 5`);
+    }
+    return dispatchPostProcessorPlaneStage(device, encoder, state, 5);
+  }
+  if (duty.kind !== 'conv-range') {
+    throw new Error(`unsupported postprocessor channel duty kind ${duty.kind}`);
+  }
+  if (!Number.isSafeInteger(duty.stageIndex)
+      || duty.stageIndex < 1
+      || duty.stageIndex > 4
+      || duty.stageIndex !== state.nextStageIndex) {
+    throw new Error(
+      `postprocessor plane ${state.plane} expected stage ${state.nextStageIndex}, `
+      + `got ${duty.stageIndex}`,
+    );
+  }
+
+  const layerIndex = duty.stageIndex - 1;
+  const totalChannels = POST_PROCESSOR_CONV_OUTPUT_CHANNELS[layerIndex];
+  const isLast = layerIndex === POST_CONFIG.convLayers - 1;
+  if (duty.layerIndex !== layerIndex
+      || duty.totalChannels !== totalChannels
+      || !Number.isSafeInteger(duty.rangeIndex)
+      || !Number.isSafeInteger(duty.rangeCount)
+      || duty.rangeCount <= 0
+      || !Number.isSafeInteger(duty.channelStart)
+      || !Number.isSafeInteger(duty.channelCount)
+      || duty.channelCount <= 0
+      || duty.channelEnd !== duty.channelStart + duty.channelCount
+      || duty.channelEnd > totalChannels) {
+    throw new Error(`invalid postprocessor channel duty for ${duty.stageId}`);
+  }
+
+  if (!state.channelStage) {
+    if (duty.rangeIndex !== 0 || duty.channelStart !== 0) {
+      throw new Error(`postprocessor ${duty.stageId} must begin at output channel 0`);
+    }
+    const input = state.current;
+    if (!input?.buffer) {
+      throw new Error(`postprocessor ${duty.stageId} has no input buffer`);
+    }
+    const outH = Math.floor((input.outH + 2 - 3) / 1) + 1;
+    const outW = Math.floor((input.outW + 2 - 3) / 1) + 1;
+    const outputBuffer = createEmptyBuffer(device, totalChannels * outH * outW * 4);
+    state.channelStage = {
+      layerIndex,
+      stageIndex: duty.stageIndex,
+      stageId: duty.stageId,
+      rangeCount: duty.rangeCount,
+      nextRangeIndex: 0,
+      nextChannelStart: 0,
+      input,
+      outputBuffer,
+      outC: totalChannels,
+      outH,
+      outW,
+    };
+  }
+
+  const active = state.channelStage;
+  if (active.layerIndex !== layerIndex
+      || active.stageIndex !== duty.stageIndex
+      || active.stageId !== duty.stageId
+      || active.rangeCount !== duty.rangeCount
+      || duty.rangeIndex !== active.nextRangeIndex
+      || duty.channelStart !== active.nextChannelStart) {
+    throw new Error(
+      `postprocessor ${duty.stageId} expected range ${active.nextRangeIndex} `
+      + `at channel ${active.nextChannelStart}`,
+    );
+  }
+
+  dispatchConv2dChannelRange(
+    device,
+    encoder,
+    active.input.buffer,
+    state.weights.convLayers[layerIndex].weight,
+    state.weights.convLayers[layerIndex].bias,
+    active.outputBuffer,
+    {
+      inC: active.input.outC,
+      inH: active.input.outH,
+      inW: active.input.outW,
+      outC: totalChannels,
+      kH: 3,
+      kW: 3,
+      padH: 1,
+      padW: 1,
+      strideH: 1,
+      strideW: 1,
+      applyRelu: !isLast,
+    },
+    {
+      channelStart: duty.channelStart,
+      channelCount: duty.channelCount,
+    },
+  );
+  active.nextRangeIndex++;
+  active.nextChannelStart = duty.channelEnd;
+  const rangeComplete = active.nextRangeIndex === active.rangeCount;
+  const channelsComplete = active.nextChannelStart === totalChannels;
+  if (rangeComplete !== channelsComplete) {
+    throw new Error(`postprocessor ${duty.stageId} range count disagrees with channel coverage`);
+  }
+  if (rangeComplete) {
+    state.current = {
+      buffer: active.outputBuffer,
+      outC: totalChannels,
+      outH: active.outH,
+      outW: active.outW,
+    };
+    state.channelStage = null;
+    state.nextStageIndex++;
+  }
+  return {
+    plane: state.plane,
+    stageIndex: duty.stageIndex,
+    stageId: duty.stageId,
+    rangeIndex: duty.rangeIndex,
+    rangeCount: duty.rangeCount,
+    channelStart: duty.channelStart,
+    channelEnd: duty.channelEnd,
+    complete: state.complete,
   };
 }
 

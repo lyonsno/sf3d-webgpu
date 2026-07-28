@@ -6,6 +6,7 @@
  */
 
 import conv2dWGSL from '../shaders/conv2d.wgsl?raw';
+import conv2dChannelRangeWGSL from '../shaders/conv2d_channel_range.wgsl?raw';
 import conv1x1WGSL from '../shaders/conv1x1.wgsl?raw';
 import convTranspose2dWGSL from '../shaders/conv_transpose2d.wgsl?raw';
 import activationsWGSL from '../shaders/activations.wgsl?raw';
@@ -104,6 +105,86 @@ export function dispatchConv2d(device, encoder, inputBuf, weightBuf, biasBuf, pa
   pass.dispatchWorkgroups(ceil(outW, 16), ceil(outH, 16), outC);
   pass.end();
 
+  return { buffer: outputBuf, outC, outH, outW };
+}
+
+/**
+ * Dispatch an exact output-channel range into a caller-owned Conv2d output.
+ */
+export function dispatchConv2dChannelRange(
+  device,
+  encoder,
+  inputBuf,
+  weightBuf,
+  biasBuf,
+  outputBuf,
+  params,
+  range,
+) {
+  const {
+    inC,
+    inH,
+    inW,
+    outC,
+    kH,
+    kW,
+    padH,
+    padW,
+    strideH,
+    strideW,
+  } = params;
+  const { channelStart, channelCount } = range;
+  if (!Number.isSafeInteger(channelStart) || channelStart < 0
+      || !Number.isSafeInteger(channelCount) || channelCount <= 0
+      || channelStart + channelCount > outC) {
+    throw new RangeError(
+      `invalid Conv2d output-channel range ${channelStart}+${channelCount}/${outC}`,
+    );
+  }
+  const outH = Math.floor((inH + 2 * padH - kH) / strideH) + 1;
+  const outW = Math.floor((inW + 2 * padW - kW) / strideW) + 1;
+  const hasBias = biasBuf ? 1 : 0;
+  const pipeline = getOrCreatePipeline(
+    device,
+    'conv2d-channel-range',
+    conv2dChannelRangeWGSL,
+    'conv2d_channel_range_main',
+  );
+  const uniformData = new Uint32Array([
+    inC,
+    inH,
+    inW,
+    outC,
+    outH,
+    outW,
+    kH,
+    kW,
+    padH,
+    padW,
+    strideH,
+    strideW,
+    hasBias,
+    channelStart,
+    channelCount,
+    params.applyRelu === true ? 1 : 0,
+  ]);
+  const uniformBuf = cachedUniform(device, uniformData);
+  const dummyBias = biasBuf || getDummyBias(device);
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuf } },
+      { binding: 1, resource: { buffer: inputBuf } },
+      { binding: 2, resource: { buffer: weightBuf } },
+      { binding: 3, resource: { buffer: dummyBias } },
+      { binding: 4, resource: { buffer: outputBuf } },
+    ],
+  });
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(ceil(outW, 16), ceil(outH, 16), channelCount);
+  pass.end();
   return { buffer: outputBuf, outC, outH, outW };
 }
 

@@ -208,9 +208,18 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     ? 'disabled'
     : 'cooperative';
   const postProcessorDutyGranularity = options.postProcessorDutyGranularity ?? 'plane';
-  if (!['plane', 'layer'].includes(postProcessorDutyGranularity)) {
+  if (!['plane', 'layer', 'channel-range'].includes(postProcessorDutyGranularity)) {
     throw new RangeError(
-      `postProcessorDutyGranularity must be plane or layer, got ${postProcessorDutyGranularity}`,
+      `postProcessorDutyGranularity must be plane, layer, or channel-range, `
+      + `got ${postProcessorDutyGranularity}`,
+    );
+  }
+  const postProcessorChannelsPerDuty = options.postProcessorChannelsPerDuty ?? 16;
+  if (!Number.isSafeInteger(postProcessorChannelsPerDuty)
+      || postProcessorChannelsPerDuty <= 0) {
+    throw new TypeError(
+      `postProcessorChannelsPerDuty must be a positive safe integer, `
+      + `got ${postProcessorChannelsPerDuty}`,
     );
   }
   // Surfaced back to the caller/smoke via the returned _cooperativeReports.
@@ -511,7 +520,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   _stageStart = performance.now();
   let triplaneResult;
   if (cooperativePostProcessor) {
-    const progressUnit = postProcessorDutyGranularity === 'layer' ? 'duties' : 'planes';
+    const progressUnit = postProcessorDutyGranularity === 'plane' ? 'planes' : 'duties';
     report(
       `Running post-processor (cooperative, ${postProcessorSchedulingMode}, `
       + `${postProcessorDutyGranularity})...`,
@@ -522,6 +531,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       weights: weights.postProcessor,
       schedulingMode: postProcessorSchedulingMode,
       dutyGranularity: postProcessorDutyGranularity,
+      channelsPerDuty: postProcessorChannelsPerDuty,
       signal: options.signal,
       onProgress: (p) => {
         if (p.percent != null) {

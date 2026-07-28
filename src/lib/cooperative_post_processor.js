@@ -15,8 +15,10 @@ import { createSf3dCooperativeRuntime, SF3D_ROUTE_ID } from './cooperative_dino.
 import {
   createPostProcessorOutput,
   createPostProcessorPlaneState,
+  dispatchPostProcessorChannelDuty,
   dispatchPostProcessorPlane,
   dispatchPostProcessorPlaneStage,
+  POST_PROCESSOR_CONV_OUTPUT_CHANNELS,
   POST_PROCESSOR_PLANE_STAGE_IDS,
 } from './post_processor.js';
 
@@ -26,9 +28,92 @@ export const POST_PROCESSOR_PLANE_COUNT = 3;
 export const POST_PROCESSOR_LAYER_MANIFEST_ID =
   'sf3d.post-processor-layer-cooperative-boundaries.v0';
 export const POST_PROCESSOR_LAYER_BOUNDARY_ID = 'post-processor-triplane-stages';
+export const POST_PROCESSOR_CHANNEL_MANIFEST_ID =
+  'sf3d.post-processor-channel-cooperative-boundaries.v0';
+export const POST_PROCESSOR_CHANNEL_BOUNDARY_ID =
+  'post-processor-triplane-channel-ranges';
 export { POST_PROCESSOR_PLANE_STAGE_IDS };
 export const POST_PROCESSOR_LAYER_DUTY_COUNT =
   POST_PROCESSOR_PLANE_COUNT * POST_PROCESSOR_PLANE_STAGE_IDS.length;
+
+function buildPostProcessorChannelDutyPlan(channelsPerDuty) {
+  const duties = [];
+  for (let plane = 0; plane < POST_PROCESSOR_PLANE_COUNT; plane++) {
+    duties.push({
+      plane,
+      kind: 'gather',
+      stageIndex: 0,
+      stageId: POST_PROCESSOR_PLANE_STAGE_IDS[0],
+    });
+    for (let layerIndex = 0; layerIndex < POST_PROCESSOR_CONV_OUTPUT_CHANNELS.length; layerIndex++) {
+      const totalChannels = POST_PROCESSOR_CONV_OUTPUT_CHANNELS[layerIndex];
+      const rangeCount = Math.ceil(totalChannels / channelsPerDuty);
+      for (let rangeIndex = 0; rangeIndex < rangeCount; rangeIndex++) {
+        const channelStart = rangeIndex * channelsPerDuty;
+        const channelEnd = Math.min(totalChannels, channelStart + channelsPerDuty);
+        duties.push({
+          plane,
+          kind: 'conv-range',
+          stageIndex: layerIndex + 1,
+          stageId: POST_PROCESSOR_PLANE_STAGE_IDS[layerIndex + 1],
+          layerIndex,
+          rangeIndex,
+          rangeCount,
+          channelStart,
+          channelCount: channelEnd - channelStart,
+          channelEnd,
+          totalChannels,
+        });
+      }
+    }
+    duties.push({
+      plane,
+      kind: 'pixel-shuffle-copy',
+      stageIndex: POST_PROCESSOR_PLANE_STAGE_IDS.length - 1,
+      stageId: POST_PROCESSOR_PLANE_STAGE_IDS.at(-1),
+    });
+  }
+  const totalDuties = duties.length;
+  return Object.freeze({
+    channelsPerDuty,
+    duties: Object.freeze(duties.map((duty, dutyIndex) => Object.freeze({
+      ...duty,
+      dutyIndex,
+      totalDuties,
+      channelsPerDuty,
+    }))),
+  });
+}
+
+export function createPostProcessorChannelDutyPlan(channelsPerDuty) {
+  if (!Number.isSafeInteger(channelsPerDuty) || channelsPerDuty <= 0) {
+    throw new TypeError('channelsPerDuty must be a positive safe integer');
+  }
+  return buildPostProcessorChannelDutyPlan(channelsPerDuty);
+}
+
+function requireExactPostProcessorChannelDutyPlan(plan) {
+  if (!plan || !Number.isSafeInteger(plan.channelsPerDuty) || plan.channelsPerDuty <= 0
+      || !Array.isArray(plan.duties)) {
+    throw new TypeError('invalid postprocessor channel duty plan');
+  }
+  const expected = buildPostProcessorChannelDutyPlan(plan.channelsPerDuty);
+  if (plan.duties.length !== expected.duties.length) {
+    throw new Error('postprocessor channel duty plan has the wrong duty count');
+  }
+  for (let index = 0; index < expected.duties.length; index++) {
+    const actualDuty = plan.duties[index];
+    const expectedDuty = expected.duties[index];
+    for (const key of Object.keys(expectedDuty)) {
+      if (actualDuty?.[key] !== expectedDuty[key]) {
+        throw new Error(
+          `postprocessor channel duty plan mismatch at duty ${index} field ${key}`,
+        );
+      }
+    }
+  }
+  return expected;
+}
 
 export function definePostProcessorManifest(numPlanes = POST_PROCESSOR_PLANE_COUNT) {
   if (!Number.isSafeInteger(numPlanes) || numPlanes <= 0) {
@@ -97,6 +182,45 @@ export function definePostProcessorLayerManifest() {
       },
     ],
     metadata: { source: 'sf3d-webgpu-cooperative-post-processor-layers' },
+  });
+}
+
+export function definePostProcessorChannelManifest(channelsPerDuty) {
+  const plan = createPostProcessorChannelDutyPlan(channelsPerDuty);
+  return defineWebGpuCooperativeBoundaryManifest({
+    manifestId: POST_PROCESSOR_CHANNEL_MANIFEST_ID,
+    routeId: SF3D_ROUTE_ID,
+    phases: [
+      {
+        phaseId: 'triplane-post-processor',
+        boundaries: [
+          {
+            boundaryId: POST_PROCESSOR_CHANNEL_BOUNDARY_ID,
+            kind: 'gpu-command',
+            unit: 'post-processor-channel-duty',
+            totalItems: plan.duties.length,
+            progressWeight: plan.duties.length,
+            commandDutyKind: 'compute',
+            chunking: { mode: 'fixed', chunkItems: 1 },
+            yieldPolicy: 'after-duty',
+            resources: {
+              retain: [
+                'triplane.low-resolution',
+                'post-processor.weights',
+                'post-processor.intermediates',
+              ],
+              produce: ['triplane.high-resolution'],
+              release: [],
+            },
+            metadata: { channelsPerDuty },
+          },
+        ],
+      },
+    ],
+    metadata: {
+      source: 'sf3d-webgpu-cooperative-post-processor-channels',
+      channelsPerDuty,
+    },
   });
 }
 
@@ -217,6 +341,72 @@ export async function drivePostProcessorLayerBoundary(cooperative, options) {
   };
 }
 
+export async function drivePostProcessorChannelBoundary(cooperative, options) {
+  const {
+    plan: suppliedPlan,
+    encodeDuty,
+    submitDuty,
+    now = () => globalThis.performance?.now?.() ?? Date.now(),
+  } = options;
+  const plan = requireExactPostProcessorChannelDutyPlan(suppliedPlan);
+  const gpu = cooperative.startBoundary(POST_PROCESSOR_CHANNEL_BOUNDARY_ID);
+  const telemetry = [];
+
+  for (const duty of plan.duties) {
+    const range = gpu.nextRange();
+    if (!range) {
+      throw new Error(
+        `cooperative postprocessor exhausted ranges before channel duty ${duty.dutyIndex}`,
+      );
+    }
+    if (range.itemStart !== duty.dutyIndex || range.itemEnd !== duty.dutyIndex + 1) {
+      throw new Error(
+        `cooperative postprocessor range ${range.itemStart}-${range.itemEnd} `
+        + `does not match channel duty ${duty.dutyIndex}`,
+      );
+    }
+    const timing = {
+      ...duty,
+      dutyStartedAtMs: now(),
+      encodeStartedAtMs: null,
+      encodeCompletedAtMs: null,
+      submitStartedAtMs: null,
+      submitCompletedAtMs: null,
+      dutyCompletedAtMs: null,
+      encodeMs: null,
+      submitMs: null,
+      dutyMs: null,
+    };
+    await gpu.runGpuDuty(range, {
+      encode: () => {
+        timing.encodeStartedAtMs = now();
+        const commandBuffer = encodeDuty(duty, range);
+        timing.encodeCompletedAtMs = now();
+        timing.encodeMs = timing.encodeCompletedAtMs - timing.encodeStartedAtMs;
+        return commandBuffer;
+      },
+      submit: commandBuffer => {
+        timing.submitStartedAtMs = now();
+        const result = submitDuty(commandBuffer, duty, range);
+        timing.submitCompletedAtMs = now();
+        timing.submitMs = timing.submitCompletedAtMs - timing.submitStartedAtMs;
+        return result;
+      },
+    });
+    timing.dutyCompletedAtMs = now();
+    timing.dutyMs = timing.dutyCompletedAtMs - timing.dutyStartedAtMs;
+    telemetry.push(Object.freeze(timing));
+  }
+  if (gpu.nextRange() != null) {
+    throw new Error('cooperative postprocessor left channel ranges unconsumed');
+  }
+  return {
+    completedDuties: telemetry.length,
+    totalDuties: plan.duties.length,
+    telemetry: Object.freeze(telemetry),
+  };
+}
+
 export async function runCooperativePostProcessor(options) {
   const {
     device,
@@ -224,16 +414,25 @@ export async function runCooperativePostProcessor(options) {
     weights,
     schedulingMode = 'cooperative',
     dutyGranularity = 'plane',
+    channelsPerDuty = 16,
     onProgress,
     signal,
     invocationId = `sf3d:post-processor:${schedulingMode}`,
   } = options;
-  if (!['plane', 'layer'].includes(dutyGranularity)) {
+  if (!['plane', 'layer', 'channel-range'].includes(dutyGranularity)) {
     throw new RangeError(`unsupported postprocessor duty granularity: ${dutyGranularity}`);
   }
-  const manifest = dutyGranularity === 'layer'
-    ? definePostProcessorLayerManifest()
-    : definePostProcessorManifest();
+  if (!Number.isSafeInteger(channelsPerDuty) || channelsPerDuty <= 0) {
+    throw new TypeError('channelsPerDuty must be a positive safe integer');
+  }
+  const channelPlan = dutyGranularity === 'channel-range'
+    ? createPostProcessorChannelDutyPlan(channelsPerDuty)
+    : null;
+  const manifest = dutyGranularity === 'channel-range'
+    ? definePostProcessorChannelManifest(channelsPerDuty)
+    : dutyGranularity === 'layer'
+      ? definePostProcessorLayerManifest()
+      : definePostProcessorManifest();
   const queueFences = [];
   const browserYields = [];
   const runtime = createSf3dCooperativeRuntime(device, {
@@ -252,6 +451,39 @@ export async function runCooperativePostProcessor(options) {
   let dutyTelemetry = [];
 
   await execution.run(async (cooperative) => {
+    if (dutyGranularity === 'channel-range') {
+      const planeStates = Array(output.numPlanes).fill(null);
+      const driven = await drivePostProcessorChannelBoundary(cooperative, {
+        plan: channelPlan,
+        encodeDuty(duty) {
+          if (!planeStates[duty.plane]) {
+            planeStates[duty.plane] = createPostProcessorPlaneState(
+              device,
+              triplanesBuf,
+              weights,
+              output,
+              duty.plane,
+            );
+          }
+          const encoder = device.createCommandEncoder({
+            label: `post-processor-plane-${duty.plane}-${duty.stageId}`
+              + (duty.kind === 'conv-range' ? `-${duty.rangeIndex}` : ''),
+          });
+          dispatchPostProcessorChannelDuty(
+            device,
+            encoder,
+            planeStates[duty.plane],
+            duty,
+          );
+          return encoder.finish();
+        },
+        submitDuty(commandBuffer) {
+          runtime.queue.submit([commandBuffer]);
+        },
+      });
+      dutyTelemetry = driven.telemetry;
+      return;
+    }
     if (dutyGranularity === 'layer') {
       const planeStates = Array(output.numPlanes).fill(null);
       const driven = await drivePostProcessorLayerBoundary(cooperative, {
@@ -313,6 +545,7 @@ export async function runCooperativePostProcessor(options) {
       ...report,
       adapterTelemetry: Object.freeze({
         dutyGranularity,
+        channelsPerDuty: dutyGranularity === 'channel-range' ? channelsPerDuty : null,
         stageDuties: Object.freeze(dutyTelemetry),
         queueFences: Object.freeze(queueFences),
         browserYields: Object.freeze(browserYields),
