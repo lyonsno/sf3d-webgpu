@@ -19,6 +19,7 @@ import { callWorker } from './worker_call.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
 import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
+import { runCooperativeTwoStream } from './cooperative_two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
 import { runCooperativePostProcessor } from './cooperative_post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
@@ -184,6 +185,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     ? options.dinoChunkBlocks
     : 1;
   const cooperativePostProcessor = options.cooperativePostProcessor === true;
+  const cooperativeTwoStream = options.cooperativeTwoStream === true;
+  const twoStreamSchedulingMode = options.twoStreamSchedulingMode === 'disabled'
+    ? 'disabled'
+    : 'cooperative';
   const postProcessorSchedulingMode = options.postProcessorSchedulingMode === 'disabled'
     ? 'disabled'
     : 'cooperative';
@@ -404,11 +409,34 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   if (DEBUG) device.pushErrorScope('validation');
 
-  const encoder3 = device.createCommandEncoder();
-
-  const backboneResult = pipelines.twoStream.forward(
-    encoder3, dinov2Result.tokensBuf, dinov2Result.N, weights.backbone);
-  device.queue.submit([encoder3.finish()]);
+  let backboneResult;
+  if (cooperativeTwoStream) {
+    report(`Running two-stream backbone (cooperative, ${twoStreamSchedulingMode})...`);
+    const { result, report: twoStreamReport } = await runCooperativeTwoStream({
+      device,
+      backbone: pipelines.twoStream,
+      imageTokensBuf: dinov2Result.tokensBuf,
+      N_img: dinov2Result.N,
+      weights: weights.backbone,
+      schedulingMode: twoStreamSchedulingMode,
+      signal: options.signal,
+      onProgress: (p) => {
+        if (p.percent != null) {
+          report(
+            `Two-stream duties ${p.completedItems}/${p.totalItems} `
+            + `(${p.percent.toFixed(0)}%)`,
+          );
+        }
+      },
+    });
+    backboneResult = result;
+    _cooperativeReports['two-stream-backbone'] = twoStreamReport;
+  } else {
+    const encoder3 = device.createCommandEncoder();
+    backboneResult = pipelines.twoStream.forward(
+      encoder3, dinov2Result.tokensBuf, dinov2Result.N, weights.backbone);
+    device.queue.submit([encoder3.finish()]);
+  }
 
   if (DEBUG) {
     const bbError = await device.popErrorScope();
