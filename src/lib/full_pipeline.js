@@ -11,6 +11,7 @@
  * `options` is forwarded to runInference (e.g. { cooperativeDino,
  * dinoSchedulingMode, dinoChunkBlocks, cooperativePostProcessor,
  * postProcessorSchedulingMode, postProcessorDutyGranularity,
+ * postProcessorChannelsPerDuty,
  * captureDinoPayload }), so a capsule can select cooperative execution per arm
  * while the rest of the route stays identical.
  */

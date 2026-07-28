@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Real-browser A/B/C for SF3D postprocessor command boundaries.
+ * Real-browser A/B/C/D for SF3D postprocessor command boundaries.
  *
  * Both arms execute the same complete image-to-GLB route. The control keeps the
  * postprocessor in one command buffer; the plane arm submits three independent
  * planes; the layer arm submits the eighteen dependency-safe gather/conv/
- * PixelShuffle duties. The witness requires byte-identical GLBs and reports
+ * PixelShuffle duties. The channel arm splits every convolution into exact
+ * caller-selected output-channel ranges. The witness requires byte-identical GLBs and reports
  * wall/cadence only for the exact postprocessor span, while preserving
  * route/source/backend identities and writing a failure report at every
  * terminal path.
@@ -16,6 +17,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
+import { evaluatePostProcessorSmokeAcceptance } from './post_processor_smoke_acceptance.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -35,6 +37,8 @@ const REPORT_PATH = path.resolve(argValue(
   '--report',
   '/tmp/sf3d-cooperative-post-processor-ab.json',
 ));
+const CHANNELS_PER_DUTY = Number(argValue('--channels-per-duty', '16'));
+const ARM_SELECTION = argValue('--arms', 'all');
 const ALLOW_DIRTY_SOURCE = process.argv.includes('--allow-dirty-source');
 const WEIGHTS = path.join(REPO, 'public', 'weights.bin');
 const processes = [];
@@ -77,7 +81,7 @@ function cleanup() {
 
 function writeFailure(error, phase, details = null) {
   const report = {
-    schema: 'sf3d.cooperative-post-processor-abc.v1',
+    schema: 'sf3d.cooperative-post-processor-abcd.v1',
     ok: false,
     failure: {
       phase,
@@ -133,6 +137,14 @@ try {
     new Error(`dirty source requires --allow-dirty-source; diff=${source.dirtyDiffSha256}`),
     'source-identity',
   );
+  if (!Number.isSafeInteger(CHANNELS_PER_DUTY) || CHANNELS_PER_DUTY <= 0) fail(
+    new Error('--channels-per-duty must be a positive safe integer'),
+    'argument-parse',
+  );
+  if (!['all', 'pair', 'channel'].includes(ARM_SELECTION)) fail(
+    new Error('--arms must be all, pair, or channel'),
+    'argument-parse',
+  );
   if (!fs.existsSync(IMAGE)) fail(new Error(`missing input image ${IMAGE}`), 'input');
   if (!fs.existsSync(WEIGHTS)) fail(new Error(`missing model weights ${WEIGHTS}`), 'weights');
 
@@ -160,7 +172,18 @@ try {
         postProcessorSchedulingMode: 'cooperative',
         postProcessorDutyGranularity: 'layer',
       },
-    ],
+      {
+        name: 'channel-range-cooperative',
+        cooperativePostProcessor: true,
+        postProcessorSchedulingMode: 'cooperative',
+        postProcessorDutyGranularity: 'channel-range',
+        postProcessorChannelsPerDuty: CHANNELS_PER_DUTY,
+      },
+    ].filter((arm) => ARM_SELECTION === 'all'
+      || (ARM_SELECTION === 'pair'
+        && ['monolithic-control', 'channel-range-cooperative'].includes(arm.name))
+      || (ARM_SELECTION === 'channel' && arm.name === 'channel-range-cooperative')),
+    armSelection: ARM_SELECTION,
   };
   lastTrustworthyEvidence = { phase: 'route-identity', routeIdentity };
 
@@ -254,7 +277,7 @@ try {
     });
   }, imageBase64);
 
-  const arms = await page.evaluate(async () => {
+  const arms = await page.evaluate(async ({ channelsPerDuty, armSelection }) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const device = window._sf3d_device;
     const pipelines = window._sf3d_pipelines;
@@ -333,74 +356,145 @@ try {
       };
     }
 
-    const control = await runArm('monolithic-control', {
-      cooperativeDino: false,
-      cooperativePostProcessor: false,
-    });
-    const plane = await runArm('three-plane-cooperative', {
+    const control = armSelection === 'all' || armSelection === 'pair'
+      ? await runArm('monolithic-control', {
+        cooperativeDino: false,
+        cooperativePostProcessor: false,
+      })
+      : null;
+    const plane = armSelection === 'all'
+      ? await runArm('three-plane-cooperative', {
+        cooperativeDino: false,
+        cooperativePostProcessor: true,
+        postProcessorSchedulingMode: 'cooperative',
+        postProcessorDutyGranularity: 'plane',
+      })
+      : null;
+    const candidate = armSelection === 'all'
+      ? await runArm('eighteen-stage-cooperative', {
+        cooperativeDino: false,
+        cooperativePostProcessor: true,
+        postProcessorSchedulingMode: 'cooperative',
+        postProcessorDutyGranularity: 'layer',
+      })
+      : null;
+    const channel = await runArm('channel-range-cooperative', {
       cooperativeDino: false,
       cooperativePostProcessor: true,
       postProcessorSchedulingMode: 'cooperative',
-      postProcessorDutyGranularity: 'plane',
+      postProcessorDutyGranularity: 'channel-range',
+      postProcessorChannelsPerDuty: channelsPerDuty,
     });
-    const candidate = await runArm('eighteen-stage-cooperative', {
-      cooperativeDino: false,
-      cooperativePostProcessor: true,
-      postProcessorSchedulingMode: 'cooperative',
-      postProcessorDutyGranularity: 'layer',
-    });
-    return { control, plane, candidate };
-  });
+    return { control, plane, candidate, channel };
+  }, { channelsPerDuty: CHANNELS_PER_DUTY, armSelection: ARM_SELECTION });
 
   lastTrustworthyEvidence = { phase: 'browser-arms', routeIdentity, arms };
   if (pageErrors.length) fail(
     new Error(`page errors: ${pageErrors.join(' | ')}`),
     'browser-arms',
   );
-  const outputIdentical = arms.control.glbSha256 === arms.plane.glbSha256
-    && arms.control.glbSha256 === arms.candidate.glbSha256
-    && arms.control.glbBytes === arms.plane.glbBytes
-    && arms.control.glbBytes === arms.candidate.glbBytes
-    && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.plane.mesh)
-    && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.candidate.mesh);
-  const cooperativeComplete = arms.candidate.cooperative?.status === 'succeeded'
+  const outputIdentical = arms.control
+    ? arms.control.glbSha256 === arms.channel.glbSha256
+      && arms.control.glbBytes === arms.channel.glbBytes
+      && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.channel.mesh)
+      && (!arms.plane || (
+        arms.control.glbSha256 === arms.plane.glbSha256
+        && arms.control.glbBytes === arms.plane.glbBytes
+        && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.plane.mesh)
+      ))
+      && (!arms.candidate || (
+        arms.control.glbSha256 === arms.candidate.glbSha256
+        && arms.control.glbBytes === arms.candidate.glbBytes
+        && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.candidate.mesh)
+      ))
+    : null;
+  const layerComplete = !arms.candidate || (arms.candidate.cooperative?.status === 'succeeded'
     && arms.candidate.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence'
     && arms.candidate.cooperative?.completedItems === 18
     && arms.candidate.cooperative?.totalItems === 18
     && arms.candidate.cooperative?.rangeCount === 18
     && arms.candidate.cooperative?.adapterTelemetry?.stageDuties?.length === 18
     && arms.candidate.cooperative?.adapterTelemetry?.queueFences?.length === 18
-    && arms.candidate.cooperative?.adapterTelemetry?.browserYields?.length === 18;
-  const progressHonest = arms.candidate.progress.some(
+    && arms.candidate.cooperative?.adapterTelemetry?.browserYields?.length === 18);
+  const layerProgressHonest = !arms.candidate || arms.candidate.progress.some(
     (message) => /Post-processor duties 18\/18 \(100%\)/.test(message),
   );
+  const expectedChannelDuties = 3 * (
+    2
+    + 3 * Math.ceil(1024 / CHANNELS_PER_DUTY)
+    + Math.ceil(640 / CHANNELS_PER_DUTY)
+  );
+  const channelComplete = arms.channel.cooperative?.status === 'succeeded'
+    && arms.channel.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence'
+    && arms.channel.cooperative?.completedItems === expectedChannelDuties
+    && arms.channel.cooperative?.totalItems === expectedChannelDuties
+    && arms.channel.cooperative?.rangeCount === expectedChannelDuties
+    && arms.channel.cooperative?.adapterTelemetry?.channelsPerDuty === CHANNELS_PER_DUTY
+    && arms.channel.cooperative?.adapterTelemetry?.stageDuties?.length === expectedChannelDuties
+    && arms.channel.cooperative?.adapterTelemetry?.queueFences?.length === expectedChannelDuties
+    && arms.channel.cooperative?.adapterTelemetry?.browserYields?.length === expectedChannelDuties;
+  const channelProgressHonest = arms.channel.progress.some(
+    (message) => new RegExp(
+      `Post-processor duties ${expectedChannelDuties}/${expectedChannelDuties} \\(100%\\)`,
+    ).test(message),
+  );
+  const cooperativeComplete = layerComplete && channelComplete;
+  const progressHonest = layerProgressHonest && channelProgressHonest;
+  const acceptance = evaluatePostProcessorSmokeAcceptance({
+    armSelection: ARM_SELECTION,
+    outputIdentical,
+    cooperativeComplete,
+    progressHonest,
+  });
   const report = {
-    schema: 'sf3d.cooperative-post-processor-abc.v1',
-    ok: outputIdentical && cooperativeComplete && progressHonest,
+    schema: 'sf3d.cooperative-post-processor-abcd.v1',
+    ok: acceptance.ok,
+    paired: acceptance.paired,
     routeIdentity,
     evidenceAuthority: source.clean ? 'clean-commit' : 'explicit-dirty-diff',
     outputIdentical,
     cooperativeComplete,
     progressHonest,
+    expectedChannelDuties,
     deltas: {
-      fullRouteWallMs: arms.candidate.fullRouteWallMs - arms.control.fullRouteWallMs,
-      postProcessorWallMs:
-        arms.candidate.postProcessor.wallMs - arms.control.postProcessor.wallMs,
-      maxGapMs: arms.candidate.postProcessor.maxGapMs - arms.control.postProcessor.maxGapMs,
-      layerVersusPlane: {
+      fullRouteWallMs: arms.candidate && arms.control
+        ? arms.candidate.fullRouteWallMs - arms.control.fullRouteWallMs
+        : null,
+      postProcessorWallMs: arms.candidate && arms.control
+        ? arms.candidate.postProcessor.wallMs - arms.control.postProcessor.wallMs
+        : null,
+      maxGapMs: arms.candidate && arms.control
+        ? arms.candidate.postProcessor.maxGapMs - arms.control.postProcessor.maxGapMs
+        : null,
+      layerVersusPlane: arms.candidate && arms.plane ? {
         fullRouteWallMs: arms.candidate.fullRouteWallMs - arms.plane.fullRouteWallMs,
         postProcessorWallMs:
           arms.candidate.postProcessor.wallMs - arms.plane.postProcessor.wallMs,
         maxGapMs: arms.candidate.postProcessor.maxGapMs - arms.plane.postProcessor.maxGapMs,
-      },
+      } : null,
+      channelVersusControl: arms.control ? {
+        fullRouteWallMs: arms.channel.fullRouteWallMs - arms.control.fullRouteWallMs,
+        postProcessorWallMs:
+          arms.channel.postProcessor.wallMs - arms.control.postProcessor.wallMs,
+        maxGapMs: arms.channel.postProcessor.maxGapMs - arms.control.postProcessor.maxGapMs,
+      } : null,
+      channelVersusLayer: arms.candidate ? {
+        fullRouteWallMs: arms.channel.fullRouteWallMs - arms.candidate.fullRouteWallMs,
+        postProcessorWallMs:
+          arms.channel.postProcessor.wallMs - arms.candidate.postProcessor.wallMs,
+        maxGapMs: arms.channel.postProcessor.maxGapMs - arms.candidate.postProcessor.maxGapMs,
+      } : null,
     },
     arms,
   };
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
 
-  console.log('\n=== SF3D cooperative postprocessor A/B/C ===');
-  console.log(`output identical: ${outputIdentical} (${arms.control.glbSha256.slice(0, 12)}...)`);
-  for (const arm of [arms.control, arms.plane, arms.candidate]) {
+  console.log('\n=== SF3D cooperative postprocessor A/B/C/D ===');
+  console.log(
+    `output identical: ${outputIdentical} `
+    + `(${(arms.control ?? arms.channel).glbSha256.slice(0, 12)}...)`,
+  );
+  for (const arm of [arms.control, arms.plane, arms.candidate, arms.channel].filter(Boolean)) {
     console.log(
       `${arm.name}: full=${arm.fullRouteWallMs.toFixed(1)}ms `
       + `post=${arm.postProcessor.wallMs.toFixed(1)}ms `
@@ -409,18 +503,28 @@ try {
       + `max=${arm.postProcessor.maxGapMs?.toFixed(1)}ms`,
     );
   }
-  console.log(
+  if (report.deltas.fullRouteWallMs != null) console.log(
     `layer-control delta: full=${report.deltas.fullRouteWallMs.toFixed(1)}ms `
-    + `post=${report.deltas.postProcessorWallMs.toFixed(1)}ms `
-    + `maxGap=${report.deltas.maxGapMs.toFixed(1)}ms`,
+      + `post=${report.deltas.postProcessorWallMs.toFixed(1)}ms `
+      + `maxGap=${report.deltas.maxGapMs.toFixed(1)}ms`,
   );
-  console.log(
+  if (report.deltas.channelVersusControl) console.log(
+    `channel-control delta: full=${report.deltas.channelVersusControl.fullRouteWallMs.toFixed(1)}ms `
+      + `post=${report.deltas.channelVersusControl.postProcessorWallMs.toFixed(1)}ms `
+      + `maxGap=${report.deltas.channelVersusControl.maxGapMs.toFixed(1)}ms`,
+  );
+  if (report.deltas.channelVersusLayer) console.log(
+    `channel-layer delta: full=${report.deltas.channelVersusLayer.fullRouteWallMs.toFixed(1)}ms `
+      + `post=${report.deltas.channelVersusLayer.postProcessorWallMs.toFixed(1)}ms `
+      + `maxGap=${report.deltas.channelVersusLayer.maxGapMs.toFixed(1)}ms`,
+  );
+  if (report.deltas.layerVersusPlane) console.log(
     `layer-plane delta: full=${report.deltas.layerVersusPlane.fullRouteWallMs.toFixed(1)}ms `
-    + `post=${report.deltas.layerVersusPlane.postProcessorWallMs.toFixed(1)}ms `
-    + `maxGap=${report.deltas.layerVersusPlane.maxGapMs.toFixed(1)}ms`,
+      + `post=${report.deltas.layerVersusPlane.postProcessorWallMs.toFixed(1)}ms `
+      + `maxGap=${report.deltas.layerVersusPlane.maxGapMs.toFixed(1)}ms`,
   );
   console.log(`report: ${REPORT_PATH}`);
-  if (!report.ok) fail(
+  if (acceptance.paired && !report.ok) fail(
     new Error(
       `acceptance failed: identical=${outputIdentical} `
       + `cooperativeComplete=${cooperativeComplete} progressHonest=${progressHonest}`,
