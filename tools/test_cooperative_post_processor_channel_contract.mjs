@@ -7,6 +7,8 @@
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   POST_PROCESSOR_CHANNEL_BOUNDARY_ID,
@@ -17,6 +19,22 @@ import {
 import {
   evaluatePostProcessorSmokeAcceptance,
 } from './post_processor_smoke_acceptance.mjs';
+import {
+  readJsonReport,
+  writeJsonReportAtomic,
+} from './json_report_atomic.mjs';
+
+const reportDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sf3d-post-report-'));
+try {
+  const reportPath = path.join(reportDirectory, 'report.json');
+  fs.writeFileSync(reportPath, '');
+  writeJsonReportAtomic(reportPath, { schema: 'test', ok: true });
+  assert.deepEqual(readJsonReport(reportPath), { schema: 'test', ok: true });
+  assert.deepEqual(fs.readdirSync(reportDirectory), ['report.json']);
+} finally {
+  fs.rmSync(reportDirectory, { recursive: true, force: true });
+}
+console.log('ok  atomic report replacement cannot inherit a stale empty artifact');
 
 const conv2dChannelRangeWGSL = fs.readFileSync(
   new URL('../src/shaders/conv2d_channel_range.wgsl', import.meta.url),

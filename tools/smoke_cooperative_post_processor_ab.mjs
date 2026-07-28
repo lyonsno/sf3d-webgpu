@@ -17,6 +17,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
+import { readJsonReport, writeJsonReportAtomic } from './json_report_atomic.mjs';
 import { evaluatePostProcessorSmokeAcceptance } from './post_processor_smoke_acceptance.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
@@ -51,6 +52,7 @@ const WEIGHTS = path.join(REPO, 'public', 'weights.bin');
 const processes = [];
 let browser = null;
 let lastTrustworthyEvidence = { phase: 'argument-parse' };
+let reportFinalized = false;
 
 function git(args, options = {}) {
   return execFileSync('git', args, { cwd: REPO, encoding: 'utf8', ...options }).trim();
@@ -124,7 +126,7 @@ async function closeOwnedBrowser() {
 
 function appendTeardown(teardown) {
   if (!fs.existsSync(REPORT_PATH)) return;
-  const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf8'));
+  const report = readJsonReport(REPORT_PATH);
   report.teardown = teardown;
   if (teardown.status === 'failed') {
     report.primaryAcceptanceOk = report.ok;
@@ -136,7 +138,7 @@ function appendTeardown(teardown) {
     };
     process.exitCode = 1;
   }
-  fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+  writeJsonReportAtomic(REPORT_PATH, report);
 }
 
 function writeFailure(error, phase, details = null) {
@@ -150,7 +152,8 @@ function writeFailure(error, phase, details = null) {
     },
     lastTrustworthyEvidence,
   };
-  fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+  writeJsonReportAtomic(REPORT_PATH, report);
+  reportFinalized = true;
   return report;
 }
 
@@ -183,6 +186,12 @@ function sha256File(file) {
 }
 
 try {
+  writeJsonReportAtomic(REPORT_PATH, {
+    schema: 'sf3d.cooperative-post-processor-abcd.v1',
+    ok: false,
+    status: 'running',
+    lastTrustworthyEvidence,
+  });
   const source = sourceIdentity();
   lastTrustworthyEvidence = { phase: 'source-identity', source };
   if (!EXPECTED_REVISION) fail(
@@ -581,7 +590,8 @@ try {
     },
     arms,
   };
-  fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+  writeJsonReportAtomic(REPORT_PATH, report);
+  reportFinalized = true;
 
   console.log('\n=== SF3D cooperative postprocessor A/B/C/D ===');
   console.log(
@@ -628,9 +638,15 @@ try {
     report,
   );
 } catch (error) {
-  if (!fs.existsSync(REPORT_PATH)) writeFailure(error, 'exception');
+  if (!reportFinalized) writeFailure(error, 'exception');
   process.exitCode = 1;
 } finally {
-  appendTeardown(await closeOwnedBrowser());
-  cleanup();
+  try {
+    appendTeardown(await closeOwnedBrowser());
+  } catch (error) {
+    writeFailure(error, 'report-finalization');
+    process.exitCode = 1;
+  } finally {
+    cleanup();
+  }
 }
