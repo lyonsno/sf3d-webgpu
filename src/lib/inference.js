@@ -196,6 +196,14 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       + `got ${twoStreamDutyGranularity}`,
     );
   }
+  const twoStreamLinearRowsPerDuty = options.twoStreamLinearRowsPerDuty ?? 128;
+  if (!Number.isSafeInteger(twoStreamLinearRowsPerDuty)
+    || twoStreamLinearRowsPerDuty <= 0) {
+    throw new TypeError(
+      `twoStreamLinearRowsPerDuty must be a positive safe integer, `
+      + `got ${twoStreamLinearRowsPerDuty}`,
+    );
+  }
   const postProcessorSchedulingMode = options.postProcessorSchedulingMode === 'disabled'
     ? 'disabled'
     : 'cooperative';
@@ -430,6 +438,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       weights: weights.backbone,
       schedulingMode: twoStreamSchedulingMode,
       dutyGranularity: twoStreamDutyGranularity,
+      linearRowsPerDuty: twoStreamLinearRowsPerDuty,
       signal: options.signal,
       onProgress: (p) => {
         if (p.percent != null) {

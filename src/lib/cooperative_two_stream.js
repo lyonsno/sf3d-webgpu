@@ -28,12 +28,13 @@ export function defineTwoStreamManifest(options = {}) {
   const {
     dutyGranularity = 'stage',
     N_img,
+    linearRowsPerDuty = 128,
   } = options;
   if (!['stage', 'attention-tile'].includes(dutyGranularity)) {
     throw new RangeError(`unknown two-stream duty granularity ${dutyGranularity}`);
   }
   const attentionPlan = dutyGranularity === 'attention-tile'
-    ? createTwoStreamAttentionDutyPlan(N_img)
+    ? createTwoStreamAttentionDutyPlan(N_img, { linearRowsPerDuty })
     : null;
   const boundaryId = attentionPlan ? TWO_STREAM_ATTENTION_BOUNDARY_ID : TWO_STREAM_BOUNDARY_ID;
   const totalItems = attentionPlan?.length ?? TWO_STREAM_DUTY_COUNT;
@@ -70,6 +71,7 @@ export function defineTwoStreamManifest(options = {}) {
     metadata: {
       source: 'sf3d-webgpu-cooperative-two-stream',
       dutyGranularity,
+      linearRowsPerDuty: attentionPlan ? linearRowsPerDuty : null,
     },
   });
 }
@@ -172,6 +174,11 @@ export async function driveTwoStreamAttentionBoundary(cooperative, options) {
       ownerId: duty.ownerId ?? null,
       tileIndex: duty.tileIndex ?? null,
       tileCount: duty.tileCount ?? null,
+      rangeIndex: duty.rangeIndex ?? null,
+      rangeCount: duty.rangeCount ?? null,
+      rowStart: duty.rowStart ?? null,
+      rowCount: duty.rowCount ?? null,
+      rowEnd: duty.rowEnd ?? null,
       dutyStartedAtMs: now(),
       encodeStartedAtMs: null,
       encodeCompletedAtMs: null,
@@ -223,6 +230,7 @@ export async function runCooperativeTwoStream(options) {
     weights,
     schedulingMode = 'cooperative',
     dutyGranularity = 'stage',
+    linearRowsPerDuty = 128,
     onProgress,
     signal,
     invocationId = `sf3d:two-stream:${schedulingMode}`,
@@ -231,7 +239,7 @@ export async function runCooperativeTwoStream(options) {
     throw new RangeError(`unknown two-stream duty granularity ${dutyGranularity}`);
   }
   const attentionPlan = dutyGranularity === 'attention-tile'
-    ? createTwoStreamAttentionDutyPlan(N_img)
+    ? createTwoStreamAttentionDutyPlan(N_img, { linearRowsPerDuty })
     : null;
   const now = () => globalThis.performance?.now?.() ?? Date.now();
   const queueFences = [];
@@ -247,14 +255,23 @@ export async function runCooperativeTwoStream(options) {
   });
   const execution = createWebGpuCooperativeExecution({
     runtime,
-    manifest: defineTwoStreamManifest({ dutyGranularity, N_img }),
+    manifest: defineTwoStreamManifest({
+      dutyGranularity,
+      N_img,
+      linearRowsPerDuty,
+    }),
     invocationId,
     schedulingMode,
     onProgress,
     signal,
   });
   const state = attentionPlan
-    ? backbone.createAttentionForwardState(imageTokensBuf, N_img, weights)
+    ? backbone.createAttentionForwardState(
+      imageTokensBuf,
+      N_img,
+      weights,
+      { linearRowsPerDuty },
+    )
     : backbone.createForwardState(imageTokensBuf, N_img, weights);
   let stageTelemetry = [];
 
@@ -271,6 +288,11 @@ export async function runCooperativeTwoStream(options) {
             ownerId: duty.ownerId ?? null,
             tileIndex: duty.tileIndex ?? null,
             tileCount: duty.tileCount ?? null,
+            rangeIndex: duty.rangeIndex ?? null,
+            rangeCount: duty.rangeCount ?? null,
+            rowStart: duty.rowStart ?? null,
+            rowCount: duty.rowCount ?? null,
+            rowEnd: duty.rowEnd ?? null,
           };
           const encoder = device.createCommandEncoder({
             label: `two-stream-${duty.dutyIndex}-${duty.dutyId}`,
