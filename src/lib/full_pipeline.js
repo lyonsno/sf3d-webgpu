@@ -8,9 +8,10 @@
  * (kit 0.1.36) and candidate (kit 0.1.38) arms, without duplicating the sequence
  * inside a browser-eval string.
  *
- * `options` is forwarded to runInference (e.g. { cooperativeDino, dinoSchedulingMode,
- * dinoChunkBlocks, captureDinoPayload }), so the capsule selects the DINO
- * execution mode per arm while the rest of the route is identical.
+ * `options` is forwarded to runInference (e.g. { cooperativeDino,
+ * dinoSchedulingMode, dinoChunkBlocks, cooperativePostProcessor,
+ * postProcessorSchedulingMode, captureDinoPayload }), so a capsule can select
+ * cooperative execution per arm while the rest of the route stays identical.
  */
 
 import { runInference } from './inference.js';
