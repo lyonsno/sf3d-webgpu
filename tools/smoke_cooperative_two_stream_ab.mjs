@@ -13,6 +13,9 @@ import net from 'node:net';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
+import {
+  evaluateTwoStreamSmokeAcceptance,
+} from './two_stream_smoke_acceptance.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -380,12 +383,17 @@ try {
       `Two-stream duties ${EXPECTED_DUTY_COUNT}/${EXPECTED_DUTY_COUNT} (100%)`,
     ),
   );
+  const acceptance = evaluateTwoStreamSmokeAcceptance({
+    armSelection: ARM,
+    outputIdentical,
+    outputCanonical,
+    cooperativeComplete,
+    progressHonest,
+  });
   const report = {
     schema: 'sf3d.cooperative-two-stream-ab.v1',
-    ok: outputIdentical !== false
-      && outputCanonical
-      && cooperativeComplete
-      && progressHonest,
+    ok: acceptance.ok,
+    paired: acceptance.paired,
     routeIdentity,
     evidenceAuthority: source.clean ? 'clean-commit' : 'explicit-dirty-diff',
     outputIdentical,
@@ -428,6 +436,7 @@ try {
   if (!report.ok) fail(
     new Error(
       `acceptance failed: identical=${outputIdentical} `
+      + `paired=${acceptance.paired} `
       + `canonical=${outputCanonical} `
       + `cooperativeComplete=${cooperativeComplete} progressHonest=${progressHonest}`,
     ),
