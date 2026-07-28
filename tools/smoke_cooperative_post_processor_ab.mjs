@@ -21,6 +21,13 @@ import { evaluatePostProcessorSmokeAcceptance } from './post_processor_smoke_acc
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const CHROME_ARGS = Object.freeze([
+  '--enable-unsafe-webgpu',
+  '--use-angle=metal',
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+]);
 const argValue = (flag, fallback) => {
   const index = process.argv.indexOf(flag);
   return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
@@ -77,6 +84,59 @@ function cleanup() {
   for (const process of processes) {
     try { process.kill(); } catch {}
   }
+}
+
+async function closeOwnedBrowser() {
+  if (!browser) return { status: 'not-started', ownedPid: null };
+  const ownedProcess = browser.process?.() ?? null;
+  const ownedPid = ownedProcess?.pid ?? null;
+  let timer = null;
+  try {
+    const outcome = await Promise.race([
+      browser.close().then(() => 'graceful'),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), 10000);
+      }),
+    ]);
+    if (outcome === 'graceful') return { status: 'graceful', ownedPid };
+    const signalSent = ownedProcess?.kill('SIGTERM') ?? false;
+    browser.disconnect();
+    return {
+      status: 'forced-owned-process',
+      ownedPid,
+      signal: 'SIGTERM',
+      signalSent,
+    };
+  } catch (error) {
+    return {
+      status: 'failed',
+      ownedPid,
+      error: {
+        name: error?.name || 'Error',
+        message: error?.message || String(error),
+      },
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+    browser = null;
+  }
+}
+
+function appendTeardown(teardown) {
+  if (!fs.existsSync(REPORT_PATH)) return;
+  const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf8'));
+  report.teardown = teardown;
+  if (teardown.status === 'failed') {
+    report.primaryAcceptanceOk = report.ok;
+    report.ok = false;
+    report.failure = {
+      phase: 'browser-teardown',
+      message: teardown.error?.message || 'browser teardown failed',
+      details: teardown,
+    };
+    process.exitCode = 1;
+  }
+  fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
 }
 
 function writeFailure(error, phase, details = null) {
@@ -184,6 +244,11 @@ try {
         && ['monolithic-control', 'channel-range-cooperative'].includes(arm.name))
       || (ARM_SELECTION === 'channel' && arm.name === 'channel-range-cooperative')),
     armSelection: ARM_SELECTION,
+    browser: {
+      executablePath: CHROME_PATH,
+      headless: false,
+      args: [...CHROME_ARGS],
+    },
   };
   lastTrustworthyEvidence = { phase: 'route-identity', routeIdentity };
 
@@ -215,7 +280,7 @@ try {
     executablePath: CHROME_PATH,
     headless: false,
     protocolTimeout: 900000,
-    args: ['--enable-unsafe-webgpu', '--use-angle=metal'],
+    args: [...CHROME_ARGS],
   });
   const page = await browser.newPage();
   const pageErrors = [];
@@ -276,6 +341,7 @@ try {
       image.src = `data:image/png;base64,${base64}`;
     });
   }, imageBase64);
+  await page.bringToFront();
 
   const arms = await page.evaluate(async ({ channelsPerDuty, armSelection }) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
@@ -293,9 +359,13 @@ try {
       const frameGaps = [];
       const progress = [];
       let active = true;
-      let prior = null;
+      let prior = await new Promise((resolve) => requestAnimationFrame(resolve));
+      const visibilityAtStart = {
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus(),
+      };
       const tick = (timestamp) => {
-        if (prior != null) frameGaps.push({
+        frameGaps.push({
           start: prior,
           end: timestamp,
           gap: timestamp - prior,
@@ -314,6 +384,10 @@ try {
       );
       active = false;
       await new Promise((resolve) => setTimeout(resolve, 80));
+      const visibilityAtEnd = {
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus(),
+      };
 
       const span = output.stageSpans.find((entry) => entry.name === 'post-processor');
       if (!span) throw new Error(`${name}: missing post-processor stage span`);
@@ -342,6 +416,10 @@ try {
           gapsOver16_7: localGaps.filter((gap) => gap > 16.7).length,
           gapsOver33_3: localGaps.filter((gap) => gap > 33.3).length,
           gapsOver100: localGaps.filter((gap) => gap > 100).length,
+        },
+        browserState: {
+          visibilityAtStart,
+          visibilityAtEnd,
         },
         cooperative: cooperative ? {
           status: cooperative.status,
@@ -440,11 +518,26 @@ try {
   );
   const cooperativeComplete = layerComplete && channelComplete;
   const progressHonest = layerProgressHonest && channelProgressHonest;
+  const selectedArms = [
+    arms.control,
+    arms.plane,
+    arms.candidate,
+    arms.channel,
+  ].filter(Boolean);
+  const cadenceObserved = selectedArms.every((arm) => (
+    arm.postProcessor.frameCount > 0
+    && Number.isFinite(arm.postProcessor.p95GapMs)
+    && Number.isFinite(arm.postProcessor.p99GapMs)
+    && Number.isFinite(arm.postProcessor.maxGapMs)
+    && arm.browserState.visibilityAtStart.visibilityState === 'visible'
+    && arm.browserState.visibilityAtEnd.visibilityState === 'visible'
+  ));
   const acceptance = evaluatePostProcessorSmokeAcceptance({
     armSelection: ARM_SELECTION,
     outputIdentical,
     cooperativeComplete,
     progressHonest,
+    cadenceObserved,
   });
   const report = {
     schema: 'sf3d.cooperative-post-processor-abcd.v1',
@@ -455,6 +548,7 @@ try {
     outputIdentical,
     cooperativeComplete,
     progressHonest,
+    cadenceObserved,
     expectedChannelDuties,
     deltas: {
       fullRouteWallMs: arms.candidate && arms.control
@@ -527,7 +621,8 @@ try {
   if (acceptance.paired && !report.ok) fail(
     new Error(
       `acceptance failed: identical=${outputIdentical} `
-      + `cooperativeComplete=${cooperativeComplete} progressHonest=${progressHonest}`,
+      + `cooperativeComplete=${cooperativeComplete} progressHonest=${progressHonest} `
+      + `cadenceObserved=${cadenceObserved}`,
     ),
     'acceptance',
     report,
@@ -536,6 +631,6 @@ try {
   if (!fs.existsSync(REPORT_PATH)) writeFailure(error, 'exception');
   process.exitCode = 1;
 } finally {
-  if (browser) await browser.close().catch(() => {});
+  appendTeardown(await closeOwnedBrowser());
   cleanup();
 }
