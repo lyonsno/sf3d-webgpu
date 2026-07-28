@@ -22,6 +22,7 @@
 import { createStorageBuffer, createEmptyBuffer } from './gpu.js';
 
 import linearWGSL from '../shaders/linear.wgsl?raw';
+import linearRangeWGSL from '../shaders/linear_range.wgsl?raw';
 import layerNormWGSL from '../shaders/layernorm_vit.wgsl?raw';
 import crossAttentionWGSL from '../shaders/cross_attention.wgsl?raw';
 import gegluWGSL from '../shaders/geglu.wgsl?raw';
@@ -61,9 +62,49 @@ export const TWO_STREAM_STAGE_IDS = Object.freeze([
   'final',
 ]);
 
-export function createTwoStreamAttentionDutyPlan(N_img) {
+export function normalizeLinearRowRange(totalRows, rowStart, rowCount) {
+  if (!Number.isSafeInteger(totalRows) || totalRows <= 0) {
+    throw new TypeError('totalRows must be a positive safe integer');
+  }
+  if (!Number.isSafeInteger(rowStart) || rowStart < 0) {
+    throw new TypeError('rowStart must be a non-negative safe integer');
+  }
+  if (!Number.isSafeInteger(rowCount) || rowCount <= 0) {
+    throw new TypeError('rowCount must be a positive safe integer');
+  }
+  const rowEnd = rowStart + rowCount;
+  if (!Number.isSafeInteger(rowEnd) || rowEnd > totalRows) {
+    throw new RangeError(
+      `linear row range ${rowStart}-${rowEnd} exceeds totalRows ${totalRows}`,
+    );
+  }
+  return Object.freeze({ totalRows, rowStart, rowCount, rowEnd });
+}
+
+export function createLinearRowRanges(totalRows, rowsPerDuty) {
+  if (!Number.isSafeInteger(rowsPerDuty) || rowsPerDuty <= 0) {
+    throw new TypeError('rowsPerDuty must be a positive safe integer');
+  }
+  normalizeLinearRowRange(totalRows, 0, Math.min(totalRows, rowsPerDuty));
+  const ranges = [];
+  for (let rowStart = 0; rowStart < totalRows; rowStart += rowsPerDuty) {
+    const range = normalizeLinearRowRange(
+      totalRows,
+      rowStart,
+      Math.min(rowsPerDuty, totalRows - rowStart),
+    );
+    ranges.push(Object.freeze({ rangeIndex: ranges.length, ...range }));
+  }
+  return Object.freeze(ranges);
+}
+
+export function createTwoStreamAttentionDutyPlan(N_img, options = {}) {
   if (!Number.isSafeInteger(N_img) || N_img <= 0) {
     throw new TypeError('N_img must be a positive safe integer');
+  }
+  const linearRowsPerDuty = options.linearRowsPerDuty ?? 128;
+  if (!Number.isSafeInteger(linearRowsPerDuty) || linearRowsPerDuty <= 0) {
+    throw new TypeError('linearRowsPerDuty must be a positive safe integer');
   }
   const duties = [];
   const append = duty => {
@@ -84,8 +125,29 @@ export function createTwoStreamAttentionDutyPlan(N_img) {
       });
     }
   };
+  const appendLinearRanges = (ownerId, kind, block, ranges) => {
+    for (const range of ranges) {
+      append({
+        dutyId: `${ownerId}-range-${range.rangeIndex}`,
+        kind,
+        ownerId,
+        block,
+        direction: 'out',
+        rangeIndex: range.rangeIndex,
+        rangeCount: ranges.length,
+        totalRows: range.totalRows,
+        rowStart: range.rowStart,
+        rowCount: range.rowCount,
+        rowEnd: range.rowEnd,
+      });
+    }
+  };
   const latentTiles = ceilDiv(N_img + CONFIG.numLatents, 128);
   const triplaneTiles = ceilDiv(CONFIG.triplaneTokens, 128);
+  const triplaneRowRanges = createLinearRowRanges(
+    CONFIG.triplaneTokens,
+    linearRowsPerDuty,
+  );
 
   append({ dutyId: 'setup', kind: 'setup' });
   for (let block = 0; block < CONFIG.numBlocks; block++) {
@@ -123,7 +185,42 @@ export function createTwoStreamAttentionDutyPlan(N_img) {
     const fuseOut = `block-${block}-fuse-out`;
     append({ dutyId: `${fuseOut}-prepare`, kind: 'fuse-prepare', block, direction: 'out' });
     appendAttention(fuseOut, triplaneTiles);
-    append({ dutyId: `${fuseOut}-finish`, kind: 'fuse-finish', block, direction: 'out' });
+    appendLinearRanges(
+      `${fuseOut}-attention-projection`,
+      'fuse-attention-linear-range',
+      block,
+      triplaneRowRanges,
+    );
+    append({
+      dutyId: `${fuseOut}-residual-norm`,
+      kind: 'fuse-residual-norm',
+      block,
+      direction: 'out',
+    });
+    appendLinearRanges(
+      `${fuseOut}-geglu-expansion`,
+      'fuse-geglu-linear-range',
+      block,
+      triplaneRowRanges,
+    );
+    append({
+      dutyId: `${fuseOut}-geglu-activate`,
+      kind: 'fuse-geglu-activate',
+      block,
+      direction: 'out',
+    });
+    appendLinearRanges(
+      `${fuseOut}-ffn-projection`,
+      'fuse-ffn-linear-range',
+      block,
+      triplaneRowRanges,
+    );
+    append({
+      dutyId: `${fuseOut}-final-residual`,
+      kind: 'fuse-final-residual',
+      block,
+      direction: 'out',
+    });
   }
   append({ dutyId: 'final', kind: 'final' });
   return Object.freeze(duties);
@@ -144,6 +241,7 @@ export class TwoStreamBackbone {
     });
 
     this.pipelines.linear = make(linearWGSL, 'main');
+    this.pipelines.linearRange = make(linearRangeWGSL, 'main');
     this.pipelines.layerNorm = make(layerNormWGSL, 'main');
     // Cross-attention pipelines share an explicit layout so all 6 bindings are available
     // to all three entry points (auto-layout would omit unused bindings per entry point)
@@ -281,9 +379,9 @@ export class TwoStreamBackbone {
     };
   }
 
-  createAttentionForwardState(imageTokensBuf, N_img, weights) {
+  createAttentionForwardState(imageTokensBuf, N_img, weights, options = {}) {
     const state = this.createForwardState(imageTokensBuf, N_img, weights);
-    state.finePlan = createTwoStreamAttentionDutyPlan(N_img);
+    state.finePlan = createTwoStreamAttentionDutyPlan(N_img, options);
     return state;
   }
 
@@ -362,6 +460,24 @@ export class TwoStreamBackbone {
         break;
       case 'fuse-finish':
         this._dispatchFineFuseFinish(encoder, state, duty);
+        break;
+      case 'fuse-attention-linear-range':
+        this._dispatchFineFuseAttentionLinearRange(encoder, state, duty);
+        break;
+      case 'fuse-residual-norm':
+        this._dispatchFineFuseResidualNorm(encoder, state, duty);
+        break;
+      case 'fuse-geglu-linear-range':
+        this._dispatchFineFuseGEGLULinearRange(encoder, state, duty);
+        break;
+      case 'fuse-geglu-activate':
+        this._dispatchFineFuseGEGLUActivate(encoder, state, duty);
+        break;
+      case 'fuse-ffn-linear-range':
+        this._dispatchFineFuseFFNLinearRange(encoder, state, duty);
+        break;
+      case 'fuse-final-residual':
+        this._dispatchFineFuseFinalResidual(encoder, state, duty);
         break;
       case 'basic-self-prepare':
         this._dispatchFineBasicSelfPrepare(encoder, state, duty);
@@ -500,6 +616,206 @@ export class TwoStreamBackbone {
       this._diagnosticBuffers[`block${duty.block}_latent`] = state.currentLatent;
       this._diagnosticBuffers[`block${duty.block}_triplane`] = state.currentTriplane;
     }
+    state.activeOperation = null;
+  }
+
+  _requireFineFuseOut(state, duty) {
+    const ownerId = `block-${duty.block}-fuse-out`;
+    return this._requireFineOperation(state, 'fuse', ownerId);
+  }
+
+  _dispatchFineLinearRange(
+    encoder,
+    operation,
+    duty,
+    phase,
+    input,
+    output,
+    weight,
+    bias,
+    inDim,
+    outDim,
+  ) {
+    if (duty.ownerId !== phase.ownerId) {
+      throw new Error(
+        `linear duty ${duty.dutyId} owner changed: `
+        + `${duty.ownerId} != ${phase.ownerId}`,
+      );
+    }
+    if (duty.rangeIndex !== phase.nextRangeIndex
+      || duty.rangeCount !== phase.rangeCount
+      || duty.totalRows !== operation.N_z) {
+      throw new Error(
+        `linear duty ${duty.dutyId} is out of range order; `
+        + `expected ${phase.nextRangeIndex}/${phase.rangeCount} `
+        + `over ${operation.N_z} rows`,
+      );
+    }
+    this._dispatchLinearRange(
+      encoder,
+      input,
+      output,
+      weight,
+      bias,
+      operation.N_z,
+      inDim,
+      outDim,
+      duty.rowStart,
+      duty.rowCount,
+    );
+    phase.nextRangeIndex++;
+  }
+
+  _dispatchFineFuseAttentionLinearRange(encoder, state, duty) {
+    const operation = this._requireFineFuseOut(state, duty);
+    if (operation.attention.nextTileIndex !== operation.attention.tileCount) {
+      throw new Error(
+        `attention projection started before all tiles completed for ${operation.ownerId}`,
+      );
+    }
+    if (!operation.attentionProjection) {
+      operation.attentionProjection = {
+        ownerId: `${operation.ownerId}-attention-projection`,
+        nextRangeIndex: 0,
+        rangeCount: duty.rangeCount,
+        output: createEmptyBuffer(this.device, operation.N_z * operation.D * 4),
+      };
+    }
+    const phase = operation.attentionProjection;
+    this._dispatchFineLinearRange(
+      encoder,
+      operation,
+      duty,
+      phase,
+      operation.attention.attnOutBuf,
+      phase.output,
+      operation.attention.attnWeights.proj.weight,
+      operation.attention.attnWeights.proj.bias,
+      operation.D,
+      operation.D,
+    );
+  }
+
+  _dispatchFineFuseResidualNorm(encoder, state, duty) {
+    const operation = this._requireFineFuseOut(state, duty);
+    const phase = operation.attentionProjection;
+    if (!phase || phase.nextRangeIndex !== phase.rangeCount) {
+      throw new Error(`attention projection is incomplete for ${operation.ownerId}`);
+    }
+    const byteLength = operation.N_z * operation.D * 4;
+    operation.z1Buf = createEmptyBuffer(this.device, byteLength);
+    encoder.copyBufferToBuffer(operation.zBuf, 0, operation.z1Buf, 0, byteLength);
+    this._dispatchAdd(
+      encoder,
+      operation.z1Buf,
+      phase.output,
+      operation.N_z * operation.D,
+    );
+    operation.z2NormBuf = createEmptyBuffer(this.device, byteLength);
+    this._dispatchLayerNorm(
+      encoder,
+      operation.z1Buf,
+      operation.z2NormBuf,
+      operation.weights.normZ2,
+      operation.N_z,
+      operation.D,
+    );
+  }
+
+  _dispatchFineFuseGEGLULinearRange(encoder, state, duty) {
+    const operation = this._requireFineFuseOut(state, duty);
+    if (!operation.z2NormBuf) {
+      throw new Error(`GEGLU expansion started before residual norm for ${operation.ownerId}`);
+    }
+    const innerDim = CONFIG.gegluInnerDim;
+    if (!operation.gegluExpansion) {
+      operation.gegluExpansion = {
+        ownerId: `${operation.ownerId}-geglu-expansion`,
+        nextRangeIndex: 0,
+        rangeCount: duty.rangeCount,
+        output: createEmptyBuffer(this.device, operation.N_z * 2 * innerDim * 4),
+      };
+    }
+    const phase = operation.gegluExpansion;
+    this._dispatchFineLinearRange(
+      encoder,
+      operation,
+      duty,
+      phase,
+      operation.z2NormBuf,
+      phase.output,
+      operation.weights.ff.geglu.weight,
+      operation.weights.ff.geglu.bias,
+      operation.D,
+      2 * innerDim,
+    );
+  }
+
+  _dispatchFineFuseGEGLUActivate(encoder, state, duty) {
+    const operation = this._requireFineFuseOut(state, duty);
+    const phase = operation.gegluExpansion;
+    if (!phase || phase.nextRangeIndex !== phase.rangeCount) {
+      throw new Error(`GEGLU expansion is incomplete for ${operation.ownerId}`);
+    }
+    operation.gegluOutput = createEmptyBuffer(
+      this.device,
+      operation.N_z * CONFIG.gegluInnerDim * 4,
+    );
+    this._dispatchGEGLUActivation(
+      encoder,
+      phase.output,
+      operation.gegluOutput,
+      operation.N_z,
+      CONFIG.gegluInnerDim,
+    );
+  }
+
+  _dispatchFineFuseFFNLinearRange(encoder, state, duty) {
+    const operation = this._requireFineFuseOut(state, duty);
+    if (!operation.gegluOutput) {
+      throw new Error(`FFN projection started before GEGLU activation for ${operation.ownerId}`);
+    }
+    if (!operation.ffnProjection) {
+      operation.ffnProjection = {
+        ownerId: `${operation.ownerId}-ffn-projection`,
+        nextRangeIndex: 0,
+        rangeCount: duty.rangeCount,
+        output: createEmptyBuffer(this.device, operation.N_z * operation.D * 4),
+      };
+    }
+    const phase = operation.ffnProjection;
+    this._dispatchFineLinearRange(
+      encoder,
+      operation,
+      duty,
+      phase,
+      operation.gegluOutput,
+      phase.output,
+      operation.weights.ff.proj.weight,
+      operation.weights.ff.proj.bias,
+      CONFIG.gegluInnerDim,
+      operation.D,
+    );
+  }
+
+  _dispatchFineFuseFinalResidual(encoder, state, duty) {
+    const operation = this._requireFineFuseOut(state, duty);
+    const phase = operation.ffnProjection;
+    if (!phase || phase.nextRangeIndex !== phase.rangeCount) {
+      throw new Error(`FFN projection is incomplete for ${operation.ownerId}`);
+    }
+    const byteLength = operation.N_z * operation.D * 4;
+    const zOutBuf = createEmptyBuffer(this.device, byteLength);
+    encoder.copyBufferToBuffer(operation.z1Buf, 0, zOutBuf, 0, byteLength);
+    this._dispatchAdd(
+      encoder,
+      zOutBuf,
+      phase.output,
+      operation.N_z * operation.D,
+    );
+    state.currentTriplane = zOutBuf;
+    this._diagnosticBuffers[`block${duty.block}_latent`] = state.currentLatent;
+    this._diagnosticBuffers[`block${duty.block}_triplane`] = state.currentTriplane;
     state.activeOperation = null;
   }
 
@@ -1013,24 +1329,7 @@ export class TwoStreamBackbone {
 
     // GEGLU activation: [N, 2*innerDim] → [N, innerDim]
     const geGluOutBuf = createEmptyBuffer(device, N * innerDim * 4);
-    {
-      const totalWG = ceilDiv(N * innerDim, WG_SIZE);
-      const [wgX, wgY] = splitWG(totalWG);
-      const params = this._cachedUniform(new Uint32Array([N, innerDim, wgX]));
-      const bg = device.createBindGroup({
-        layout: this.pipelines.geglu.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer: geGluProjBuf } },
-          { binding: 2, resource: { buffer: geGluOutBuf } },
-        ],
-      });
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(this.pipelines.geglu);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(wgX, wgY);
-      pass.end();
-    }
+    this._dispatchGEGLUActivation(encoder, geGluProjBuf, geGluOutBuf, N, innerDim);
 
     // Linear: [N, innerDim] → [N, D]
     const ffnOutBuf = createEmptyBuffer(device, N * D * 4);
@@ -1040,12 +1339,33 @@ export class TwoStreamBackbone {
     return ffnOutBuf;
   }
 
+  _dispatchGEGLUActivation(encoder, input, output, rows, innerDim) {
+    const totalWG = ceilDiv(rows * innerDim, WG_SIZE);
+    const [wgX, wgY] = splitWG(totalWG);
+    const params = this._cachedUniform(new Uint32Array([rows, innerDim, wgX]));
+    const bg = this.device.createBindGroup({
+      layout: this.pipelines.geglu.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: params } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 2, resource: { buffer: output } },
+      ],
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipelines.geglu);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+  }
+
   // --- Low-level dispatch helpers ---
 
   _dispatchLinear(encoder, input, output, weight, bias, rows, inDim, outDim) {
     const totalWG = ceilDiv(rows * outDim, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
-    const params = this._cachedUniform(new Uint32Array([rows, inDim, outDim, wgX, 1]));
+    const params = this._cachedUniform(
+      new Uint32Array([rows, inDim, outDim, wgX, 1]),
+    );
     const bg = this.device.createBindGroup({
       layout: this.pipelines.linear.getBindGroupLayout(0),
       entries: [
@@ -1058,6 +1378,48 @@ export class TwoStreamBackbone {
     });
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.pipelines.linear);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+  }
+
+  _dispatchLinearRange(
+    encoder,
+    input,
+    output,
+    weight,
+    bias,
+    totalRows,
+    inDim,
+    outDim,
+    rowStart,
+    rowCount,
+  ) {
+    const range = normalizeLinearRowRange(totalRows, rowStart, rowCount);
+    const totalWG = ceilDiv(range.rowCount * outDim, WG_SIZE);
+    const [wgX, wgY] = splitWG(totalWG);
+    const params = this._cachedUniform(new Uint32Array([
+      range.totalRows,
+      inDim,
+      outDim,
+      range.rowStart,
+      range.rowCount,
+      wgX,
+      1,
+      0,
+    ]));
+    const bg = this.device.createBindGroup({
+      layout: this.pipelines.linearRange.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: params } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 2, resource: { buffer: weight } },
+        { binding: 3, resource: { buffer: bias } },
+        { binding: 4, resource: { buffer: output } },
+      ],
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipelines.linearRange);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(wgX, wgY);
     pass.end();

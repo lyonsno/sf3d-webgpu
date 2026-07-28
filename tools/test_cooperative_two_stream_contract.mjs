@@ -135,7 +135,7 @@ assert.throws(
 console.log('ok  executable graph rejects skipped stages and incomplete output');
 
 const finePlan = createTwoStreamAttentionDutyPlan(1297);
-assert.equal(finePlan.length, 1618);
+assert.equal(finePlan.length, 4218);
 assert.equal(finePlan[0].dutyId, 'setup');
 assert.equal(finePlan.at(-1).dutyId, 'final');
 assert.equal(
@@ -151,7 +151,11 @@ assert.equal(
 for (let index = 0; index < finePlan.length; index++) {
   assert.equal(finePlan[index].dutyIndex, index);
 }
-console.log('ok  fine plan exposes all 1,564 existing attention tiles in exact order');
+assert.equal(
+  finePlan.filter(duty => duty.kind.endsWith('-linear-range')).length,
+  2592,
+);
+console.log('ok  fine plan exposes 1,564 attention tiles and 2,592 linear ranges');
 
 const fineManifest = defineTwoStreamManifest({
   dutyGranularity: 'attention-tile',
@@ -197,7 +201,7 @@ assert.throws(
 );
 assert.throws(
   () => backbone.getForwardResult(fineState),
-  /incomplete at stage 0\/1618/,
+  /incomplete at stage 0\/4218/,
 );
 console.log('ok  fine executable graph rejects skipped duties and incomplete output');
 

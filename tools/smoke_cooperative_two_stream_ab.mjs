@@ -4,8 +4,8 @@
  *
  * Both arms run the exact full image-to-GLB route with cooperative DINO. The
  * control retains one two-stream command buffer; the candidate submits the
- * existing attention query tiles plus their dependency transitions as 1,618
- * duties. Every terminal path writes a report.
+ * attention query tiles, fuse-out row-range linears, and dependency
+ * transitions as 4,218 duties. Every terminal path writes a report.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -29,7 +29,20 @@ const REPORT_PATH = path.resolve(argValue(
   '--report',
   '/tmp/sf3d-cooperative-two-stream-ab.json',
 ));
+const ARM = argValue('--arm', 'both');
+if (!['both', 'control', 'candidate'].includes(ARM)) {
+  throw new RangeError(`--arm must be both, control, or candidate; got ${ARM}`);
+}
 const ALLOW_DIRTY = process.argv.includes('--allow-dirty-source');
+const LINEAR_ROWS_PER_DUTY = Number(argValue('--linear-rows-per-duty', '128'));
+if (!Number.isSafeInteger(LINEAR_ROWS_PER_DUTY) || LINEAR_ROWS_PER_DUTY <= 0) {
+  throw new TypeError(
+    `--linear-rows-per-duty must be a positive safe integer; `
+    + `got ${LINEAR_ROWS_PER_DUTY}`,
+  );
+}
+const LINEAR_RANGE_COUNT = Math.ceil(27648 / LINEAR_ROWS_PER_DUTY);
+const EXPECTED_DUTY_COUNT = 1626 + 12 * LINEAR_RANGE_COUNT;
 const WEIGHTS = path.join(REPO, 'public', 'weights.bin');
 const EXPECTED_GLB_SHA256 =
   'e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7';
@@ -139,13 +152,16 @@ try {
         cooperativeTwoStream: false,
       },
       {
-        name: 'attention-tile-candidate',
+        name: 'fine-duty-candidate',
         cooperativeDino: true,
         cooperativeTwoStream: true,
         twoStreamSchedulingMode: 'cooperative',
         twoStreamDutyGranularity: 'attention-tile',
+        twoStreamLinearRowsPerDuty: LINEAR_ROWS_PER_DUTY,
       },
-    ],
+    ].filter(arm => ARM === 'both'
+      || (ARM === 'control' && arm.name === 'monolithic-two-stream-control')
+      || (ARM === 'candidate' && arm.name === 'fine-duty-candidate')),
   };
   lastTrustworthyEvidence = { phase: 'route-identity', routeIdentity };
 
@@ -225,7 +241,7 @@ try {
     });
   }, imageBase64);
 
-  const arms = await page.evaluate(async () => {
+  const arms = await page.evaluate(async ({ armSelection, linearRowsPerDuty }) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const device = window._sf3d_device;
     const pipelines = window._sf3d_pipelines;
@@ -314,46 +330,62 @@ try {
       dinoChunkBlocks: 1,
       cooperativePostProcessor: false,
     };
-    return {
-      control: await runArm('monolithic-two-stream-control', {
+    const arms = { control: null, candidate: null };
+    if (armSelection !== 'candidate') {
+      arms.control = await runArm('monolithic-two-stream-control', {
         ...common,
         cooperativeTwoStream: false,
-      }),
-      candidate: await runArm('attention-tile-candidate', {
+      });
+    }
+    if (armSelection !== 'control') {
+      arms.candidate = await runArm('fine-duty-candidate', {
         ...common,
         cooperativeTwoStream: true,
         twoStreamSchedulingMode: 'cooperative',
         twoStreamDutyGranularity: 'attention-tile',
-      }),
-    };
-  });
+        twoStreamLinearRowsPerDuty: linearRowsPerDuty,
+      });
+    }
+    return arms;
+  }, { armSelection: ARM, linearRowsPerDuty: LINEAR_ROWS_PER_DUTY });
 
   lastTrustworthyEvidence = { phase: 'browser-arms', routeIdentity, arms };
   if (pageErrors.length) fail(
     new Error(`page errors: ${pageErrors.join(' | ')}`),
     'browser-arms',
   );
-  const outputIdentical = arms.control.glbSha256 === arms.candidate.glbSha256
-    && arms.control.glbBytes === arms.candidate.glbBytes
-    && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.candidate.mesh);
-  const outputCanonical = arms.control.glbSha256 === EXPECTED_GLB_SHA256
-    && arms.candidate.glbSha256 === EXPECTED_GLB_SHA256
-    && arms.control.glbBytes === EXPECTED_GLB_BYTES
-    && arms.candidate.glbBytes === EXPECTED_GLB_BYTES;
-  const cooperativeComplete = arms.candidate.cooperative?.status === 'succeeded'
+  const outputIdentical = arms.control && arms.candidate
+    ? arms.control.glbSha256 === arms.candidate.glbSha256
+      && arms.control.glbBytes === arms.candidate.glbBytes
+      && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.candidate.mesh)
+    : null;
+  const outputCanonical = [arms.control, arms.candidate]
+    .filter(Boolean)
+    .every(arm => arm.glbSha256 === EXPECTED_GLB_SHA256
+      && arm.glbBytes === EXPECTED_GLB_BYTES);
+  const cooperativeComplete = !arms.candidate
+    || (arms.candidate.cooperative?.status === 'succeeded'
     && arms.candidate.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence'
-    && arms.candidate.cooperative?.completedItems === 1618
-    && arms.candidate.cooperative?.totalItems === 1618
-    && arms.candidate.cooperative?.rangeCount === 1618
-    && arms.candidate.cooperative?.adapterTelemetry?.stageDuties?.length === 1618
-    && arms.candidate.cooperative?.adapterTelemetry?.queueFences?.length === 1618
-    && arms.candidate.cooperative?.adapterTelemetry?.browserYields?.length === 1618;
-  const progressHonest = arms.candidate.progress.some(
-    message => /Two-stream duties 1618\/1618 \(100%\)/.test(message),
+    && arms.candidate.cooperative?.completedItems === EXPECTED_DUTY_COUNT
+    && arms.candidate.cooperative?.totalItems === EXPECTED_DUTY_COUNT
+    && arms.candidate.cooperative?.rangeCount === EXPECTED_DUTY_COUNT
+    && arms.candidate.cooperative?.adapterTelemetry?.stageDuties?.length
+      === EXPECTED_DUTY_COUNT
+    && arms.candidate.cooperative?.adapterTelemetry?.queueFences?.length
+      === EXPECTED_DUTY_COUNT
+    && arms.candidate.cooperative?.adapterTelemetry?.browserYields?.length
+      === EXPECTED_DUTY_COUNT);
+  const progressHonest = !arms.candidate || arms.candidate.progress.some(
+    message => message.includes(
+      `Two-stream duties ${EXPECTED_DUTY_COUNT}/${EXPECTED_DUTY_COUNT} (100%)`,
+    ),
   );
   const report = {
     schema: 'sf3d.cooperative-two-stream-ab.v1',
-    ok: outputIdentical && outputCanonical && cooperativeComplete && progressHonest,
+    ok: outputIdentical !== false
+      && outputCanonical
+      && cooperativeComplete
+      && progressHonest,
     routeIdentity,
     evidenceAuthority: source.clean ? 'clean-commit' : 'explicit-dirty-diff',
     outputIdentical,
@@ -361,27 +393,37 @@ try {
     cooperativeComplete,
     progressHonest,
     deltas: {
-      fullRouteWallMs: arms.candidate.fullRouteWallMs - arms.control.fullRouteWallMs,
-      twoStreamWallMs: arms.candidate.twoStreamWallMs - arms.control.twoStreamWallMs,
+      fullRouteWallMs: arms.control && arms.candidate
+        ? arms.candidate.fullRouteWallMs - arms.control.fullRouteWallMs
+        : null,
+      twoStreamWallMs: arms.control && arms.candidate
+        ? arms.candidate.twoStreamWallMs - arms.control.twoStreamWallMs
+        : null,
     },
     arms,
   };
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
 
   console.log('\n=== SF3D cooperative two-stream A/B ===');
-  console.log(`output identical: ${outputIdentical} (${arms.control.glbSha256.slice(0, 12)}...)`);
-  console.log(
-    `control: full=${arms.control.fullRouteWallMs.toFixed(1)}ms `
-    + `two-stream=${arms.control.twoStreamWallMs.toFixed(1)}ms`,
-  );
-  console.log(
-    `candidate: full=${arms.candidate.fullRouteWallMs.toFixed(1)}ms `
-    + `two-stream=${arms.candidate.twoStreamWallMs.toFixed(1)}ms`,
-  );
-  console.log(
-    `delta: full=${report.deltas.fullRouteWallMs.toFixed(1)}ms `
-    + `two-stream=${report.deltas.twoStreamWallMs.toFixed(1)}ms`,
-  );
+  console.log(`output identical: ${outputIdentical}`);
+  if (arms.control) {
+    console.log(
+      `control: full=${arms.control.fullRouteWallMs.toFixed(1)}ms `
+      + `two-stream=${arms.control.twoStreamWallMs.toFixed(1)}ms`,
+    );
+  }
+  if (arms.candidate) {
+    console.log(
+      `candidate: full=${arms.candidate.fullRouteWallMs.toFixed(1)}ms `
+      + `two-stream=${arms.candidate.twoStreamWallMs.toFixed(1)}ms`,
+    );
+  }
+  if (arms.control && arms.candidate) {
+    console.log(
+      `delta: full=${report.deltas.fullRouteWallMs.toFixed(1)}ms `
+      + `two-stream=${report.deltas.twoStreamWallMs.toFixed(1)}ms`,
+    );
+  }
   console.log(`report: ${REPORT_PATH}`);
   if (!report.ok) fail(
     new Error(
