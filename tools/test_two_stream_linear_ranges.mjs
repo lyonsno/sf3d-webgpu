@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 
 import {
+  TwoStreamBackbone,
   createLinearRowRanges,
   createTwoStreamAttentionDutyPlan,
   normalizeLinearRowRange,
@@ -107,5 +108,40 @@ assert.equal(
   256,
 );
 console.log('ok  explicit row granularity changes work without hiding rows');
+
+const backbone = new TwoStreamBackbone({});
+let malformedDispatchCount = 0;
+backbone._dispatchLinearRange = () => { malformedDispatchCount++; };
+assert.throws(
+  () => backbone._dispatchFineLinearRange(
+    {},
+    { N_z: 256 },
+    {
+      dutyId: 'range-1-duplicate',
+      ownerId: 'linear-owner',
+      rangeIndex: 1,
+      rangeCount: 2,
+      totalRows: 256,
+      rowStart: 0,
+      rowCount: 128,
+      rowEnd: 128,
+    },
+    {
+      ownerId: 'linear-owner',
+      nextRangeIndex: 1,
+      rangeCount: 2,
+      nextRowStart: 128,
+    },
+    {},
+    {},
+    {},
+    {},
+    8,
+    8,
+  ),
+  /not contiguous/,
+);
+assert.equal(malformedDispatchCount, 0);
+console.log('ok  executor rejects duplicate or skipped row spans before dispatch');
 
 console.log('\nALL TWO-STREAM LINEAR RANGE CONTRACT CHECKS PASSED');

@@ -651,6 +651,18 @@ export class TwoStreamBackbone {
         + `over ${operation.N_z} rows`,
       );
     }
+    const range = normalizeLinearRowRange(
+      operation.N_z,
+      duty.rowStart,
+      duty.rowCount,
+    );
+    if (duty.rowStart !== phase.nextRowStart || duty.rowEnd !== range.rowEnd) {
+      throw new Error(
+        `linear duty ${duty.dutyId} is not contiguous; `
+        + `expected row ${phase.nextRowStart}, got `
+        + `${duty.rowStart}-${duty.rowEnd}`,
+      );
+    }
     this._dispatchLinearRange(
       encoder,
       input,
@@ -664,6 +676,7 @@ export class TwoStreamBackbone {
       duty.rowCount,
     );
     phase.nextRangeIndex++;
+    phase.nextRowStart = range.rowEnd;
   }
 
   _dispatchFineFuseAttentionLinearRange(encoder, state, duty) {
@@ -677,6 +690,7 @@ export class TwoStreamBackbone {
       operation.attentionProjection = {
         ownerId: `${operation.ownerId}-attention-projection`,
         nextRangeIndex: 0,
+        nextRowStart: 0,
         rangeCount: duty.rangeCount,
         output: createEmptyBuffer(this.device, operation.N_z * operation.D * 4),
       };
@@ -699,7 +713,9 @@ export class TwoStreamBackbone {
   _dispatchFineFuseResidualNorm(encoder, state, duty) {
     const operation = this._requireFineFuseOut(state, duty);
     const phase = operation.attentionProjection;
-    if (!phase || phase.nextRangeIndex !== phase.rangeCount) {
+    if (!phase
+      || phase.nextRangeIndex !== phase.rangeCount
+      || phase.nextRowStart !== operation.N_z) {
       throw new Error(`attention projection is incomplete for ${operation.ownerId}`);
     }
     const byteLength = operation.N_z * operation.D * 4;
@@ -732,6 +748,7 @@ export class TwoStreamBackbone {
       operation.gegluExpansion = {
         ownerId: `${operation.ownerId}-geglu-expansion`,
         nextRangeIndex: 0,
+        nextRowStart: 0,
         rangeCount: duty.rangeCount,
         output: createEmptyBuffer(this.device, operation.N_z * 2 * innerDim * 4),
       };
@@ -754,7 +771,9 @@ export class TwoStreamBackbone {
   _dispatchFineFuseGEGLUActivate(encoder, state, duty) {
     const operation = this._requireFineFuseOut(state, duty);
     const phase = operation.gegluExpansion;
-    if (!phase || phase.nextRangeIndex !== phase.rangeCount) {
+    if (!phase
+      || phase.nextRangeIndex !== phase.rangeCount
+      || phase.nextRowStart !== operation.N_z) {
       throw new Error(`GEGLU expansion is incomplete for ${operation.ownerId}`);
     }
     operation.gegluOutput = createEmptyBuffer(
@@ -779,6 +798,7 @@ export class TwoStreamBackbone {
       operation.ffnProjection = {
         ownerId: `${operation.ownerId}-ffn-projection`,
         nextRangeIndex: 0,
+        nextRowStart: 0,
         rangeCount: duty.rangeCount,
         output: createEmptyBuffer(this.device, operation.N_z * operation.D * 4),
       };
@@ -801,7 +821,9 @@ export class TwoStreamBackbone {
   _dispatchFineFuseFinalResidual(encoder, state, duty) {
     const operation = this._requireFineFuseOut(state, duty);
     const phase = operation.ffnProjection;
-    if (!phase || phase.nextRangeIndex !== phase.rangeCount) {
+    if (!phase
+      || phase.nextRangeIndex !== phase.rangeCount
+      || phase.nextRowStart !== operation.N_z) {
       throw new Error(`FFN projection is incomplete for ${operation.ownerId}`);
     }
     const byteLength = operation.N_z * operation.D * 4;
