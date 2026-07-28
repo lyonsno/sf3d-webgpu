@@ -61,6 +61,74 @@ export const TWO_STREAM_STAGE_IDS = Object.freeze([
   'final',
 ]);
 
+export function createTwoStreamAttentionDutyPlan(N_img) {
+  if (!Number.isSafeInteger(N_img) || N_img <= 0) {
+    throw new TypeError('N_img must be a positive safe integer');
+  }
+  const duties = [];
+  const append = duty => {
+    duties.push(Object.freeze({
+      dutyIndex: duties.length,
+      dutyId: duty.dutyId,
+      ...duty,
+    }));
+  };
+  const appendAttention = (ownerId, tileCount) => {
+    for (let tileIndex = 0; tileIndex < tileCount; tileIndex++) {
+      append({
+        dutyId: `${ownerId}-tile-${tileIndex}`,
+        kind: 'attention-tile',
+        ownerId,
+        tileIndex,
+        tileCount,
+      });
+    }
+  };
+  const latentTiles = ceilDiv(N_img + CONFIG.numLatents, 128);
+  const triplaneTiles = ceilDiv(CONFIG.triplaneTokens, 128);
+
+  append({ dutyId: 'setup', kind: 'setup' });
+  for (let block = 0; block < CONFIG.numBlocks; block++) {
+    const fuseIn = `block-${block}-fuse-in`;
+    append({ dutyId: `${fuseIn}-prepare`, kind: 'fuse-prepare', block, direction: 'in' });
+    appendAttention(fuseIn, latentTiles);
+    append({ dutyId: `${fuseIn}-finish`, kind: 'fuse-finish', block, direction: 'in' });
+
+    for (let basic = 0; basic < CONFIG.numBasicBlocks; basic++) {
+      const ownerId = `block-${block}-basic-${basic}`;
+      const selfOwner = `${ownerId}-self`;
+      const crossOwner = `${ownerId}-cross`;
+      append({
+        dutyId: `${selfOwner}-prepare`,
+        kind: 'basic-self-prepare',
+        block,
+        basic,
+      });
+      appendAttention(selfOwner, latentTiles);
+      append({
+        dutyId: `${crossOwner}-prepare`,
+        kind: 'basic-cross-prepare',
+        block,
+        basic,
+      });
+      appendAttention(crossOwner, latentTiles);
+      append({
+        dutyId: `${ownerId}-finish`,
+        kind: 'basic-finish',
+        block,
+        basic,
+      });
+    }
+
+    const fuseOut = `block-${block}-fuse-out`;
+    append({ dutyId: `${fuseOut}-prepare`, kind: 'fuse-prepare', block, direction: 'out' });
+    appendAttention(fuseOut, triplaneTiles);
+    append({ dutyId: `${fuseOut}-finish`, kind: 'fuse-finish', block, direction: 'out' });
+  }
+  append({ dutyId: 'final', kind: 'final' });
+  return Object.freeze(duties);
+}
+
 export class TwoStreamBackbone {
   constructor(device) {
     this.device = device;
@@ -206,8 +274,17 @@ export class TwoStreamBackbone {
       currentLatent: null,
       currentTriplane: null,
       nextStageIndex: 0,
+      finePlan: null,
+      nextFineDutyIndex: 0,
+      activeOperation: null,
       result: null,
     };
+  }
+
+  createAttentionForwardState(imageTokensBuf, N_img, weights) {
+    const state = this.createForwardState(imageTokensBuf, N_img, weights);
+    state.finePlan = createTwoStreamAttentionDutyPlan(N_img);
+    return state;
   }
 
   dispatchForwardStage(encoder, state, stageIndex) {
@@ -244,13 +321,299 @@ export class TwoStreamBackbone {
   }
 
   getForwardResult(state) {
-    if (state.nextStageIndex !== TWO_STREAM_STAGE_IDS.length || state.result == null) {
+    const stageComplete = state.nextStageIndex === TWO_STREAM_STAGE_IDS.length;
+    const fineComplete = state.finePlan != null
+      && state.nextFineDutyIndex === state.finePlan.length;
+    if ((!stageComplete && !fineComplete) || state.result == null) {
+      const completed = state.finePlan == null
+        ? `${state.nextStageIndex}/${TWO_STREAM_STAGE_IDS.length}`
+        : `${state.nextFineDutyIndex}/${state.finePlan.length}`;
       throw new Error(
-        `two-stream forward is incomplete at stage ${state.nextStageIndex}/`
-        + `${TWO_STREAM_STAGE_IDS.length}`,
+        `two-stream forward is incomplete at stage ${completed}`,
       );
     }
     return state.result;
+  }
+
+  dispatchAttentionForwardDuty(encoder, state, dutyIndex) {
+    if (state.finePlan == null) {
+      throw new Error('two-stream attention-duty state has no fine plan');
+    }
+    if (dutyIndex !== state.nextFineDutyIndex) {
+      throw new Error(
+        `two-stream attention duty ${dutyIndex} is out of order; `
+        + `expected ${state.nextFineDutyIndex}`,
+      );
+    }
+    const duty = state.finePlan[dutyIndex];
+    if (!duty) {
+      throw new RangeError(`invalid two-stream attention duty ${dutyIndex}`);
+    }
+
+    switch (duty.kind) {
+      case 'setup':
+        this._dispatchForwardSetup(encoder, state);
+        break;
+      case 'fuse-prepare':
+        this._dispatchFineFusePrepare(encoder, state, duty);
+        break;
+      case 'attention-tile':
+        this._dispatchFineAttentionTile(encoder, state, duty);
+        break;
+      case 'fuse-finish':
+        this._dispatchFineFuseFinish(encoder, state, duty);
+        break;
+      case 'basic-self-prepare':
+        this._dispatchFineBasicSelfPrepare(encoder, state, duty);
+        break;
+      case 'basic-cross-prepare':
+        this._dispatchFineBasicCrossPrepare(encoder, state, duty);
+        break;
+      case 'basic-finish':
+        this._dispatchFineBasicFinish(encoder, state, duty);
+        break;
+      case 'final':
+        if (state.activeOperation != null) {
+          throw new Error(`cannot finalize with active ${state.activeOperation.ownerId}`);
+        }
+        this._dispatchForwardFinal(encoder, state);
+        break;
+      default:
+        throw new Error(`unknown two-stream attention duty kind ${duty.kind}`);
+    }
+    state.nextFineDutyIndex++;
+    return duty;
+  }
+
+  _requireFineOperation(state, kind, ownerId) {
+    const operation = state.activeOperation;
+    if (operation?.kind !== kind || operation.ownerId !== ownerId) {
+      throw new Error(
+        `two-stream duty ${ownerId} requires active ${kind}; `
+        + `got ${operation?.kind ?? 'none'}:${operation?.ownerId ?? 'none'}`,
+      );
+    }
+    return operation;
+  }
+
+  _dispatchFineFusePrepare(encoder, state, duty) {
+    if (state.activeOperation != null) {
+      throw new Error(`cannot prepare ${duty.dutyId} with active ${state.activeOperation.ownerId}`);
+    }
+    const D = CONFIG.dim;
+    const N_tri = CONFIG.triplaneTokens;
+    const block = state.weights.mainBlocks[duty.block];
+    const incoming = duty.direction === 'in';
+    const zBuf = incoming ? state.currentLatent : state.currentTriplane;
+    const xBuf = incoming ? state.currentTriplane : state.currentLatent;
+    const N_z = incoming ? state.N_latent : N_tri;
+    const N_x = incoming ? N_tri : state.N_latent;
+    const weights = incoming ? block.fuseBlockIn : block.fuseBlockOut;
+    const zNormBuf = createEmptyBuffer(this.device, N_z * D * 4);
+    this._dispatchLayerNorm(encoder, zBuf, zNormBuf, weights.normZ1, N_z, D);
+    let xNormBuf = xBuf;
+    if (weights.normX) {
+      xNormBuf = createEmptyBuffer(this.device, N_x * D * 4);
+      this._dispatchLayerNorm(encoder, xBuf, xNormBuf, weights.normX, N_x, D);
+    }
+    const ownerId = `block-${duty.block}-fuse-${duty.direction}`;
+    state.activeOperation = {
+      kind: 'fuse',
+      ownerId,
+      block: duty.block,
+      direction: duty.direction,
+      zBuf,
+      weights,
+      N_z,
+      D,
+      attention: this._createAttentionState(
+        encoder,
+        zNormBuf,
+        xNormBuf,
+        weights.attn,
+        N_z,
+        N_x,
+        D,
+      ),
+    };
+  }
+
+  _dispatchFineAttentionTile(encoder, state, duty) {
+    const operation = state.activeOperation;
+    if (!operation || operation.ownerId !== duty.ownerId) {
+      throw new Error(
+        `attention tile ${duty.dutyId} requires active ${duty.ownerId}; `
+        + `got ${operation?.ownerId ?? 'none'}`,
+      );
+    }
+    if (operation.attention.tileCount !== duty.tileCount) {
+      throw new Error(
+        `attention tile count changed for ${duty.ownerId}: `
+        + `${operation.attention.tileCount} != ${duty.tileCount}`,
+      );
+    }
+    this._dispatchAttentionTile(encoder, operation.attention, duty.tileIndex);
+  }
+
+  _dispatchFineFuseFinish(encoder, state, duty) {
+    const ownerId = `block-${duty.block}-fuse-${duty.direction}`;
+    const operation = this._requireFineOperation(state, 'fuse', ownerId);
+    const attnOutBuf = this._finishAttention(encoder, operation.attention);
+    const z1Buf = createEmptyBuffer(this.device, operation.N_z * operation.D * 4);
+    encoder.copyBufferToBuffer(
+      operation.zBuf,
+      0,
+      z1Buf,
+      0,
+      operation.N_z * operation.D * 4,
+    );
+    this._dispatchAdd(encoder, z1Buf, attnOutBuf, operation.N_z * operation.D);
+    const z2NormBuf = createEmptyBuffer(this.device, operation.N_z * operation.D * 4);
+    this._dispatchLayerNorm(
+      encoder,
+      z1Buf,
+      z2NormBuf,
+      operation.weights.normZ2,
+      operation.N_z,
+      operation.D,
+    );
+    const ffnOutBuf = this._dispatchGEGLUFFN(
+      encoder,
+      z2NormBuf,
+      operation.weights.ff,
+      operation.N_z,
+      operation.D,
+    );
+    const zOutBuf = createEmptyBuffer(this.device, operation.N_z * operation.D * 4);
+    encoder.copyBufferToBuffer(
+      z1Buf,
+      0,
+      zOutBuf,
+      0,
+      operation.N_z * operation.D * 4,
+    );
+    this._dispatchAdd(encoder, zOutBuf, ffnOutBuf, operation.N_z * operation.D);
+    if (duty.direction === 'in') {
+      state.currentLatent = zOutBuf;
+    } else {
+      state.currentTriplane = zOutBuf;
+      this._diagnosticBuffers[`block${duty.block}_latent`] = state.currentLatent;
+      this._diagnosticBuffers[`block${duty.block}_triplane`] = state.currentTriplane;
+    }
+    state.activeOperation = null;
+  }
+
+  _dispatchFineBasicSelfPrepare(encoder, state, duty) {
+    if (state.activeOperation != null) {
+      throw new Error(`cannot prepare ${duty.dutyId} with active ${state.activeOperation.ownerId}`);
+    }
+    const D = CONFIG.dim;
+    const weights = state.weights.mainBlocks[duty.block].transformerBlocks[duty.basic];
+    const norm1Buf = createEmptyBuffer(this.device, state.N_latent * D * 4);
+    this._dispatchLayerNorm(
+      encoder,
+      state.currentLatent,
+      norm1Buf,
+      weights.norm1,
+      state.N_latent,
+      D,
+    );
+    state.activeOperation = {
+      kind: 'basic-self',
+      ownerId: `block-${duty.block}-basic-${duty.basic}-self`,
+      block: duty.block,
+      basic: duty.basic,
+      zBuf: state.currentLatent,
+      weights,
+      D,
+      attention: this._createAttentionState(
+        encoder,
+        norm1Buf,
+        norm1Buf,
+        weights.attn1,
+        state.N_latent,
+        state.N_latent,
+        D,
+      ),
+    };
+  }
+
+  _dispatchFineBasicCrossPrepare(encoder, state, duty) {
+    const selfOwner = `block-${duty.block}-basic-${duty.basic}-self`;
+    const operation = this._requireFineOperation(state, 'basic-self', selfOwner);
+    const selfAttnBuf = this._finishAttention(encoder, operation.attention);
+    const z1Buf = createEmptyBuffer(this.device, state.N_latent * operation.D * 4);
+    encoder.copyBufferToBuffer(
+      operation.zBuf,
+      0,
+      z1Buf,
+      0,
+      state.N_latent * operation.D * 4,
+    );
+    this._dispatchAdd(encoder, z1Buf, selfAttnBuf, state.N_latent * operation.D);
+    const norm2Buf = createEmptyBuffer(this.device, state.N_latent * operation.D * 4);
+    this._dispatchLayerNorm(
+      encoder,
+      z1Buf,
+      norm2Buf,
+      operation.weights.norm2,
+      state.N_latent,
+      operation.D,
+    );
+    operation.kind = 'basic-cross';
+    operation.ownerId = `block-${duty.block}-basic-${duty.basic}-cross`;
+    operation.z1Buf = z1Buf;
+    operation.attention = this._createAttentionState(
+      encoder,
+      norm2Buf,
+      state.imageTokensBuf,
+      operation.weights.attn2,
+      state.N_latent,
+      state.N_img,
+      operation.D,
+    );
+  }
+
+  _dispatchFineBasicFinish(encoder, state, duty) {
+    const ownerId = `block-${duty.block}-basic-${duty.basic}-cross`;
+    const operation = this._requireFineOperation(state, 'basic-cross', ownerId);
+    const crossAttnBuf = this._finishAttention(encoder, operation.attention);
+    const z2Buf = createEmptyBuffer(this.device, state.N_latent * operation.D * 4);
+    encoder.copyBufferToBuffer(
+      operation.z1Buf,
+      0,
+      z2Buf,
+      0,
+      state.N_latent * operation.D * 4,
+    );
+    this._dispatchAdd(encoder, z2Buf, crossAttnBuf, state.N_latent * operation.D);
+    const norm3Buf = createEmptyBuffer(this.device, state.N_latent * operation.D * 4);
+    this._dispatchLayerNorm(
+      encoder,
+      z2Buf,
+      norm3Buf,
+      operation.weights.norm3,
+      state.N_latent,
+      operation.D,
+    );
+    const ffnOutBuf = this._dispatchGEGLUFFN(
+      encoder,
+      norm3Buf,
+      operation.weights.ff,
+      state.N_latent,
+      operation.D,
+    );
+    const zOutBuf = createEmptyBuffer(this.device, state.N_latent * operation.D * 4);
+    encoder.copyBufferToBuffer(
+      z2Buf,
+      0,
+      zOutBuf,
+      0,
+      state.N_latent * operation.D * 4,
+    );
+    this._dispatchAdd(encoder, zOutBuf, ffnOutBuf, state.N_latent * operation.D);
+    state.currentLatent = zOutBuf;
+    state.activeOperation = null;
   }
 
   _dispatchForwardSetup(encoder, state) {
@@ -447,230 +810,195 @@ export class TwoStreamBackbone {
     return zOutBuf;
   }
 
-  // --- Cross-attention dispatch (tiled over Q to fit WebGPU buffer limits) ---
-  _dispatchCrossAttention(encoder, qInputBuf, kvInputBuf, attnWeights, N_q, N_kv, D) {
+  _createAttentionState(encoder, qInputBuf, kvInputBuf, attnWeights, N_q, N_kv, D) {
     const device = this.device;
     const numHeads = CONFIG.numHeads;
-    const headDim = CONFIG.headDim;
-
-    // Project Q, K, V
     const qBuf = createEmptyBuffer(device, N_q * D * 4);
     const kBuf = createEmptyBuffer(device, N_kv * D * 4);
     const vBuf = createEmptyBuffer(device, N_kv * D * 4);
-
     this._dispatchLinearNoBias(encoder, qInputBuf, qBuf, attnWeights.wq, N_q, D, D);
     this._dispatchLinearNoBias(encoder, kvInputBuf, kBuf, attnWeights.wk, N_kv, D, D);
     this._dispatchLinearNoBias(encoder, kvInputBuf, vBuf, attnWeights.wv, N_kv, D, D);
 
-    // Tile Q to keep score buffer under WebGPU maxBufferSize (~256MB safe target).
-    // Score buffer per tile = numHeads × tileQ × N_kv × 4 bytes.
-    // With TILE_Q=256, worst case (N_kv=27648): 16 × 256 × 27648 × 4 = ~440MB.
-    // Use 128 for extra safety margin: 16 × 128 × 27648 × 4 = ~220MB.
-    const TILE_Q = 128;
-    const scoreBufSize = numHeads * TILE_Q * N_kv * 4;
+    const tileQCapacity = 128;
+    const scoreBufSize = numHeads * tileQCapacity * N_kv * 4;
     const scoreBuf = createEmptyBuffer(device, scoreBufSize);
-    const tileAttnOutBuf = createEmptyBuffer(device, TILE_Q * D * 4);
+    const tileAttnOutBuf = createEmptyBuffer(device, tileQCapacity * D * 4);
     const attnOutBuf = createEmptyBuffer(device, N_q * D * 4);
 
-    for (let qStart = 0; qStart < N_q; qStart += TILE_Q) {
-      const tileQ = Math.min(TILE_Q, N_q - qStart);
-      const qOffsetBytes = qStart * D * 4;
+    return {
+      attnWeights,
+      N_q,
+      N_kv,
+      D,
+      numHeads,
+      headDim: CONFIG.headDim,
+      tileQCapacity,
+      tileCount: ceilDiv(N_q, tileQCapacity),
+      nextTileIndex: 0,
+      qBuf,
+      kBuf,
+      vBuf,
+      scoreBuf,
+      tileAttnOutBuf,
+      attnOutBuf,
+    };
+  }
 
-      // Scores: pass tileQ as N_q to the shader, offset Q buffer
-      {
-        const total = numHeads * tileQ * N_kv;
-        const totalWG = ceilDiv(total, WG_SIZE);
-        const [wgX, wgY] = splitWG(totalWG);
-        const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
-        const bg = device.createBindGroup({
-          layout: this._crossAttnLayout,
-          entries: [
-            { binding: 0, resource: { buffer: params } },
-            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-            { binding: 2, resource: { buffer: kBuf } },
-            { binding: 3, resource: { buffer: vBuf } },
-            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N_kv * 4 } },
-            { binding: 5, resource: { buffer: tileAttnOutBuf, size: tileQ * D * 4 } },
-          ],
-        });
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(this.pipelines.crossAttnScores);
-        pass.setBindGroup(0, bg);
-        pass.dispatchWorkgroups(wgX, wgY);
-        pass.end();
-      }
-
-      // Softmax
-      {
-        const totalRows = numHeads * tileQ;
-        const totalWG = ceilDiv(totalRows, WG_SIZE);
-        const [wgX, wgY] = splitWG(totalWG);
-        const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
-        const bg = device.createBindGroup({
-          layout: this._crossAttnLayout,
-          entries: [
-            { binding: 0, resource: { buffer: params } },
-            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-            { binding: 2, resource: { buffer: kBuf } },
-            { binding: 3, resource: { buffer: vBuf } },
-            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N_kv * 4 } },
-            { binding: 5, resource: { buffer: tileAttnOutBuf, size: tileQ * D * 4 } },
-          ],
-        });
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(this.pipelines.crossAttnSoftmax);
-        pass.setBindGroup(0, bg);
-        pass.dispatchWorkgroups(wgX, wgY);
-        pass.end();
-      }
-
-      // Apply attention for this tile
-      {
-        const total = tileQ * numHeads * headDim;
-        const totalWG = ceilDiv(total, WG_SIZE);
-        const [wgX, wgY] = splitWG(totalWG);
-        const params = this._cachedUniform(new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]));
-        const bg = device.createBindGroup({
-          layout: this._crossAttnLayout,
-          entries: [
-            { binding: 0, resource: { buffer: params } },
-            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-            { binding: 2, resource: { buffer: kBuf } },
-            { binding: 3, resource: { buffer: vBuf } },
-            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N_kv * 4 } },
-            { binding: 5, resource: { buffer: tileAttnOutBuf, size: tileQ * D * 4 } },
-          ],
-        });
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(this.pipelines.crossAttnApply);
-        pass.setBindGroup(0, bg);
-        pass.dispatchWorkgroups(wgX, wgY);
-        pass.end();
-      }
-
-      // Copy tile output to the right offset in the full output buffer
-      encoder.copyBufferToBuffer(tileAttnOutBuf, 0, attnOutBuf, qOffsetBytes, tileQ * D * 4);
+  _dispatchAttentionTile(encoder, state, tileIndex) {
+    if (tileIndex !== state.nextTileIndex) {
+      throw new Error(
+        `attention tile ${tileIndex} is out of order; expected ${state.nextTileIndex}`,
+      );
+    }
+    if (tileIndex < 0 || tileIndex >= state.tileCount) {
+      throw new RangeError(`invalid attention tile ${tileIndex}/${state.tileCount}`);
     }
 
-    // Output projection
-    const projOutBuf = createEmptyBuffer(device, N_q * D * 4);
-    this._dispatchLinear(encoder, attnOutBuf, projOutBuf,
-      attnWeights.proj.weight, attnWeights.proj.bias, N_q, D, D);
+    const device = this.device;
+    const {
+      N_q,
+      N_kv,
+      D,
+      numHeads,
+      headDim,
+      tileQCapacity,
+      qBuf,
+      kBuf,
+      vBuf,
+      scoreBuf,
+      tileAttnOutBuf,
+      attnOutBuf,
+    } = state;
+    const qStart = tileIndex * tileQCapacity;
+    const tileQ = Math.min(tileQCapacity, N_q - qStart);
+    const qOffsetBytes = qStart * D * 4;
+    const scoreSize = numHeads * tileQ * N_kv * 4;
+    const outputSize = tileQ * D * 4;
 
+    {
+      const totalWG = ceilDiv(numHeads * tileQ * N_kv, WG_SIZE);
+      const [wgX, wgY] = splitWG(totalWG);
+      const params = this._cachedUniform(
+        new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]),
+      );
+      const bg = device.createBindGroup({
+        layout: this._crossAttnLayout,
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: outputSize } },
+          { binding: 2, resource: { buffer: kBuf } },
+          { binding: 3, resource: { buffer: vBuf } },
+          { binding: 4, resource: { buffer: scoreBuf, size: scoreSize } },
+          { binding: 5, resource: { buffer: tileAttnOutBuf, size: outputSize } },
+        ],
+      });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.pipelines.crossAttnScores);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(wgX, wgY);
+      pass.end();
+    }
+
+    {
+      const totalWG = ceilDiv(numHeads * tileQ, WG_SIZE);
+      const [wgX, wgY] = splitWG(totalWG);
+      const params = this._cachedUniform(
+        new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]),
+      );
+      const bg = device.createBindGroup({
+        layout: this._crossAttnLayout,
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: outputSize } },
+          { binding: 2, resource: { buffer: kBuf } },
+          { binding: 3, resource: { buffer: vBuf } },
+          { binding: 4, resource: { buffer: scoreBuf, size: scoreSize } },
+          { binding: 5, resource: { buffer: tileAttnOutBuf, size: outputSize } },
+        ],
+      });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.pipelines.crossAttnSoftmax);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(wgX, wgY);
+      pass.end();
+    }
+
+    {
+      const totalWG = ceilDiv(tileQ * numHeads * headDim, WG_SIZE);
+      const [wgX, wgY] = splitWG(totalWG);
+      const params = this._cachedUniform(
+        new Uint32Array([tileQ, N_kv, headDim, numHeads, wgX]),
+      );
+      const bg = device.createBindGroup({
+        layout: this._crossAttnLayout,
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: outputSize } },
+          { binding: 2, resource: { buffer: kBuf } },
+          { binding: 3, resource: { buffer: vBuf } },
+          { binding: 4, resource: { buffer: scoreBuf, size: scoreSize } },
+          { binding: 5, resource: { buffer: tileAttnOutBuf, size: outputSize } },
+        ],
+      });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.pipelines.crossAttnApply);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(wgX, wgY);
+      pass.end();
+    }
+
+    encoder.copyBufferToBuffer(tileAttnOutBuf, 0, attnOutBuf, qOffsetBytes, outputSize);
+    state.nextTileIndex++;
+  }
+
+  _finishAttention(encoder, state) {
+    if (state.nextTileIndex !== state.tileCount) {
+      throw new Error(
+        `attention is incomplete at tile ${state.nextTileIndex}/${state.tileCount}`,
+      );
+    }
+    const projOutBuf = createEmptyBuffer(this.device, state.N_q * state.D * 4);
+    this._dispatchLinear(
+      encoder,
+      state.attnOutBuf,
+      projOutBuf,
+      state.attnWeights.proj.weight,
+      state.attnWeights.proj.bias,
+      state.N_q,
+      state.D,
+      state.D,
+    );
     return projOutBuf;
   }
 
-  // --- Self-attention dispatch (tiled over Q to fit WebGPU buffer limits) ---
-  _dispatchSelfAttention(encoder, inputBuf, attnWeights, N, D) {
-    const device = this.device;
-    const numHeads = CONFIG.numHeads;
-    const headDim = CONFIG.headDim;
-    const scale = 1.0 / Math.sqrt(headDim);
-
-    const qBuf = createEmptyBuffer(device, N * D * 4);
-    const kBuf = createEmptyBuffer(device, N * D * 4);
-    const vBuf = createEmptyBuffer(device, N * D * 4);
-
-    this._dispatchLinearNoBias(encoder, inputBuf, qBuf, attnWeights.wq, N, D, D);
-    this._dispatchLinearNoBias(encoder, inputBuf, kBuf, attnWeights.wk, N, D, D);
-    this._dispatchLinearNoBias(encoder, inputBuf, vBuf, attnWeights.wv, N, D, D);
-
-    // Self-attention score buffer = numHeads × N × N × 4 bytes.
-    // For N=3089: ~612MB, may exceed WebGPU maxBufferSize on some GPUs.
-    // Tile over Q rows to stay within limits.
-    const TILE_Q = 128;
-    const scoreTileSize = numHeads * TILE_Q * N * 4;
-    const scoreBuf = createEmptyBuffer(device, scoreTileSize);
-    const attnOutBuf = createEmptyBuffer(device, N * D * 4);
-
-    for (let qStart = 0; qStart < N; qStart += TILE_Q) {
-      const tileQ = Math.min(TILE_Q, N - qStart);
-      const qOffsetBytes = qStart * D * 4;
-
-      // The self-attention shader uses a different param layout than cross-attention.
-      // It expects: [N, D, numHeads, headDim, scale, numWgX] where N is the full
-      // sequence length for K indexing. We need to use cross-attention shaders instead
-      // for tiled self-attention, since they separate N_q and N_kv.
-
-      // Scores
-      {
-        const total = numHeads * tileQ * N;
-        const totalWG = ceilDiv(total, WG_SIZE);
-        const [wgX, wgY] = splitWG(totalWG);
-        const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
-        const bg = device.createBindGroup({
-          layout: this._crossAttnLayout,
-          entries: [
-            { binding: 0, resource: { buffer: params } },
-            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-            { binding: 2, resource: { buffer: kBuf } },
-            { binding: 3, resource: { buffer: vBuf } },
-            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N * 4 } },
-            { binding: 5, resource: { buffer: attnOutBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-          ],
-        });
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(this.pipelines.crossAttnScores);
-        pass.setBindGroup(0, bg);
-        pass.dispatchWorkgroups(wgX, wgY);
-        pass.end();
-      }
-
-      // Softmax
-      {
-        const totalRows = numHeads * tileQ;
-        const totalWG = ceilDiv(totalRows, WG_SIZE);
-        const [wgX, wgY] = splitWG(totalWG);
-        const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
-        const bg = device.createBindGroup({
-          layout: this._crossAttnLayout,
-          entries: [
-            { binding: 0, resource: { buffer: params } },
-            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-            { binding: 2, resource: { buffer: kBuf } },
-            { binding: 3, resource: { buffer: vBuf } },
-            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N * 4 } },
-            { binding: 5, resource: { buffer: attnOutBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-          ],
-        });
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(this.pipelines.crossAttnSoftmax);
-        pass.setBindGroup(0, bg);
-        pass.dispatchWorkgroups(wgX, wgY);
-        pass.end();
-      }
-
-      // Apply
-      {
-        const total = tileQ * numHeads * headDim;
-        const totalWG = ceilDiv(total, WG_SIZE);
-        const [wgX, wgY] = splitWG(totalWG);
-        const params = this._cachedUniform(new Uint32Array([tileQ, N, headDim, numHeads, wgX]));
-        const bg = device.createBindGroup({
-          layout: this._crossAttnLayout,
-          entries: [
-            { binding: 0, resource: { buffer: params } },
-            { binding: 1, resource: { buffer: qBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-            { binding: 2, resource: { buffer: kBuf } },
-            { binding: 3, resource: { buffer: vBuf } },
-            { binding: 4, resource: { buffer: scoreBuf, size: numHeads * tileQ * N * 4 } },
-            { binding: 5, resource: { buffer: attnOutBuf, offset: qOffsetBytes, size: tileQ * D * 4 } },
-          ],
-        });
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(this.pipelines.crossAttnApply);
-        pass.setBindGroup(0, bg);
-        pass.dispatchWorkgroups(wgX, wgY);
-        pass.end();
-      }
+  // --- Cross-attention dispatch (tiled over Q to fit WebGPU buffer limits) ---
+  _dispatchCrossAttention(encoder, qInputBuf, kvInputBuf, attnWeights, N_q, N_kv, D) {
+    const state = this._createAttentionState(
+      encoder,
+      qInputBuf,
+      kvInputBuf,
+      attnWeights,
+      N_q,
+      N_kv,
+      D,
+    );
+    for (let tileIndex = 0; tileIndex < state.tileCount; tileIndex++) {
+      this._dispatchAttentionTile(encoder, state, tileIndex);
     }
+    return this._finishAttention(encoder, state);
+  }
 
-    // Output projection
-    const projOutBuf = createEmptyBuffer(device, N * D * 4);
-    this._dispatchLinear(encoder, attnOutBuf, projOutBuf,
-      attnWeights.proj.weight, attnWeights.proj.bias, N, D, D);
-
-    return projOutBuf;
+  _dispatchSelfAttention(encoder, inputBuf, attnWeights, N, D) {
+    return this._dispatchCrossAttention(
+      encoder,
+      inputBuf,
+      inputBuf,
+      attnWeights,
+      N,
+      N,
+      D,
+    );
   }
 
   // --- GEGLU FFN ---

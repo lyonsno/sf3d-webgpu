@@ -189,6 +189,13 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const twoStreamSchedulingMode = options.twoStreamSchedulingMode === 'disabled'
     ? 'disabled'
     : 'cooperative';
+  const twoStreamDutyGranularity = options.twoStreamDutyGranularity ?? 'stage';
+  if (!['stage', 'attention-tile'].includes(twoStreamDutyGranularity)) {
+    throw new RangeError(
+      `twoStreamDutyGranularity must be stage or attention-tile, `
+      + `got ${twoStreamDutyGranularity}`,
+    );
+  }
   const postProcessorSchedulingMode = options.postProcessorSchedulingMode === 'disabled'
     ? 'disabled'
     : 'cooperative';
@@ -411,7 +418,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   let backboneResult;
   if (cooperativeTwoStream) {
-    report(`Running two-stream backbone (cooperative, ${twoStreamSchedulingMode})...`);
+    report(
+      `Running two-stream backbone (cooperative, ${twoStreamSchedulingMode}, `
+      + `${twoStreamDutyGranularity})...`,
+    );
     const { result, report: twoStreamReport } = await runCooperativeTwoStream({
       device,
       backbone: pipelines.twoStream,
@@ -419,6 +429,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       N_img: dinov2Result.N,
       weights: weights.backbone,
       schedulingMode: twoStreamSchedulingMode,
+      dutyGranularity: twoStreamDutyGranularity,
       signal: options.signal,
       onProgress: (p) => {
         if (p.percent != null) {
