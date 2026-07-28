@@ -12,6 +12,7 @@
     "test:cooperative-dino": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_dino_contract.mjs",
     "test:cooperative-dino-conformance": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_dino_conformance.mjs",
     "test:cooperative-post-processor": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_post_processor_contract.mjs",
+    "test:cooperative-post-processor-layers": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_post_processor_layer_contract.mjs",
     "test:worker-lifecycle": "node tools/test_worker_call_lifecycle.mjs",
     "test:cooperative-texture-telemetry": "node tools/test_cooperative_texture_bake_telemetry.mjs && node tools/test_cooperative_texture_bake_failures.mjs && node tools/test_cooperative_texture_bake_source_identity.mjs",
     "test:decoder-arena": "node tools/test_decoder_scratch_arena.mjs",

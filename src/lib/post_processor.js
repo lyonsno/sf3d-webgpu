@@ -25,6 +25,15 @@ const POST_CONFIG = {
   lastConvOut: 640,
 };
 
+export const POST_PROCESSOR_PLANE_STAGE_IDS = Object.freeze([
+  'gather',
+  'conv-0-relu',
+  'conv-1-relu',
+  'conv-2-relu',
+  'conv-3',
+  'pixel-shuffle-copy',
+]);
+
 /**
  * Dispatch the post-processor for all 3 triplane planes.
  *
@@ -67,75 +76,175 @@ export function dispatchPostProcessorPlane(
   output,
   plane,
 ) {
+  const state = createPostProcessorPlaneState(
+    device,
+    triplanesBuf,
+    weights,
+    output,
+    plane,
+  );
+  for (let stageIndex = 0; stageIndex < POST_PROCESSOR_PLANE_STAGE_IDS.length; stageIndex++) {
+    dispatchPostProcessorPlaneStage(device, encoder, state, stageIndex);
+  }
+}
+
+/**
+ * Create the persistent state that crosses command boundaries for one plane.
+ *
+ * Buffer allocation remains inside the stage that first produces each value,
+ * so constructing state does not silently perform GPU work or front-load memory.
+ */
+export function createPostProcessorPlaneState(
+  device,
+  triplanesBuf,
+  weights,
+  output,
+  plane,
+) {
   if (!Number.isSafeInteger(plane) || plane < 0 || plane >= 3) {
     throw new RangeError('postprocessor plane must be an integer in [0, 3)');
   }
-  const { inChannels, scaleFactor, planeSize, lastConvOut } = POST_CONFIG;
-  const planePixels = planeSize * planeSize; // 9216
-  const planeElements = inChannels * planePixels; // 1024 * 9216
-  const outPlaneElements = output.C * output.H * output.W;
+  if (!device || !triplanesBuf || !weights || !output?.buffer) {
+    throw new TypeError('postprocessor plane state requires device, input, weights, and output');
+  }
+  if (!Array.isArray(weights.convLayers) || weights.convLayers.length !== POST_CONFIG.convLayers) {
+    throw new RangeError(`postprocessor requires exactly ${POST_CONFIG.convLayers} convolution layers`);
+  }
+  return {
+    device,
+    triplanesBuf,
+    weights,
+    output,
+    plane,
+    nextStageIndex: 0,
+    current: null,
+    complete: false,
+  };
+}
 
-    // Extract one plane: offset into [1024, 27648] where each channel row
-    // has 27648 spatial elements = 3 × 96 × 96. Plane i occupies columns
-    // [i*9216, (i+1)*9216) within each channel row.
-    //
-    // But the data layout is [C, 3*96*96] contiguous, meaning plane 0 is
-    // channels × [0..9215], plane 1 is channels × [9216..18431], etc.
-    // We can use a sub-buffer view for each plane.
-    //
-    // Actually, the backbone output is [1024, 27648] in channel-first
-    // (C-major) layout: element [c, s] = buf[c * 27648 + s].
-    // Plane p occupies spatial [p*9216..(p+1)*9216).
-    // We need [1024, 9216] = [C, H*W] for Conv2d.
-    //
-    // We need to gather plane p's spatial slice. This is a strided copy
-    // that WebGPU copyBufferToBuffer can't do directly (non-contiguous).
-    // Use a simple gather shader or accept the overhead of a full copy.
-    // For now, use a gather dispatch.
+/**
+ * Encode one exact stage for one plane.
+ *
+ * The caller may invoke all stages into one encoder (legacy route) or finish
+ * and submit after each stage (cooperative route). State enforces the dependency
+ * order so skipped, repeated, or out-of-order command duties fail loud.
+ */
+export function dispatchPostProcessorPlaneStage(device, encoder, state, stageIndex) {
+  if (device !== state?.device) {
+    throw new Error('postprocessor plane state belongs to a different GPUDevice');
+  }
+  if (!Number.isSafeInteger(stageIndex)
+      || stageIndex < 0
+      || stageIndex >= POST_PROCESSOR_PLANE_STAGE_IDS.length) {
+    throw new RangeError(
+      `postprocessor stage must be an integer in [0, ${POST_PROCESSOR_PLANE_STAGE_IDS.length})`,
+    );
+  }
+  if (stageIndex !== state.nextStageIndex) {
+    throw new Error(
+      `postprocessor plane ${state.plane} expected stage ${state.nextStageIndex}, got ${stageIndex}`,
+    );
+  }
 
+  const {
+    inChannels,
+    scaleFactor,
+    planeSize,
+    lastConvOut,
+  } = POST_CONFIG;
+  const planePixels = planeSize * planeSize;
+  const planeElements = inChannels * planePixels;
+
+  if (stageIndex === 0) {
     const planeBuf = createEmptyBuffer(device, planeElements * 4);
-    _dispatchGatherPlane(device, encoder, triplanesBuf, planeBuf,
-      inChannels, planeSize * planeSize * 3, plane * planePixels, planePixels);
-
-    // Run 4 conv layers
-    let current = { buffer: planeBuf, outC: inChannels, outH: planeSize, outW: planeSize };
-
-    for (let i = 0; i < 4; i++) {
-      const isLast = (i === 3);
-      const curOutC = isLast ? lastConvOut : inChannels;
-
-      const convResult = dispatchConv2d(device, encoder, current.buffer,
-        weights.convLayers[i].weight, weights.convLayers[i].bias, {
-          inC: current.outC,
-          inH: current.outH,
-          inW: current.outW,
-          outC: curOutC,
-          kH: 3, kW: 3,
-          padH: 1, padW: 1,
-          strideH: 1, strideW: 1,
-        });
-
-      if (!isLast) {
-        // ReLU activation
-        const reluBuf = dispatchActivation(device, encoder,
-          convResult.buffer, null, curOutC * convResult.outH * convResult.outW, 0);
-        current = { buffer: reluBuf, outC: curOutC, outH: convResult.outH, outW: convResult.outW };
-      } else {
-        current = { buffer: convResult.buffer, outC: curOutC, outH: convResult.outH, outW: convResult.outW };
-      }
+    _dispatchGatherPlane(
+      device,
+      encoder,
+      state.triplanesBuf,
+      planeBuf,
+      inChannels,
+      planeSize * planeSize * 3,
+      state.plane * planePixels,
+      planePixels,
+    );
+    state.current = {
+      buffer: planeBuf,
+      outC: inChannels,
+      outH: planeSize,
+      outW: planeSize,
+    };
+  } else if (stageIndex <= 4) {
+    const layerIndex = stageIndex - 1;
+    const isLast = layerIndex === POST_CONFIG.convLayers - 1;
+    const curOutC = isLast ? lastConvOut : inChannels;
+    const convResult = dispatchConv2d(
+      device,
+      encoder,
+      state.current.buffer,
+      state.weights.convLayers[layerIndex].weight,
+      state.weights.convLayers[layerIndex].bias,
+      {
+        inC: state.current.outC,
+        inH: state.current.outH,
+        inW: state.current.outW,
+        outC: curOutC,
+        kH: 3,
+        kW: 3,
+        padH: 1,
+        padW: 1,
+        strideH: 1,
+        strideW: 1,
+      },
+    );
+    if (isLast) {
+      state.current = {
+        buffer: convResult.buffer,
+        outC: curOutC,
+        outH: convResult.outH,
+        outW: convResult.outW,
+      };
+    } else {
+      const reluBuf = dispatchActivation(
+        device,
+        encoder,
+        convResult.buffer,
+        null,
+        curOutC * convResult.outH * convResult.outW,
+        0,
+      );
+      state.current = {
+        buffer: reluBuf,
+        outC: curOutC,
+        outH: convResult.outH,
+        outW: convResult.outW,
+      };
     }
-
-    // PixelShuffle: [640, 96, 96] → [40, 384, 384]
-    const psResult = dispatchPixelShuffle(device, encoder, current.buffer, {
+  } else {
+    const psResult = dispatchPixelShuffle(device, encoder, state.current.buffer, {
       inC: lastConvOut,
       inH: planeSize,
       inW: planeSize,
       scaleFactor,
     });
+    const outPlaneElements = state.output.C * state.output.H * state.output.W;
+    const outOffset = state.plane * outPlaneElements * 4;
+    encoder.copyBufferToBuffer(
+      psResult.buffer,
+      0,
+      state.output.buffer,
+      outOffset,
+      outPlaneElements * 4,
+    );
+    state.complete = true;
+  }
 
-    // Copy this plane's output to the correct offset in the combined output buffer
-    const outOffset = plane * outPlaneElements * 4;
-    encoder.copyBufferToBuffer(psResult.buffer, 0, output.buffer, outOffset, outPlaneElements * 4);
+  state.nextStageIndex++;
+  return {
+    plane: state.plane,
+    stageIndex,
+    stageId: POST_PROCESSOR_PLANE_STAGE_IDS[stageIndex],
+    complete: state.complete,
+  };
 }
 
 export function dispatchPostProcessor(device, encoder, triplanesBuf, weights) {

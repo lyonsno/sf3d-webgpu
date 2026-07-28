@@ -14,12 +14,21 @@ import {
 import { createSf3dCooperativeRuntime, SF3D_ROUTE_ID } from './cooperative_dino.js';
 import {
   createPostProcessorOutput,
+  createPostProcessorPlaneState,
   dispatchPostProcessorPlane,
+  dispatchPostProcessorPlaneStage,
+  POST_PROCESSOR_PLANE_STAGE_IDS,
 } from './post_processor.js';
 
 export const POST_PROCESSOR_MANIFEST_ID = 'sf3d.post-processor-cooperative-boundaries.v0';
 export const POST_PROCESSOR_BOUNDARY_ID = 'post-processor-triplane-planes';
 export const POST_PROCESSOR_PLANE_COUNT = 3;
+export const POST_PROCESSOR_LAYER_MANIFEST_ID =
+  'sf3d.post-processor-layer-cooperative-boundaries.v0';
+export const POST_PROCESSOR_LAYER_BOUNDARY_ID = 'post-processor-triplane-stages';
+export { POST_PROCESSOR_PLANE_STAGE_IDS };
+export const POST_PROCESSOR_LAYER_DUTY_COUNT =
+  POST_PROCESSOR_PLANE_COUNT * POST_PROCESSOR_PLANE_STAGE_IDS.length;
 
 export function definePostProcessorManifest(numPlanes = POST_PROCESSOR_PLANE_COUNT) {
   if (!Number.isSafeInteger(numPlanes) || numPlanes <= 0) {
@@ -54,6 +63,40 @@ export function definePostProcessorManifest(numPlanes = POST_PROCESSOR_PLANE_COU
       },
     ],
     metadata: { source: 'sf3d-webgpu-cooperative-post-processor' },
+  });
+}
+
+export function definePostProcessorLayerManifest() {
+  return defineWebGpuCooperativeBoundaryManifest({
+    manifestId: POST_PROCESSOR_LAYER_MANIFEST_ID,
+    routeId: SF3D_ROUTE_ID,
+    phases: [
+      {
+        phaseId: 'triplane-post-processor',
+        boundaries: [
+          {
+            boundaryId: POST_PROCESSOR_LAYER_BOUNDARY_ID,
+            kind: 'gpu-command',
+            unit: 'post-processor-stage',
+            totalItems: POST_PROCESSOR_LAYER_DUTY_COUNT,
+            progressWeight: POST_PROCESSOR_LAYER_DUTY_COUNT,
+            commandDutyKind: 'compute',
+            chunking: { mode: 'fixed', chunkItems: 1 },
+            yieldPolicy: 'after-duty',
+            resources: {
+              retain: [
+                'triplane.low-resolution',
+                'post-processor.weights',
+                'post-processor.intermediates',
+              ],
+              produce: ['triplane.high-resolution'],
+              release: [],
+            },
+          },
+        ],
+      },
+    ],
+    metadata: { source: 'sf3d-webgpu-cooperative-post-processor-layers' },
   });
 }
 
@@ -92,18 +135,111 @@ export async function drivePostProcessorCooperativeBoundary(cooperative, options
   return { completedPlanes, totalPlanes: numPlanes };
 }
 
+export async function drivePostProcessorLayerBoundary(cooperative, options) {
+  const {
+    encodeStage,
+    submitStage,
+    now = () => globalThis.performance?.now?.() ?? Date.now(),
+  } = options;
+  const gpu = cooperative.startBoundary(POST_PROCESSOR_LAYER_BOUNDARY_ID);
+  const telemetry = [];
+
+  for (let dutyIndex = 0; dutyIndex < POST_PROCESSOR_LAYER_DUTY_COUNT; dutyIndex++) {
+    const range = gpu.nextRange();
+    if (!range) {
+      throw new Error(`cooperative postprocessor exhausted ranges before duty ${dutyIndex}`);
+    }
+    if (range.itemStart !== dutyIndex || range.itemEnd !== dutyIndex + 1) {
+      throw new Error(
+        `cooperative postprocessor range ${range.itemStart}-${range.itemEnd} `
+        + `does not match duty ${dutyIndex}`,
+      );
+    }
+    const plane = Math.floor(dutyIndex / POST_PROCESSOR_PLANE_STAGE_IDS.length);
+    const stageIndex = dutyIndex % POST_PROCESSOR_PLANE_STAGE_IDS.length;
+    const stageId = POST_PROCESSOR_PLANE_STAGE_IDS[stageIndex];
+    const timing = {
+      dutyIndex,
+      plane,
+      stageIndex,
+      stageId,
+      dutyStartedAtMs: now(),
+      encodeStartedAtMs: null,
+      encodeCompletedAtMs: null,
+      submitStartedAtMs: null,
+      submitCompletedAtMs: null,
+      dutyCompletedAtMs: null,
+      encodeMs: null,
+      submitMs: null,
+      dutyMs: null,
+    };
+
+    await gpu.runGpuDuty(range, {
+      encode: () => {
+        timing.encodeStartedAtMs = now();
+        const commandBuffer = encodeStage({
+          dutyIndex,
+          plane,
+          stageIndex,
+          stageId,
+          range,
+        });
+        timing.encodeCompletedAtMs = now();
+        timing.encodeMs = timing.encodeCompletedAtMs - timing.encodeStartedAtMs;
+        return commandBuffer;
+      },
+      submit: commandBuffer => {
+        timing.submitStartedAtMs = now();
+        const result = submitStage(commandBuffer, {
+          dutyIndex,
+          plane,
+          stageIndex,
+          stageId,
+          range,
+        });
+        timing.submitCompletedAtMs = now();
+        timing.submitMs = timing.submitCompletedAtMs - timing.submitStartedAtMs;
+        return result;
+      },
+    });
+    timing.dutyCompletedAtMs = now();
+    timing.dutyMs = timing.dutyCompletedAtMs - timing.dutyStartedAtMs;
+    telemetry.push(Object.freeze(timing));
+  }
+
+  if (gpu.nextRange() != null) {
+    throw new Error('cooperative postprocessor left ranges unconsumed');
+  }
+  return {
+    completedDuties: telemetry.length,
+    totalDuties: POST_PROCESSOR_LAYER_DUTY_COUNT,
+    telemetry: Object.freeze(telemetry),
+  };
+}
+
 export async function runCooperativePostProcessor(options) {
   const {
     device,
     triplanesBuf,
     weights,
     schedulingMode = 'cooperative',
+    dutyGranularity = 'plane',
     onProgress,
     signal,
     invocationId = `sf3d:post-processor:${schedulingMode}`,
   } = options;
-  const manifest = definePostProcessorManifest();
-  const runtime = createSf3dCooperativeRuntime(device);
+  if (!['plane', 'layer'].includes(dutyGranularity)) {
+    throw new RangeError(`unsupported postprocessor duty granularity: ${dutyGranularity}`);
+  }
+  const manifest = dutyGranularity === 'layer'
+    ? definePostProcessorLayerManifest()
+    : definePostProcessorManifest();
+  const queueFences = [];
+  const browserYields = [];
+  const runtime = createSf3dCooperativeRuntime(device, {
+    onQueueFenceResolved: event => queueFences.push(Object.freeze({ ...event })),
+    onBrowserYield: event => browserYields.push(Object.freeze({ ...event })),
+  });
   const execution = createWebGpuCooperativeExecution({
     runtime,
     manifest,
@@ -113,8 +249,41 @@ export async function runCooperativePostProcessor(options) {
     signal,
   });
   const output = createPostProcessorOutput(device);
+  let dutyTelemetry = [];
 
   await execution.run(async (cooperative) => {
+    if (dutyGranularity === 'layer') {
+      const planeStates = Array(output.numPlanes).fill(null);
+      const driven = await drivePostProcessorLayerBoundary(cooperative, {
+        encodeStage({ plane, stageIndex, stageId }) {
+          if (!planeStates[plane]) {
+            planeStates[plane] = createPostProcessorPlaneState(
+              device,
+              triplanesBuf,
+              weights,
+              output,
+              plane,
+            );
+          }
+          const encoder = device.createCommandEncoder({
+            label: `post-processor-plane-${plane}-${stageId}`,
+          });
+          dispatchPostProcessorPlaneStage(
+            device,
+            encoder,
+            planeStates[plane],
+            stageIndex,
+          );
+          return encoder.finish();
+        },
+        submitStage(commandBuffer) {
+          runtime.queue.submit([commandBuffer]);
+        },
+      });
+      dutyTelemetry = driven.telemetry;
+      return;
+    }
+
     await drivePostProcessorCooperativeBoundary(cooperative, {
       numPlanes: output.numPlanes,
       encodePlane({ plane }) {
@@ -137,5 +306,17 @@ export async function runCooperativePostProcessor(options) {
     });
   });
 
-  return { result: output, report: execution.finish() };
+  const report = execution.finish();
+  return {
+    result: output,
+    report: Object.freeze({
+      ...report,
+      adapterTelemetry: Object.freeze({
+        dutyGranularity,
+        stageDuties: Object.freeze(dutyTelemetry),
+        queueFences: Object.freeze(queueFences),
+        browserYields: Object.freeze(browserYields),
+      }),
+    }),
+  };
 }

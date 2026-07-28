@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * Real-browser A/B for the SF3D postprocessor plane boundary.
+ * Real-browser A/B/C for SF3D postprocessor command boundaries.
  *
  * Both arms execute the same complete image-to-GLB route. The control keeps the
- * postprocessor in one command buffer; the candidate submits three independent
- * plane duties through the Kaminos cooperative facade. The witness requires
- * byte-identical GLBs and reports wall/cadence only for the exact postprocessor
- * span, while preserving route/source/backend identities and writing a failure
- * report at every terminal path.
+ * postprocessor in one command buffer; the plane arm submits three independent
+ * planes; the layer arm submits the eighteen dependency-safe gather/conv/
+ * PixelShuffle duties. The witness requires byte-identical GLBs and reports
+ * wall/cadence only for the exact postprocessor span, while preserving
+ * route/source/backend identities and writing a failure report at every
+ * terminal path.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -76,7 +77,7 @@ function cleanup() {
 
 function writeFailure(error, phase, details = null) {
   const report = {
-    schema: 'sf3d.cooperative-post-processor-ab.v0',
+    schema: 'sf3d.cooperative-post-processor-abc.v1',
     ok: false,
     failure: {
       phase,
@@ -151,6 +152,13 @@ try {
         name: 'three-plane-cooperative',
         cooperativePostProcessor: true,
         postProcessorSchedulingMode: 'cooperative',
+        postProcessorDutyGranularity: 'plane',
+      },
+      {
+        name: 'eighteen-stage-cooperative',
+        cooperativePostProcessor: true,
+        postProcessorSchedulingMode: 'cooperative',
+        postProcessorDutyGranularity: 'layer',
       },
     ],
   };
@@ -319,6 +327,7 @@ try {
           completedItems: cooperative.progress?.completedItems,
           totalItems: cooperative.progress?.totalItems,
           rangeCount: cooperative.boundaries?.[0]?.actualRangeCount,
+          adapterTelemetry: cooperative.adapterTelemetry,
         } : null,
         progress,
       };
@@ -328,12 +337,19 @@ try {
       cooperativeDino: false,
       cooperativePostProcessor: false,
     });
-    const candidate = await runArm('three-plane-cooperative', {
+    const plane = await runArm('three-plane-cooperative', {
       cooperativeDino: false,
       cooperativePostProcessor: true,
       postProcessorSchedulingMode: 'cooperative',
+      postProcessorDutyGranularity: 'plane',
     });
-    return { control, candidate };
+    const candidate = await runArm('eighteen-stage-cooperative', {
+      cooperativeDino: false,
+      cooperativePostProcessor: true,
+      postProcessorSchedulingMode: 'cooperative',
+      postProcessorDutyGranularity: 'layer',
+    });
+    return { control, plane, candidate };
   });
 
   lastTrustworthyEvidence = { phase: 'browser-arms', routeIdentity, arms };
@@ -341,19 +357,25 @@ try {
     new Error(`page errors: ${pageErrors.join(' | ')}`),
     'browser-arms',
   );
-  const outputIdentical = arms.control.glbSha256 === arms.candidate.glbSha256
+  const outputIdentical = arms.control.glbSha256 === arms.plane.glbSha256
+    && arms.control.glbSha256 === arms.candidate.glbSha256
+    && arms.control.glbBytes === arms.plane.glbBytes
     && arms.control.glbBytes === arms.candidate.glbBytes
+    && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.plane.mesh)
     && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.candidate.mesh);
   const cooperativeComplete = arms.candidate.cooperative?.status === 'succeeded'
     && arms.candidate.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence'
-    && arms.candidate.cooperative?.completedItems === 3
-    && arms.candidate.cooperative?.totalItems === 3
-    && arms.candidate.cooperative?.rangeCount === 3;
+    && arms.candidate.cooperative?.completedItems === 18
+    && arms.candidate.cooperative?.totalItems === 18
+    && arms.candidate.cooperative?.rangeCount === 18
+    && arms.candidate.cooperative?.adapterTelemetry?.stageDuties?.length === 18
+    && arms.candidate.cooperative?.adapterTelemetry?.queueFences?.length === 18
+    && arms.candidate.cooperative?.adapterTelemetry?.browserYields?.length === 18;
   const progressHonest = arms.candidate.progress.some(
-    (message) => /Post-processor planes 3\/3 \(100%\)/.test(message),
+    (message) => /Post-processor duties 18\/18 \(100%\)/.test(message),
   );
   const report = {
-    schema: 'sf3d.cooperative-post-processor-ab.v0',
+    schema: 'sf3d.cooperative-post-processor-abc.v1',
     ok: outputIdentical && cooperativeComplete && progressHonest,
     routeIdentity,
     evidenceAuthority: source.clean ? 'clean-commit' : 'explicit-dirty-diff',
@@ -365,14 +387,20 @@ try {
       postProcessorWallMs:
         arms.candidate.postProcessor.wallMs - arms.control.postProcessor.wallMs,
       maxGapMs: arms.candidate.postProcessor.maxGapMs - arms.control.postProcessor.maxGapMs,
+      layerVersusPlane: {
+        fullRouteWallMs: arms.candidate.fullRouteWallMs - arms.plane.fullRouteWallMs,
+        postProcessorWallMs:
+          arms.candidate.postProcessor.wallMs - arms.plane.postProcessor.wallMs,
+        maxGapMs: arms.candidate.postProcessor.maxGapMs - arms.plane.postProcessor.maxGapMs,
+      },
     },
     arms,
   };
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
 
-  console.log('\n=== SF3D cooperative postprocessor A/B ===');
+  console.log('\n=== SF3D cooperative postprocessor A/B/C ===');
   console.log(`output identical: ${outputIdentical} (${arms.control.glbSha256.slice(0, 12)}...)`);
-  for (const arm of [arms.control, arms.candidate]) {
+  for (const arm of [arms.control, arms.plane, arms.candidate]) {
     console.log(
       `${arm.name}: full=${arm.fullRouteWallMs.toFixed(1)}ms `
       + `post=${arm.postProcessor.wallMs.toFixed(1)}ms `
@@ -382,9 +410,14 @@ try {
     );
   }
   console.log(
-    `delta: full=${report.deltas.fullRouteWallMs.toFixed(1)}ms `
+    `layer-control delta: full=${report.deltas.fullRouteWallMs.toFixed(1)}ms `
     + `post=${report.deltas.postProcessorWallMs.toFixed(1)}ms `
     + `maxGap=${report.deltas.maxGapMs.toFixed(1)}ms`,
+  );
+  console.log(
+    `layer-plane delta: full=${report.deltas.layerVersusPlane.fullRouteWallMs.toFixed(1)}ms `
+    + `post=${report.deltas.layerVersusPlane.postProcessorWallMs.toFixed(1)}ms `
+    + `maxGap=${report.deltas.layerVersusPlane.maxGapMs.toFixed(1)}ms`,
   );
   console.log(`report: ${REPORT_PATH}`);
   if (!report.ok) fail(

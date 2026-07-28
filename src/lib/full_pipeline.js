@@ -10,8 +10,9 @@
  *
  * `options` is forwarded to runInference (e.g. { cooperativeDino,
  * dinoSchedulingMode, dinoChunkBlocks, cooperativePostProcessor,
- * postProcessorSchedulingMode, captureDinoPayload }), so a capsule can select
- * cooperative execution per arm while the rest of the route stays identical.
+ * postProcessorSchedulingMode, postProcessorDutyGranularity,
+ * captureDinoPayload }), so a capsule can select cooperative execution per arm
+ * while the rest of the route stays identical.
  */
 
 import { runInference } from './inference.js';

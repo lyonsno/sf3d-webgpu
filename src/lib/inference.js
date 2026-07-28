@@ -187,6 +187,12 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const postProcessorSchedulingMode = options.postProcessorSchedulingMode === 'disabled'
     ? 'disabled'
     : 'cooperative';
+  const postProcessorDutyGranularity = options.postProcessorDutyGranularity ?? 'plane';
+  if (!['plane', 'layer'].includes(postProcessorDutyGranularity)) {
+    throw new RangeError(
+      `postProcessorDutyGranularity must be plane or layer, got ${postProcessorDutyGranularity}`,
+    );
+  }
   // Surfaced back to the caller/smoke via the returned _cooperativeReports.
   const _cooperativeReports = {};
   // Exact DINO numerical payload (only when options.captureDinoPayload).
@@ -457,17 +463,22 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   _stageStart = performance.now();
   let triplaneResult;
   if (cooperativePostProcessor) {
-    report(`Running post-processor (cooperative, ${postProcessorSchedulingMode}, 3 planes)...`);
+    const progressUnit = postProcessorDutyGranularity === 'layer' ? 'duties' : 'planes';
+    report(
+      `Running post-processor (cooperative, ${postProcessorSchedulingMode}, `
+      + `${postProcessorDutyGranularity})...`,
+    );
     const { result, report: postProcessorReport } = await runCooperativePostProcessor({
       device,
       triplanesBuf: backboneResult.buffer,
       weights: weights.postProcessor,
       schedulingMode: postProcessorSchedulingMode,
+      dutyGranularity: postProcessorDutyGranularity,
       signal: options.signal,
       onProgress: (p) => {
         if (p.percent != null) {
           report(
-            `Post-processor planes ${p.completedItems}/${p.totalItems} `
+            `Post-processor ${progressUnit} ${p.completedItems}/${p.totalItems} `
             + `(${p.percent.toFixed(0)}%)`,
           );
         }
