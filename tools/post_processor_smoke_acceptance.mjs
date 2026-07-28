@@ -3,6 +3,7 @@ export function evaluatePostProcessorSmokeAcceptance({
   outputIdentical,
   cooperativeComplete,
   progressHonest,
+  cadenceObserved,
 }) {
   const paired = armSelection === 'all' || armSelection === 'pair';
   return Object.freeze({
@@ -10,6 +11,7 @@ export function evaluatePostProcessorSmokeAcceptance({
     ok: paired
       && outputIdentical === true
       && cooperativeComplete === true
-      && progressHonest === true,
+      && progressHonest === true
+      && cadenceObserved === true,
   });
 }

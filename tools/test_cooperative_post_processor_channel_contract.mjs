@@ -162,6 +162,7 @@ assert.deepEqual(
     outputIdentical: null,
     cooperativeComplete: true,
     progressHonest: true,
+    cadenceObserved: false,
   }),
   { paired: false, ok: false },
 );
@@ -171,9 +172,20 @@ assert.deepEqual(
     outputIdentical: true,
     cooperativeComplete: true,
     progressHonest: true,
+    cadenceObserved: false,
+  }),
+  { paired: true, ok: false },
+);
+assert.deepEqual(
+  evaluatePostProcessorSmokeAcceptance({
+    armSelection: 'pair',
+    outputIdentical: true,
+    cooperativeComplete: true,
+    progressHonest: true,
+    cadenceObserved: true,
   }),
   { paired: true, ok: true },
 );
-console.log('ok  one-arm profiling cannot masquerade as paired acceptance');
+console.log('ok  one-arm and zero-frame profiling cannot masquerade as paired acceptance');
 
 console.log('\nALL COOPERATIVE POSTPROCESSOR CHANNEL CONTRACT CHECKS PASSED');
