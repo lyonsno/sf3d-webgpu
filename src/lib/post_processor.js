@@ -34,19 +34,47 @@ const POST_CONFIG = {
  * @param {Object} weights - post_processor weights from loadWeights
  * @returns {{ buffer: GPUBuffer, C: number, H: number, W: number }} - [3, 40, 384, 384]
  */
-export function dispatchPostProcessor(device, encoder, triplanesBuf, weights) {
-  const { inChannels, outChannels, scaleFactor, planeSize, lastConvOut } = POST_CONFIG;
-  const planePixels = planeSize * planeSize; // 9216
-  const planeElements = inChannels * planePixels; // 1024 * 9216
+export function createPostProcessorOutput(device) {
+  const { outChannels, scaleFactor, planeSize } = POST_CONFIG;
   const outH = planeSize * scaleFactor; // 384
   const outW = planeSize * scaleFactor; // 384
   const outPlaneElements = outChannels * outH * outW;
 
   // Output buffer for all 3 planes: [3, 40, 384, 384]
   const outputBuf = createEmptyBuffer(device, 3 * outPlaneElements * 4);
+  return {
+    buffer: outputBuf,
+    C: outChannels,
+    H: outH,
+    W: outW,
+    numPlanes: 3,
+  };
+}
 
-  // Process each of the 3 triplane planes with shared weights
-  for (let plane = 0; plane < 3; plane++) {
+/**
+ * Encode one dependency-independent triplane plane into a caller-owned output.
+ *
+ * The four convolutions inside a plane remain sequential and therefore stay in
+ * one command buffer for this first cooperative cut. Different planes share
+ * weights but no intermediate buffers, so command boundaries between planes do
+ * not change numerical ordering or output layout.
+ */
+export function dispatchPostProcessorPlane(
+  device,
+  encoder,
+  triplanesBuf,
+  weights,
+  output,
+  plane,
+) {
+  if (!Number.isSafeInteger(plane) || plane < 0 || plane >= 3) {
+    throw new RangeError('postprocessor plane must be an integer in [0, 3)');
+  }
+  const { inChannels, scaleFactor, planeSize, lastConvOut } = POST_CONFIG;
+  const planePixels = planeSize * planeSize; // 9216
+  const planeElements = inChannels * planePixels; // 1024 * 9216
+  const outPlaneElements = output.C * output.H * output.W;
+
     // Extract one plane: offset into [1024, 27648] where each channel row
     // has 27648 spatial elements = 3 × 96 × 96. Plane i occupies columns
     // [i*9216, (i+1)*9216) within each channel row.
@@ -107,10 +135,19 @@ export function dispatchPostProcessor(device, encoder, triplanesBuf, weights) {
 
     // Copy this plane's output to the correct offset in the combined output buffer
     const outOffset = plane * outPlaneElements * 4;
-    encoder.copyBufferToBuffer(psResult.buffer, 0, outputBuf, outOffset, outPlaneElements * 4);
+    encoder.copyBufferToBuffer(psResult.buffer, 0, output.buffer, outOffset, outPlaneElements * 4);
+}
+
+export function dispatchPostProcessor(device, encoder, triplanesBuf, weights) {
+  const output = createPostProcessorOutput(device);
+
+  // Preserve the legacy route exactly: all three planes are still encoded into
+  // the caller's one command encoder and submitted by the caller as one buffer.
+  for (let plane = 0; plane < output.numPlanes; plane++) {
+    dispatchPostProcessorPlane(device, encoder, triplanesBuf, weights, output, plane);
   }
 
-  return { buffer: outputBuf, C: outChannels, H: outH, W: outW, numPlanes: 3 };
+  return output;
 }
 
 // --- Internal: gather one triplane plane from strided layout ---

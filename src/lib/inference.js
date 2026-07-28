@@ -20,6 +20,7 @@ import { SF3DImageTokenizer } from './sf3d_backbone.js';
 import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
+import { runCooperativePostProcessor } from './cooperative_post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
 import { loadTetData, marchingTetrahedra, scaleTensor } from './marching_tet.js';
 
@@ -182,6 +183,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const dinoChunkBlocks = Number.isSafeInteger(options.dinoChunkBlocks) && options.dinoChunkBlocks > 0
     ? options.dinoChunkBlocks
     : 1;
+  const cooperativePostProcessor = options.cooperativePostProcessor === true;
+  const postProcessorSchedulingMode = options.postProcessorSchedulingMode === 'disabled'
+    ? 'disabled'
+    : 'cooperative';
   // Surfaced back to the caller/smoke via the returned _cooperativeReports.
   const _cooperativeReports = {};
   // Exact DINO numerical payload (only when options.captureDinoPayload).
@@ -450,14 +455,37 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   // 5. PixelShuffle post-processing (counted as part of triplane-decode)
   _stageStart = performance.now();
-  report('Running post-processor...');
-  const encoder4 = device.createCommandEncoder();
-  const triplaneResult = dispatchPostProcessor(
-    device, encoder4, backboneResult.buffer, weights.postProcessor);
-  device.queue.submit([encoder4.finish()]);
+  let triplaneResult;
+  if (cooperativePostProcessor) {
+    report(`Running post-processor (cooperative, ${postProcessorSchedulingMode}, 3 planes)...`);
+    const { result, report: postProcessorReport } = await runCooperativePostProcessor({
+      device,
+      triplanesBuf: backboneResult.buffer,
+      weights: weights.postProcessor,
+      schedulingMode: postProcessorSchedulingMode,
+      signal: options.signal,
+      onProgress: (p) => {
+        if (p.percent != null) {
+          report(
+            `Post-processor planes ${p.completedItems}/${p.totalItems} `
+            + `(${p.percent.toFixed(0)}%)`,
+          );
+        }
+      },
+    });
+    triplaneResult = result;
+    _cooperativeReports['post-processor'] = postProcessorReport;
+  } else {
+    report('Running post-processor...');
+    const encoder4 = device.createCommandEncoder();
+    triplaneResult = dispatchPostProcessor(
+      device, encoder4, backboneResult.buffer, weights.postProcessor);
+    device.queue.submit([encoder4.finish()]);
 
-  // Ensure GPU work is done before reading
-  await device.queue.onSubmittedWorkDone();
+    // Ensure GPU work is done before reading
+    await device.queue.onSubmittedWorkDone();
+  }
+  _markSpan('post-processor', _stageStart);
 
   // Diagnostic: check backbone output
   if (DEBUG) {
@@ -625,7 +653,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     _triplaneDecoder: pipelines.triplaneDecoder,
     _decoderWeights: weights.decoder,
     _stageTimings,
-    // Cooperative execution reports per phase (empty unless options.cooperativeDino)
+    // Cooperative execution reports per phase (empty unless an opt-in boundary runs)
     _cooperativeReports,
     // Exact DINO numerical payload for A/B comparison (null unless captured).
     _dinoPayload,
