@@ -10,11 +10,14 @@ import assert from 'node:assert/strict';
 import {
   TWO_STREAM_BOUNDARY_ID,
   TWO_STREAM_DUTY_COUNT,
+  TWO_STREAM_ATTENTION_BOUNDARY_ID,
   TWO_STREAM_STAGE_IDS,
   defineTwoStreamManifest,
+  driveTwoStreamAttentionBoundary,
   driveTwoStreamBoundary,
 } from '../src/lib/cooperative_two_stream.js';
 import { TwoStreamBackbone } from '../src/lib/two_stream.js';
+import { createTwoStreamAttentionDutyPlan } from '../src/lib/two_stream.js';
 
 const expectedStageIds = [
   'setup',
@@ -130,5 +133,72 @@ assert.throws(
   /N_img must be a positive safe integer/,
 );
 console.log('ok  executable graph rejects skipped stages and incomplete output');
+
+const finePlan = createTwoStreamAttentionDutyPlan(1297);
+assert.equal(finePlan.length, 1618);
+assert.equal(finePlan[0].dutyId, 'setup');
+assert.equal(finePlan.at(-1).dutyId, 'final');
+assert.equal(
+  finePlan.filter(duty => duty.kind === 'attention-tile').length,
+  1564,
+);
+assert.equal(
+  finePlan.filter(
+    duty => duty.kind === 'attention-tile' && duty.ownerId.endsWith('fuse-out'),
+  ).length,
+  4 * 216,
+);
+for (let index = 0; index < finePlan.length; index++) {
+  assert.equal(finePlan[index].dutyIndex, index);
+}
+console.log('ok  fine plan exposes all 1,564 existing attention tiles in exact order');
+
+const fineManifest = defineTwoStreamManifest({
+  dutyGranularity: 'attention-tile',
+  N_img: 1297,
+});
+const fineBoundary = fineManifest.phases[0].boundaries[0];
+assert.equal(fineBoundary.boundaryId, TWO_STREAM_ATTENTION_BOUNDARY_ID);
+assert.equal(fineBoundary.unit, 'two-stream-attention-duty');
+assert.equal(fineBoundary.totalItems, finePlan.length);
+assert.equal(fineBoundary.progressWeight, finePlan.length);
+
+let fineRangeIndex = 0;
+const fineDriven = await driveTwoStreamAttentionBoundary({
+  startBoundary(boundaryId) {
+    assert.equal(boundaryId, TWO_STREAM_ATTENTION_BOUNDARY_ID);
+    return {
+      nextRange() {
+        if (fineRangeIndex >= finePlan.length) return null;
+        const itemStart = fineRangeIndex++;
+        return { itemStart, itemEnd: itemStart + 1, itemCount: 1 };
+      },
+      async runGpuDuty(_range, duty) {
+        duty.submit(duty.encode());
+      },
+    };
+  },
+}, {
+  plan: finePlan,
+  encodeDuty: ({ duty }) => ({ dutyIndex: duty.dutyIndex }),
+  submitDuty: commandBuffer => assert.equal(
+    commandBuffer.dutyIndex,
+    fineRangeIndex - 1,
+  ),
+});
+assert.equal(fineDriven.completedDuties, finePlan.length);
+assert.equal(fineDriven.telemetry.length, finePlan.length);
+console.log('ok  fine driver consumes every declared attention duty exactly once');
+
+const fineState = backbone.createAttentionForwardState({}, 1297, {});
+assert.throws(
+  () => backbone.dispatchAttentionForwardDuty({}, fineState, 1),
+  /out of order; expected 0/,
+);
+assert.throws(
+  () => backbone.getForwardResult(fineState),
+  /incomplete at stage 0\/1618/,
+);
+console.log('ok  fine executable graph rejects skipped duties and incomplete output');
 
 console.log('\nALL COOPERATIVE TWO-STREAM CONTRACT CHECKS PASSED');

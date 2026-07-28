@@ -3,8 +3,9 @@
  * Real-browser A/B for the dependency-safe SF3D two-stream stage graph.
  *
  * Both arms run the exact full image-to-GLB route with cooperative DINO. The
- * control retains one two-stream command buffer; the candidate submits the 22
- * dependency-safe stages separately. Every terminal path writes a report.
+ * control retains one two-stream command buffer; the candidate submits the
+ * existing attention query tiles plus their dependency transitions as 1,618
+ * duties. Every terminal path writes a report.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -30,6 +31,9 @@ const REPORT_PATH = path.resolve(argValue(
 ));
 const ALLOW_DIRTY = process.argv.includes('--allow-dirty-source');
 const WEIGHTS = path.join(REPO, 'public', 'weights.bin');
+const EXPECTED_GLB_SHA256 =
+  'e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7';
+const EXPECTED_GLB_BYTES = 2511516;
 const children = [];
 let browser = null;
 let lastTrustworthyEvidence = { phase: 'argument-parse' };
@@ -135,10 +139,11 @@ try {
         cooperativeTwoStream: false,
       },
       {
-        name: 'twenty-two-stage-candidate',
+        name: 'attention-tile-candidate',
         cooperativeDino: true,
         cooperativeTwoStream: true,
         twoStreamSchedulingMode: 'cooperative',
+        twoStreamDutyGranularity: 'attention-tile',
       },
     ],
   };
@@ -233,6 +238,21 @@ try {
     }
     async function runArm(name, options) {
       const progress = [];
+      const frameGaps = [];
+      let frameProbeActive = true;
+      let priorFrameAt = null;
+      const probeFrame = timestamp => {
+        if (priorFrameAt != null) {
+          frameGaps.push({
+            start: priorFrameAt,
+            end: timestamp,
+            gap: timestamp - priorFrameAt,
+          });
+        }
+        priorFrameAt = timestamp;
+        if (frameProbeActive) requestAnimationFrame(probeFrame);
+      };
+      requestAnimationFrame(probeFrame);
       const output = await runFullPipelineToGlb(
         device,
         pipelines,
@@ -241,9 +261,23 @@ try {
         options,
         message => progress.push(message),
       );
+      frameProbeActive = false;
+      await new Promise(resolve => setTimeout(resolve, 80));
       const span = output.stageSpans.find(entry => entry.name === 'two-stream-backbone');
       if (!span) throw new Error(`${name}: missing two-stream stage span`);
       const cooperative = output.cooperativeReports?.['two-stream-backbone'] ?? null;
+      const localGaps = frameGaps
+        .filter(frame => frame.start < span.end && frame.end > span.start)
+        .map(frame => frame.gap)
+        .sort((left, right) => left - right);
+      const percentile = percentileValue => localGaps.length
+        ? localGaps[
+          Math.min(
+            localGaps.length - 1,
+            Math.ceil(localGaps.length * percentileValue) - 1,
+          )
+        ]
+        : null;
       return {
         name,
         requestedOptions: options,
@@ -252,6 +286,15 @@ try {
         mesh: { vertices: output.numVertices, faces: output.numFaces },
         fullRouteWallMs: output.totalMs,
         twoStreamWallMs: span.end - span.start,
+        twoStreamCadence: {
+          frameCount: localGaps.length,
+          p95GapMs: percentile(0.95),
+          p99GapMs: percentile(0.99),
+          maxGapMs: localGaps.at(-1) ?? null,
+          gapsOver16_7: localGaps.filter(gap => gap > 16.7).length,
+          gapsOver33_3: localGaps.filter(gap => gap > 33.3).length,
+          gapsOver100: localGaps.filter(gap => gap > 100).length,
+        },
         cooperative: cooperative ? {
           status: cooperative.status,
           schedulingMode: cooperative.schedulingMode,
@@ -276,10 +319,11 @@ try {
         ...common,
         cooperativeTwoStream: false,
       }),
-      candidate: await runArm('twenty-two-stage-candidate', {
+      candidate: await runArm('attention-tile-candidate', {
         ...common,
         cooperativeTwoStream: true,
         twoStreamSchedulingMode: 'cooperative',
+        twoStreamDutyGranularity: 'attention-tile',
       }),
     };
   });
@@ -292,23 +336,28 @@ try {
   const outputIdentical = arms.control.glbSha256 === arms.candidate.glbSha256
     && arms.control.glbBytes === arms.candidate.glbBytes
     && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.candidate.mesh);
+  const outputCanonical = arms.control.glbSha256 === EXPECTED_GLB_SHA256
+    && arms.candidate.glbSha256 === EXPECTED_GLB_SHA256
+    && arms.control.glbBytes === EXPECTED_GLB_BYTES
+    && arms.candidate.glbBytes === EXPECTED_GLB_BYTES;
   const cooperativeComplete = arms.candidate.cooperative?.status === 'succeeded'
     && arms.candidate.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence'
-    && arms.candidate.cooperative?.completedItems === 22
-    && arms.candidate.cooperative?.totalItems === 22
-    && arms.candidate.cooperative?.rangeCount === 22
-    && arms.candidate.cooperative?.adapterTelemetry?.stageDuties?.length === 22
-    && arms.candidate.cooperative?.adapterTelemetry?.queueFences?.length === 22
-    && arms.candidate.cooperative?.adapterTelemetry?.browserYields?.length === 22;
+    && arms.candidate.cooperative?.completedItems === 1618
+    && arms.candidate.cooperative?.totalItems === 1618
+    && arms.candidate.cooperative?.rangeCount === 1618
+    && arms.candidate.cooperative?.adapterTelemetry?.stageDuties?.length === 1618
+    && arms.candidate.cooperative?.adapterTelemetry?.queueFences?.length === 1618
+    && arms.candidate.cooperative?.adapterTelemetry?.browserYields?.length === 1618;
   const progressHonest = arms.candidate.progress.some(
-    message => /Two-stream duties 22\/22 \(100%\)/.test(message),
+    message => /Two-stream duties 1618\/1618 \(100%\)/.test(message),
   );
   const report = {
     schema: 'sf3d.cooperative-two-stream-ab.v1',
-    ok: outputIdentical && cooperativeComplete && progressHonest,
+    ok: outputIdentical && outputCanonical && cooperativeComplete && progressHonest,
     routeIdentity,
     evidenceAuthority: source.clean ? 'clean-commit' : 'explicit-dirty-diff',
     outputIdentical,
+    outputCanonical,
     cooperativeComplete,
     progressHonest,
     deltas: {
@@ -337,6 +386,7 @@ try {
   if (!report.ok) fail(
     new Error(
       `acceptance failed: identical=${outputIdentical} `
+      + `canonical=${outputCanonical} `
       + `cooperativeComplete=${cooperativeComplete} progressHonest=${progressHonest}`,
     ),
     'acceptance',
