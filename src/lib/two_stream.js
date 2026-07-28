@@ -48,6 +48,19 @@ const CONFIG = {
   eps: 1e-5,
 };
 
+export const TWO_STREAM_STAGE_IDS = Object.freeze([
+  'setup',
+  ...Array.from({ length: CONFIG.numBlocks }, (_, block) => [
+    `block-${block}-fuse-in`,
+    ...Array.from(
+      { length: CONFIG.numBasicBlocks },
+      (_, basic) => `block-${block}-basic-${basic}`,
+    ),
+    `block-${block}-fuse-out`,
+  ]).flat(),
+  'final',
+]);
+
 export class TwoStreamBackbone {
   constructor(device) {
     this.device = device;
@@ -173,126 +186,188 @@ export class TwoStreamBackbone {
    * @returns {GPUBuffer} - [3*96*96, 1024] refined triplane tokens
    */
   forward(encoder, imageTokensBuf, N_img, weights) {
+    const state = this.createForwardState(imageTokensBuf, N_img, weights);
+    for (let stageIndex = 0; stageIndex < TWO_STREAM_STAGE_IDS.length; stageIndex++) {
+      this.dispatchForwardStage(encoder, state, stageIndex);
+    }
+    return this.getForwardResult(state);
+  }
+
+  createForwardState(imageTokensBuf, N_img, weights) {
+    if (!Number.isSafeInteger(N_img) || N_img <= 0) {
+      throw new TypeError('N_img must be a positive safe integer');
+    }
+    this._diagnosticBuffers = {};
+    return {
+      imageTokensBuf,
+      N_img,
+      weights,
+      N_latent: N_img + CONFIG.numLatents,
+      currentLatent: null,
+      currentTriplane: null,
+      nextStageIndex: 0,
+      result: null,
+    };
+  }
+
+  dispatchForwardStage(encoder, state, stageIndex) {
+    if (!Number.isSafeInteger(stageIndex)
+      || stageIndex < 0
+      || stageIndex >= TWO_STREAM_STAGE_IDS.length) {
+      throw new RangeError(`invalid two-stream stage index ${stageIndex}`);
+    }
+    if (stageIndex !== state.nextStageIndex) {
+      throw new Error(
+        `two-stream stage ${stageIndex} is out of order; expected ${state.nextStageIndex}`,
+      );
+    }
+
+    if (stageIndex === 0) {
+      this._dispatchForwardSetup(encoder, state);
+    } else if (stageIndex === TWO_STREAM_STAGE_IDS.length - 1) {
+      this._dispatchForwardFinal(encoder, state);
+    } else {
+      const blockStage = stageIndex - 1;
+      const stagesPerBlock = CONFIG.numBasicBlocks + 2;
+      const blockIndex = Math.floor(blockStage / stagesPerBlock);
+      const stageInBlock = blockStage % stagesPerBlock;
+      this._dispatchForwardBlockStage(
+        encoder,
+        state,
+        blockIndex,
+        stageInBlock,
+      );
+    }
+
+    state.nextStageIndex++;
+    return state;
+  }
+
+  getForwardResult(state) {
+    if (state.nextStageIndex !== TWO_STREAM_STAGE_IDS.length || state.result == null) {
+      throw new Error(
+        `two-stream forward is incomplete at stage ${state.nextStageIndex}/`
+        + `${TWO_STREAM_STAGE_IDS.length}`,
+      );
+    }
+    return state.result;
+  }
+
+  _dispatchForwardSetup(encoder, state) {
     const device = this.device;
     const D = CONFIG.dim;
-    const N_tri = CONFIG.triplaneTokens; // 27648
-    const N_latent_init = CONFIG.numLatents; // 1792
+    const N_tri = CONFIG.triplaneTokens;
+    const N_latent_init = CONFIG.numLatents;
+    const { imageTokensBuf, N_img, weights } = state;
 
-    // 1. Prepare triplane tokens: GroupNorm → permute → proj
-    //    Input: tokenizer.embeddings [3, 1024, 96, 96] in CHW
-    //    Permute to [3*96*96, 1024] (reshape)
-    //    GroupNorm operates on [1024, 3*96*96] (channel-first)
-    //    Then permute to [N_tri, 1024] and project
-    const gnInputBuf = createEmptyBuffer(device, D * N_tri * 4); // [1024, 27648] for GN
-    // The tokenizer embeddings are already [3, 1024, 96, 96] = [3*1024*96*96]
-    // GroupNorm expects [C, H*W] where C=1024, spatial=3*96*96=27648
-    // After GN, permute to [27648, 1024] then project
-
-    // For now, treat the triplane embeddings as [1024, 27648] for GroupNorm
-    // (the data layout is [3, 1024, 96, 96] which when viewed as [1024, 27648_spatial] per plane
-    //  is actually interleaved... but GroupNorm with 32 groups over 1024 channels is channel-wise)
-    //
-    // Actually the backbone code does:
-    //   hidden_states = self.norm_triplane(hidden_states)  # GroupNorm on [B, C, N]
-    //   hidden_states = hidden_states.permute(0, 2, 1)    # [B, N, C]
-    //   hidden_states = self.proj_triplane(hidden_states)  # Linear [C, C]
-    //
-    // So the triplane tokens come in as [C, N] = [1024, 27648] from tokenizer,
-    // get GroupNormed, then permuted to [N, C] = [27648, 1024], then projected.
-
-    // GroupNorm on tokenizer embeddings [1024, 27648]
     const gnOutBuf = this._dispatchGroupNorm(encoder, weights.tokenizer_embeddings_buf,
       weights.normTriplane, D, N_tri, 32);
-
-    // Permute [1024, 27648] → [27648, 1024]
     const triPermBuf = createEmptyBuffer(device, N_tri * D * 4);
     this._dispatchTranspose(encoder, gnOutBuf, triPermBuf, D, N_tri);
-
-    // Project triplane: [27648, 1024] → [27648, 1024]
     const triProjBuf = createEmptyBuffer(device, N_tri * D * 4);
     this._dispatchLinear(encoder, triPermBuf, triProjBuf,
       weights.projTriplane.weight, weights.projTriplane.bias, N_tri, D, D);
 
-    // 2. Prepare image latents: LayerNorm → proj → concat with latent_init
     const imgNormBuf = createEmptyBuffer(device, N_img * D * 4);
     this._dispatchLayerNorm(encoder, imageTokensBuf, imgNormBuf, weights.normImage, N_img, D);
-
     const imgProjBuf = createEmptyBuffer(device, N_img * D * 4);
     this._dispatchLinear(encoder, imgNormBuf, imgProjBuf,
       weights.projImage.weight, weights.projImage.bias, N_img, D, D);
 
-    // Prepare latent_init: LayerNorm → proj
     const latentNormBuf = createEmptyBuffer(device, N_latent_init * D * 4);
     this._dispatchLayerNorm(encoder, weights.latentInit, latentNormBuf,
       weights.normLatent, N_latent_init, D);
-
     const latentProjBuf = createEmptyBuffer(device, N_latent_init * D * 4);
     this._dispatchLinear(encoder, latentNormBuf, latentProjBuf,
       weights.projLatent.weight, weights.projLatent.bias, N_latent_init, D, D);
 
-    // Concat: latent = [image_tokens, latent_init] → [N_img + 1792, 1024]
-    const N_latent = N_img + N_latent_init;
+    const N_latent = state.N_latent;
     const latentBuf = createEmptyBuffer(device, N_latent * D * 4);
     this._dispatchConcat(encoder, imgProjBuf, latentProjBuf, latentBuf,
       N_img * D, N_latent_init * D);
 
-    // 3. Run 4 TwoStreamBlocks
-    let currentLatent = latentBuf;
-    let currentTriplane = triProjBuf;
+    state.currentLatent = latentBuf;
+    state.currentTriplane = triProjBuf;
+    Object.assign(this._diagnosticBuffers, {
+      gnOutBuf,
+      triPermBuf,
+      triProjBuf,
+      imgProjBuf,
+      latentProjBuf,
+      latentBuf,
+    });
+  }
 
-    // Track intermediate buffers for diagnostics
-    this._diagnosticBuffers = {};
+  _dispatchForwardBlockStage(encoder, state, blockIndex, stageInBlock) {
+    const D = CONFIG.dim;
+    const N_tri = CONFIG.triplaneTokens;
+    const block = state.weights.mainBlocks[blockIndex];
 
-    for (let b = 0; b < CONFIG.numBlocks; b++) {
-      const block = weights.mainBlocks[b];
-
-      // fuse_block_in: fuse(latent ← triplane)
-      currentLatent = this._dispatchFuseBlock(encoder, currentLatent, currentTriplane,
-        block.fuseBlockIn, N_latent, N_tri, D);
-
-      // 3 BasicBlocks: self-attn + cross-attn(latent ← encoder_hidden_states) + GEGLU FFN
-      for (let i = 0; i < CONFIG.numBasicBlocks; i++) {
-        currentLatent = this._dispatchBasicBlock(encoder, currentLatent,
-          imageTokensBuf, block.transformerBlocks[i], N_latent, N_img, D);
-      }
-
-      // fuse_block_out: fuse(triplane ← latent)
-      currentTriplane = this._dispatchFuseBlock(encoder, currentTriplane, currentLatent,
-        block.fuseBlockOut, N_tri, N_latent, D);
-
-      // Save refs for diagnostics
-      this._diagnosticBuffers[`block${b}_latent`] = currentLatent;
-      this._diagnosticBuffers[`block${b}_triplane`] = currentTriplane;
-
-      // Also save the triplane projection and GroupNorm output from first block
-      if (b === 0) {
-        this._diagnosticBuffers['gnOutBuf'] = gnOutBuf;
-        this._diagnosticBuffers['triPermBuf'] = triPermBuf;
-        this._diagnosticBuffers['triProjBuf'] = triProjBuf;
-        this._diagnosticBuffers['imgProjBuf'] = imgProjBuf;
-        this._diagnosticBuffers['latentProjBuf'] = latentProjBuf;
-        this._diagnosticBuffers['latentBuf'] = latentBuf;
-      }
+    if (stageInBlock === 0) {
+      state.currentLatent = this._dispatchFuseBlock(
+        encoder,
+        state.currentLatent,
+        state.currentTriplane,
+        block.fuseBlockIn,
+        state.N_latent,
+        N_tri,
+        D,
+      );
+      return;
     }
 
-    // 4. Project out and add residual
-    const projOutBuf = createEmptyBuffer(device, N_tri * D * 4);
-    this._dispatchLinear(encoder, currentTriplane, projOutBuf,
-      weights.projOut.weight, weights.projOut.bias, N_tri, D, D);
+    if (stageInBlock <= CONFIG.numBasicBlocks) {
+      const basicIndex = stageInBlock - 1;
+      state.currentLatent = this._dispatchBasicBlock(
+        encoder,
+        state.currentLatent,
+        state.imageTokensBuf,
+        block.transformerBlocks[basicIndex],
+        state.N_latent,
+        state.N_img,
+        D,
+      );
+      return;
+    }
 
-    // Permute back: [27648, 1024] → [1024, 27648] for residual add
+    state.currentTriplane = this._dispatchFuseBlock(
+      encoder,
+      state.currentTriplane,
+      state.currentLatent,
+      block.fuseBlockOut,
+      N_tri,
+      state.N_latent,
+      D,
+    );
+    this._diagnosticBuffers[`block${blockIndex}_latent`] = state.currentLatent;
+    this._diagnosticBuffers[`block${blockIndex}_triplane`] = state.currentTriplane;
+  }
+
+  _dispatchForwardFinal(encoder, state) {
+    const device = this.device;
+    const D = CONFIG.dim;
+    const N_tri = CONFIG.triplaneTokens;
+    const projOutBuf = createEmptyBuffer(device, N_tri * D * 4);
+    this._dispatchLinear(encoder, state.currentTriplane, projOutBuf,
+      state.weights.projOut.weight, state.weights.projOut.bias, N_tri, D, D);
     const projOutPermBuf = createEmptyBuffer(device, D * N_tri * 4);
     this._dispatchTranspose(encoder, projOutBuf, projOutPermBuf, N_tri, D);
-
-    // Add residual (original triplane embeddings)
-    this._dispatchAdd(encoder, projOutPermBuf, weights.tokenizer_embeddings_buf, D * N_tri);
+    this._dispatchAdd(
+      encoder,
+      projOutPermBuf,
+      state.weights.tokenizer_embeddings_buf,
+      D * N_tri,
+    );
 
     this._diagnosticBuffers['projOutBuf'] = projOutBuf;
     this._diagnosticBuffers['projOutPermBuf'] = projOutPermBuf;
-    this._diagnosticBuffers['rearrangedEmb'] = weights.tokenizer_embeddings_buf;
-
-    // Result: [1024, 27648] = [1024, 3*96*96] triplane features
-    return { buffer: projOutPermBuf, C: D, N: N_tri, planeSize: CONFIG.planeSize };
+    this._diagnosticBuffers['rearrangedEmb'] = state.weights.tokenizer_embeddings_buf;
+    state.result = {
+      buffer: projOutPermBuf,
+      C: D,
+      N: N_tri,
+      planeSize: CONFIG.planeSize,
+    };
   }
 
   // --- FuseBlock: cross-attention fuse(z ← x) + GEGLU FFN ---
