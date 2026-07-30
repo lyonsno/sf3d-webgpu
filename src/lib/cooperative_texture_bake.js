@@ -263,26 +263,27 @@ export function makeCooperativeTextureBake(device, opts = {}) {
           const dutyStartedAtMs = now();
           rangeTelemetry.dutyLifecycleInterval.startMs = dutyStartedAtMs;
           try {
+            // kit >=0.1.41: encode returns the command buffer; the kit submits it
+            // (submit callbacks unsupported). The scratch-lifetime bookkeeping
+            // that previously lived in the submit callback (marking this range's
+            // scratch as submitted so the per-prefix retire can destroy it once
+            // the queue prefix fences) moves into encode, right after the command
+            // buffer is built — at which point the kit is about to submit it, so
+            // the scratch is committed to queued work before onQueueFenceResolved.
             await gpu.runGpuDuty(range, {
               encode: () => {
+                const submitStartedAtMs = now();
                 try {
-                  return b.encode();
+                  const commandBuffer = b.encode();
+                  submittedScratch.push(...unsubmittedScratch);
+                  unsubmittedScratch.length = 0;
+                  return commandBuffer;
                 } finally {
                   rangeTelemetry.prepareEncodeInterval.endMs = now();
                   rangeTelemetry.hostEncodeMs = (
                     rangeTelemetry.prepareEncodeInterval.endMs
                     - rangeTelemetry.prepareEncodeInterval.startMs
                   );
-                }
-              },
-              submit: (commandBuffer) => {
-                const submitStartedAtMs = now();
-                try {
-                  const result = b.submit(commandBuffer);
-                  submittedScratch.push(...unsubmittedScratch);
-                  unsubmittedScratch.length = 0;
-                  return result;
-                } finally {
                   rangeTelemetry.submitInterval = {
                     startMs: submitStartedAtMs,
                     endMs: now(),

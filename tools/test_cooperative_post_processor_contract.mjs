@@ -48,7 +48,6 @@ const cooperative = {
         events.push(`range:${range.itemStart}-${range.itemEnd}`);
         const commandBuffer = duty.encode();
         events.push(`encoded:${commandBuffer.plane}`);
-        duty.submit(commandBuffer);
         events.push(`fenced:${range.itemStart}`);
       },
     };
@@ -61,16 +60,16 @@ const result = await drivePostProcessorCooperativeBoundary(cooperative, {
     assert.equal(plane, nextPlane++);
     return { plane };
   },
-  submitPlane(commandBuffer) {
-    events.push(`submitted:${commandBuffer.plane}`);
-  },
+  // kit >=0.1.41: encode returns the buffer; the kit owns submission, so the
+  // driver no longer accepts a submitPlane callback and no producer-side
+  // 'submitted' event is observable.
 });
 
 assert.deepEqual(result, { completedPlanes: 3, totalPlanes: 3 });
 assert.deepEqual(events, [
-  'range:0-1', 'encoded:0', 'submitted:0', 'fenced:0',
-  'range:1-2', 'encoded:1', 'submitted:1', 'fenced:1',
-  'range:2-3', 'encoded:2', 'submitted:2', 'fenced:2',
+  'range:0-1', 'encoded:0', 'fenced:0',
+  'range:1-2', 'encoded:1', 'fenced:1',
+  'range:2-3', 'encoded:2', 'fenced:2',
 ]);
 assert.equal(ranges.length, 0);
 console.log('ok  driver encodes, submits, and settles every plane exactly once');
@@ -85,7 +84,7 @@ const extraRangeCooperative = {
         return { rangeIndex: itemStart, itemStart, itemEnd: itemStart + 1, itemCount: 1 };
       },
       async runGpuDuty(range, duty) {
-        duty.submit(duty.encode());
+        duty.encode(); // kit 0.1.41: encode returns the buffer; facade owns submission
       },
     };
   },
