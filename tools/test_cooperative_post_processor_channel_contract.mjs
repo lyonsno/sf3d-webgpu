@@ -119,7 +119,7 @@ function cooperativeFor(totalDuties) {
           };
         },
         async runGpuDuty(range, duty) {
-          duty.submit(duty.encode());
+          duty.encode(); // kit 0.1.41: encode returns the buffer; facade owns submission
         },
       };
     },
@@ -143,8 +143,10 @@ const result = await drivePostProcessorChannelBoundary(
 assert.equal(result.completedDuties, 51);
 assert.equal(result.totalDuties, 51);
 assert.equal(result.telemetry.length, 51);
-assert.equal(events.length, 102);
-console.log('ok  driver encodes and submits the complete declared graph');
+// kit >=0.1.41: encode returns the buffer and the kit submits it, so the fake
+// facade observes one event (encode) per duty, not two (encode + submit).
+assert.equal(events.length, 51);
+console.log('ok  driver encodes the complete declared graph (kit owns submission)');
 
 const malformedDuties = plan.duties.map(duty => ({ ...duty }));
 const malformedIndex = malformedDuties.findIndex(

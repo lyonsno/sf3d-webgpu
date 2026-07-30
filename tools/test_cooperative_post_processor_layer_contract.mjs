@@ -58,7 +58,6 @@ const cooperative = {
       async runGpuDuty(range, duty) {
         events.push(`range:${range.itemStart}`);
         const commandBuffer = duty.encode();
-        duty.submit(commandBuffer);
         clock += 5;
       },
     };
@@ -70,10 +69,6 @@ const result = await drivePostProcessorLayerBoundary(cooperative, {
     events.push(`encode:${dutyIndex}:${plane}:${stageIndex}:${stageId}`);
     clock += 2;
     return { dutyIndex, plane, stageIndex, stageId };
-  },
-  submitStage(commandBuffer) {
-    events.push(`submit:${commandBuffer.dutyIndex}`);
-    clock += 1;
   },
   now: () => clock,
 });
@@ -100,11 +95,11 @@ assert.deepEqual(
       stageIndex,
       stageId: POST_PROCESSOR_PLANE_STAGE_IDS[stageIndex],
       encodeMs: 2,
-      dutyMs: 8,
+      dutyMs: 7,
     };
   }),
 );
-assert.equal(events.length, 54);
+assert.equal(events.length, 36);
 console.log('ok  driver encodes, submits, and times every stage exactly once');
 
 const shortCooperative = {
@@ -117,7 +112,7 @@ const shortCooperative = {
         return { itemStart, itemEnd: itemStart + 1, itemCount: 1 };
       },
       async runGpuDuty(_range, duty) {
-        duty.submit(duty.encode());
+        duty.encode(); // kit 0.1.41: encode returns the buffer; facade owns submission
       },
     };
   },
@@ -125,7 +120,6 @@ const shortCooperative = {
 await assert.rejects(
   drivePostProcessorLayerBoundary(shortCooperative, {
     encodeStage: ({ dutyIndex }) => ({ dutyIndex }),
-    submitStage() {},
   }),
   /exhausted ranges before duty 17/,
 );
@@ -141,7 +135,7 @@ const extraCooperative = {
         return { itemStart, itemEnd: itemStart + 1, itemCount: 1 };
       },
       async runGpuDuty(_range, duty) {
-        duty.submit(duty.encode());
+        duty.encode(); // kit 0.1.41: encode returns the buffer; facade owns submission
       },
     };
   },
@@ -149,7 +143,6 @@ const extraCooperative = {
 await assert.rejects(
   drivePostProcessorLayerBoundary(extraCooperative, {
     encodeStage: ({ dutyIndex }) => ({ dutyIndex }),
-    submitStage() {},
   }),
   /left ranges unconsumed/,
 );

@@ -250,7 +250,8 @@ export async function runCooperativeDino(opts) {
         encodeInto(encoder);
         return encoder.finish();
       },
-      submitChunk: (commandBuffer) => runtime.queue.submit([commandBuffer]),
+      // kit >=0.1.41: encode() returns the command buffer and the kit owns
+      // queue.submit; no producer-side submit callback.
       encodeTokenizer: (driver) => tokenizer.encodeCooperative({
         imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver,
       }),
@@ -284,13 +285,12 @@ export async function runCooperativeDino(opts) {
  * @param {number} o.chunkBlocks
  * @param {(ctx:{blockStart:number,blockEnd:number,encodeInto:(enc:any)=>void})=>any} o.encodeChunk
  *        returns the "command buffer" (real GPUCommandBuffer or a deterministic token)
- * @param {(commandBuffer:any)=>void} o.submitChunk
  * @param {(driver:Function)=>Promise<any>} o.encodeTokenizer
  *        invokes tokenizer.encodeCooperative with the per-chunk driver we build
  * @returns {Promise<any>} the tokenizer.encode() output ({ tokensBuf, N, tokenH, tokenW })
  */
 export async function driveDinoCooperativeBoundary(cooperative, o) {
-  const { encodeChunk, submitChunk, encodeTokenizer } = o;
+  const { encodeChunk, encodeTokenizer } = o;
   const gpu = cooperative.startBoundary(DINO_BOUNDARY_ID);
 
   // The tokenizer calls this once per fixed chunk of blocks, in order. We map
@@ -303,9 +303,6 @@ export async function driveDinoCooperativeBoundary(cooperative, o) {
     await gpu.runGpuDuty(range, {
       encode() {
         return encodeChunk({ blockStart, blockEnd, encodeInto });
-      },
-      submit(commandBuffer) {
-        submitChunk(commandBuffer);
       },
     });
   };

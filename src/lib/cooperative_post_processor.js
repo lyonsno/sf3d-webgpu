@@ -231,7 +231,6 @@ export async function drivePostProcessorCooperativeBoundary(cooperative, options
   const {
     numPlanes = POST_PROCESSOR_PLANE_COUNT,
     encodePlane,
-    submitPlane,
   } = options;
   const gpu = cooperative.startBoundary(POST_PROCESSOR_BOUNDARY_ID);
   let completedPlanes = 0;
@@ -246,9 +245,11 @@ export async function drivePostProcessorCooperativeBoundary(cooperative, options
         `cooperative postprocessor range ${range.itemStart}-${range.itemEnd} does not match plane ${plane}`,
       );
     }
+    // kit >=0.1.41: encode returns the command buffer(s); the kit owns queue
+    // submission (submit callbacks are unsupported so bounded-prefix can track
+    // in-flight duties). Byte-identical: same command buffer, same queue order.
     await gpu.runGpuDuty(range, {
       encode: () => encodePlane({ plane, range }),
-      submit: (commandBuffer) => submitPlane(commandBuffer, { plane, range }),
     });
     completedPlanes++;
   }
@@ -262,7 +263,6 @@ export async function drivePostProcessorCooperativeBoundary(cooperative, options
 export async function drivePostProcessorLayerBoundary(cooperative, options) {
   const {
     encodeStage,
-    submitStage,
     now = () => globalThis.performance?.now?.() ?? Date.now(),
   } = options;
   const gpu = cooperative.startBoundary(POST_PROCESSOR_LAYER_BOUNDARY_ID);
@@ -298,6 +298,10 @@ export async function drivePostProcessorLayerBoundary(cooperative, options) {
       dutyMs: null,
     };
 
+    // kit >=0.1.41: encode returns the command buffer; the kit submits it. The
+    // per-duty submit interval is now kit-owned (submit* timing stays null); the
+    // trivial queue.submit call it previously measured is captured by the kit's
+    // own settlement telemetry. encode + duty timing are preserved.
     await gpu.runGpuDuty(range, {
       encode: () => {
         timing.encodeStartedAtMs = now();
@@ -311,19 +315,6 @@ export async function drivePostProcessorLayerBoundary(cooperative, options) {
         timing.encodeCompletedAtMs = now();
         timing.encodeMs = timing.encodeCompletedAtMs - timing.encodeStartedAtMs;
         return commandBuffer;
-      },
-      submit: commandBuffer => {
-        timing.submitStartedAtMs = now();
-        const result = submitStage(commandBuffer, {
-          dutyIndex,
-          plane,
-          stageIndex,
-          stageId,
-          range,
-        });
-        timing.submitCompletedAtMs = now();
-        timing.submitMs = timing.submitCompletedAtMs - timing.submitStartedAtMs;
-        return result;
       },
     });
     timing.dutyCompletedAtMs = now();
@@ -345,7 +336,6 @@ export async function drivePostProcessorChannelBoundary(cooperative, options) {
   const {
     plan: suppliedPlan,
     encodeDuty,
-    submitDuty,
     now = () => globalThis.performance?.now?.() ?? Date.now(),
   } = options;
   const plan = requireExactPostProcessorChannelDutyPlan(suppliedPlan);
@@ -377,6 +367,9 @@ export async function drivePostProcessorChannelBoundary(cooperative, options) {
       submitMs: null,
       dutyMs: null,
     };
+    // kit >=0.1.41: encode returns the command buffer; the kit submits it (submit
+    // callbacks unsupported so bounded-prefix can own in-flight tracking). This
+    // is the boundary bounded-prefix actually applies to. Byte-identical output.
     await gpu.runGpuDuty(range, {
       encode: () => {
         timing.encodeStartedAtMs = now();
@@ -384,13 +377,6 @@ export async function drivePostProcessorChannelBoundary(cooperative, options) {
         timing.encodeCompletedAtMs = now();
         timing.encodeMs = timing.encodeCompletedAtMs - timing.encodeStartedAtMs;
         return commandBuffer;
-      },
-      submit: commandBuffer => {
-        timing.submitStartedAtMs = now();
-        const result = submitDuty(commandBuffer, duty, range);
-        timing.submitCompletedAtMs = now();
-        timing.submitMs = timing.submitCompletedAtMs - timing.submitStartedAtMs;
-        return result;
       },
     });
     timing.dutyCompletedAtMs = now();
@@ -510,9 +496,6 @@ export async function runCooperativePostProcessor(options) {
           );
           return encoder.finish();
         },
-        submitDuty(commandBuffer) {
-          runtime.queue.submit([commandBuffer]);
-        },
       });
       dutyTelemetry = driven.telemetry;
       return;
@@ -541,9 +524,6 @@ export async function runCooperativePostProcessor(options) {
           );
           return encoder.finish();
         },
-        submitStage(commandBuffer) {
-          runtime.queue.submit([commandBuffer]);
-        },
       });
       dutyTelemetry = driven.telemetry;
       return;
@@ -564,9 +544,6 @@ export async function runCooperativePostProcessor(options) {
           plane,
         );
         return encoder.finish();
-      },
-      submitPlane(commandBuffer) {
-        runtime.queue.submit([commandBuffer]);
       },
     });
   });

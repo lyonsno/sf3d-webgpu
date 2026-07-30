@@ -1,13 +1,13 @@
 /**
  * SF3D cooperative-DINO adapter conformance test.
  *
- * Runs cranial's runWebGpuCooperativeAdapterConformance() (kit 0.1.38) over the
+ * Runs cranial's runWebGpuCooperativeAdapterConformance() (kit 0.1.41) over the
  * SF3D DINO boundary through all four scenarios, per directive
  * bind-sf3d-candidate-to-kit-0138-conformance. Also proves:
  *   - the shared recordDinoDispatchTrace produces the canonical 363-op /
  *     24-range trace the fingerprint hashes;
  *   - the orchestration fingerprint is stable and chunk-policy-bound;
- *   - the kit runtime version is exactly 0.1.38;
+ *   - the kit runtime version is exactly 0.1.41;
  *   - enabled==disabled output-fingerprint equivalence passes;
  *   - 24/24 coverage, no pending terminal ranges.
  *
@@ -30,11 +30,11 @@ const gitRev = (() => {
   catch { return 'unknown'; }
 })();
 
-// --- 1. Kit is exactly 0.1.38 -------------------------------------------------
+// --- 1. Kit is exactly 0.1.41 -------------------------------------------------
 assert.equal(kit.WEBGPU_INFERENCE_KIT_VERSION, REQUIRED_KIT_VERSION,
   `kit must be exactly ${REQUIRED_KIT_VERSION}, got ${kit.WEBGPU_INFERENCE_KIT_VERSION}`);
 assert.equal(typeof kit.runWebGpuCooperativeAdapterConformance, 'function',
-  'kit 0.1.38 must export runWebGpuCooperativeAdapterConformance');
+  'kit 0.1.41 must export runWebGpuCooperativeAdapterConformance');
 console.log(`ok  kit version exactly ${REQUIRED_KIT_VERSION}, conformance harness present`);
 
 // --- 2. Shared trace is the canonical 363-op / 24-range orchestration --------
@@ -77,7 +77,7 @@ console.log(`ok  kit version exactly ${REQUIRED_KIT_VERSION}, conformance harnes
   });
 
   assert.equal(report.status, 'passed', `conformance must pass; failed: ${JSON.stringify(report.summary?.failedCheckIds)}`);
-  assert.equal(report.kitVersion, REQUIRED_KIT_VERSION, 'report kitVersion must be 0.1.38');
+  assert.equal(report.kitVersion, REQUIRED_KIT_VERSION, 'report kitVersion must be 0.1.41');
   assert.equal(report.adapterIdentity.adapterId, SF3D_DINO_ADAPTER_ID);
   assert.equal(report.scenarios.length, 4, 'four scenarios');
 
