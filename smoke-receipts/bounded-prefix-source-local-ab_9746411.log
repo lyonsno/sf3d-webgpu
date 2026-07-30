@@ -1,0 +1,7 @@
+
+=== SF3D cooperative postprocessor A/B/C/D ===
+output identical: true (e1f70de3407d...)
+monolithic-control: full=23136.4ms post=21478.4ms p95=9.1ms p99=9.3ms max=16.4ms
+channel-range-cooperative: full=22893.4ms post=22232.5ms p95=9.1ms p99=9.3ms max=9.4ms
+channel-control delta: full=-243.0ms post=754.1ms maxGap=-7.0ms
+report: /tmp/slow-bounded-prefix-ab.json
