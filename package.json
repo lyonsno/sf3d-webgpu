@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test:build-weight-exclusion": "node tools/test_build_weight_exclusion.mjs && node tools/test_build_without_public_dir.mjs",
     "test:kit-route-contract": "node tools/test_kit_route_contract.mjs"
   },
   "devDependencies": {

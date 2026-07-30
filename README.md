@@ -21,6 +21,17 @@ npx vite --port 5177
 
 Weights must be at `public/weights.bin` (1.886 GB fp16, gitignored).
 
+## Production Build
+
+```bash
+npm run build
+```
+
+Production builds preserve the application and non-model files from `public/`,
+but intentionally omit `public/weights.bin` from `dist/`. Deployments must mount
+or stage that model file separately at `/weights.bin`; an ordinary local build
+must not create another multi-gigabyte copy.
+
 ## Smoke Test
 
 ```bash
