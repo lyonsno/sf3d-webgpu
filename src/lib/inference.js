@@ -214,6 +214,11 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       + `got ${postProcessorDutyGranularity}`,
     );
   }
+  // Bounded-prefix completion for the fixed channel-range postprocessor boundary
+  // (kit >=0.1.41). Default strict-prefix preserves prior behavior; validation
+  // lives in runCooperativePostProcessor (channel-range + cooperative only).
+  const postProcessorCompletionPolicy = options.postProcessorCompletionPolicy ?? 'strict-prefix';
+  const postProcessorMaxInFlightGpuDuties = options.postProcessorMaxInFlightGpuDuties ?? null;
   const postProcessorChannelsPerDuty = options.postProcessorChannelsPerDuty ?? 16;
   if (!Number.isSafeInteger(postProcessorChannelsPerDuty)
       || postProcessorChannelsPerDuty <= 0) {
@@ -532,6 +537,8 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       schedulingMode: postProcessorSchedulingMode,
       dutyGranularity: postProcessorDutyGranularity,
       channelsPerDuty: postProcessorChannelsPerDuty,
+      completionPolicy: postProcessorCompletionPolicy,
+      maxInFlightGpuDuties: postProcessorMaxInFlightGpuDuties,
       signal: options.signal,
       onProgress: (p) => {
         if (p.percent != null) {

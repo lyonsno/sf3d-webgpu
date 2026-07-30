@@ -26,7 +26,7 @@
     "smoke:five-arm": "node tools/smoke_five_arm_ab.mjs"
   },
   "devDependencies": {
-    "@kaminos/webgpu-inference-kit": "0.1.38",
+    "@kaminos/webgpu-inference-kit": "0.1.41",
     "puppeteer-core": "^25.2.1",
     "vite": "^6.0.0"
   },
