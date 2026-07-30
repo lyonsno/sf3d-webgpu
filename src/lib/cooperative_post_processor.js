@@ -418,12 +418,40 @@ export async function runCooperativePostProcessor(options) {
     onProgress,
     signal,
     invocationId = `sf3d:post-processor:${schedulingMode}`,
+    // Bounded-prefix completion (kit >=0.1.41): allow up to maxInFlightGpuDuties
+    // GPU duties to be in flight before the facade fences a prefix, instead of
+    // strict per-duty prefix fencing. Default null → strict-prefix (unchanged).
+    // Per Cranial's composition contract, bounded-prefix is opt-in ONLY on the
+    // fixed postprocessor channel-range boundary; plane/layer/adaptive stay
+    // strict. The kit itself also rejects bounded-prefix on adaptive boundaries
+    // and outside cooperative scheduling.
+    completionPolicy = 'strict-prefix',
+    maxInFlightGpuDuties = null,
   } = options;
   if (!['plane', 'layer', 'channel-range'].includes(dutyGranularity)) {
     throw new RangeError(`unsupported postprocessor duty granularity: ${dutyGranularity}`);
   }
   if (!Number.isSafeInteger(channelsPerDuty) || channelsPerDuty <= 0) {
     throw new TypeError('channelsPerDuty must be a positive safe integer');
+  }
+  if (!['strict-prefix', 'bounded-prefix'].includes(completionPolicy)) {
+    throw new RangeError(`completionPolicy must be strict-prefix or bounded-prefix; got ${completionPolicy}`);
+  }
+  if (completionPolicy === 'bounded-prefix') {
+    // Bounded-prefix is only lawful on the fixed channel-range boundary under
+    // cooperative scheduling (Cranial contract + kit constraint). Fail loud
+    // rather than silently downgrade.
+    if (dutyGranularity !== 'channel-range') {
+      throw new RangeError(`bounded-prefix completion is only supported for channel-range duties; got ${dutyGranularity}`);
+    }
+    if (schedulingMode !== 'cooperative') {
+      throw new RangeError('bounded-prefix completion requires cooperative scheduling');
+    }
+    if (!Number.isSafeInteger(maxInFlightGpuDuties) || maxInFlightGpuDuties <= 0) {
+      throw new TypeError('bounded-prefix completion requires a positive maxInFlightGpuDuties');
+    }
+  } else if (maxInFlightGpuDuties != null) {
+    throw new TypeError('maxInFlightGpuDuties is available only with bounded-prefix completion');
   }
   const channelPlan = dutyGranularity === 'channel-range'
     ? createPostProcessorChannelDutyPlan(channelsPerDuty)
@@ -446,6 +474,11 @@ export async function runCooperativePostProcessor(options) {
     schedulingMode,
     onProgress,
     signal,
+    // Only the fixed channel-range boundary carries bounded-prefix; all other
+    // granularities and the default keep strict-prefix (the kit rejects
+    // bounded-prefix on adaptive boundaries regardless).
+    completionPolicy,
+    ...(completionPolicy === 'bounded-prefix' ? { maxInFlightGpuDuties } : {}),
   });
   const output = createPostProcessorOutput(device);
   let dutyTelemetry = [];
