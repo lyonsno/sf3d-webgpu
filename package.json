@@ -24,7 +24,8 @@
     "smoke:arena-ab": "node tools/smoke_arena_ab.mjs",
     "smoke:cooperative-post-processor": "node tools/smoke_cooperative_post_processor_ab.mjs",
     "test:materialize-core": "node tools/test_materialize_core.mjs",
-    "smoke:five-arm": "node tools/smoke_five_arm_ab.mjs"
+    "smoke:five-arm": "node tools/smoke_five_arm_ab.mjs",
+    "test:postprocessor-bounded-prefix": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_postprocessor_bounded_prefix_contract.mjs"
   },
   "devDependencies": {
     "@kaminos/webgpu-inference-kit": "0.1.41",
