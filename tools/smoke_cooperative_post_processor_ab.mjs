@@ -437,6 +437,15 @@ try {
           completedItems: cooperative.progress?.completedItems,
           totalItems: cooperative.progress?.totalItems,
           rangeCount: cooperative.boundaries?.[0]?.actualRangeCount,
+          // Bounded-prefix settlement (kit 0.1.41): effective policy/depth +
+          // issued/retired/in-flight duty counts — the directive's required
+          // settlement truth.
+          completionPolicy: cooperative.completionPolicy ?? null,
+          maxInFlightGpuDuties: cooperative.maxInFlightGpuDuties ?? null,
+          maxObservedInFlightGpuDuties: cooperative.maxObservedInFlightGpuDuties ?? null,
+          issuedGpuDutyCount: cooperative.issuedGpuDutyCount ?? null,
+          retiredGpuDutyCount: cooperative.retiredGpuDutyCount ?? null,
+          inFlightGpuDutyCount: cooperative.inFlightGpuDutyCount ?? null,
           adapterTelemetry: cooperative.adapterTelemetry,
         } : null,
         progress,
@@ -472,7 +481,19 @@ try {
       postProcessorDutyGranularity: 'channel-range',
       postProcessorChannelsPerDuty: channelsPerDuty,
     });
-    return { control, plane, candidate, channel };
+    // Bounded-prefix depth-2 arm on the SAME fixed channel-range boundary
+    // (kit 0.1.41). Strict-prefix `channel` is the control; this is the
+    // candidate. Both must produce the canonical GLB byte-identically.
+    const channelBounded = await runArm('channel-range-bounded-prefix-2', {
+      cooperativeDino: false,
+      cooperativePostProcessor: true,
+      postProcessorSchedulingMode: 'cooperative',
+      postProcessorDutyGranularity: 'channel-range',
+      postProcessorChannelsPerDuty: channelsPerDuty,
+      postProcessorCompletionPolicy: 'bounded-prefix',
+      postProcessorMaxInFlightGpuDuties: 2,
+    });
+    return { control, plane, candidate, channel, channelBounded };
   }, { channelsPerDuty: CHANNELS_PER_DUTY, armSelection: ARM_SELECTION });
 
   lastTrustworthyEvidence = { phase: 'browser-arms', routeIdentity, arms };
@@ -484,6 +505,10 @@ try {
     ? arms.control.glbSha256 === arms.channel.glbSha256
       && arms.control.glbBytes === arms.channel.glbBytes
       && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.channel.mesh)
+      // bounded-prefix candidate must also produce the canonical GLB byte-identically
+      && arms.control.glbSha256 === arms.channelBounded.glbSha256
+      && arms.control.glbBytes === arms.channelBounded.glbBytes
+      && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.channelBounded.mesh)
       && (!arms.plane || (
         arms.control.glbSha256 === arms.plane.glbSha256
         && arms.control.glbBytes === arms.plane.glbBytes
@@ -525,13 +550,29 @@ try {
       `Post-processor duties ${expectedChannelDuties}/${expectedChannelDuties} \\(100%\\)`,
     ).test(message),
   );
-  const cooperativeComplete = layerComplete && channelComplete;
+  // Bounded-prefix candidate: succeeded, effective policy is bounded-prefix at
+  // depth 2, DRAINED at terminal (retired == issued == expected duties), and the
+  // depth was actually exercised without breach: 1 < maxObservedInFlight <= 2.
+  const b = arms.channelBounded.cooperative;
+  const boundedPrefixHonored = b?.status === 'succeeded'
+    && b?.completionPolicy === 'bounded-prefix'
+    && b?.maxInFlightGpuDuties === 2
+    && b?.completedItems === expectedChannelDuties
+    && b?.totalItems === expectedChannelDuties
+    && b?.issuedGpuDutyCount === expectedChannelDuties
+    && b?.retiredGpuDutyCount === expectedChannelDuties
+    && b?.inFlightGpuDutyCount === 0
+    && b?.maxObservedInFlightGpuDuties >= 2
+    && b?.maxObservedInFlightGpuDuties <= 2
+    && b?.adapterTelemetry?.queueFences?.length > 0;
+  const cooperativeComplete = layerComplete && channelComplete && boundedPrefixHonored;
   const progressHonest = layerProgressHonest && channelProgressHonest;
   const selectedArms = [
     arms.control,
     arms.plane,
     arms.candidate,
     arms.channel,
+    arms.channelBounded,
   ].filter(Boolean);
   const cadenceObserved = selectedArms.every((arm) => (
     arm.postProcessor.frameCount > 0
@@ -558,7 +599,20 @@ try {
     cooperativeComplete,
     progressHonest,
     cadenceObserved,
+    boundedPrefixHonored,
     expectedChannelDuties,
+    boundedPrefix: {
+      candidate: arms.channelBounded.cooperative,
+      // bounded-prefix (candidate) vs strict-prefix (channel) on the same fixed
+      // channel-range boundary — the source-local A/B the directive requires.
+      versusStrict: {
+        postProcessorWallMs: arms.channelBounded.postProcessor.wallMs - arms.channel.postProcessor.wallMs,
+        maxGapMs: arms.channelBounded.postProcessor.maxGapMs - arms.channel.postProcessor.maxGapMs,
+        p99GapMs: arms.channelBounded.postProcessor.p99GapMs - arms.channel.postProcessor.p99GapMs,
+        strictQueueAuthority: arms.channel.cooperative?.queueCompletionAuthority,
+        boundedQueueAuthority: arms.channelBounded.cooperative?.queueCompletionAuthority,
+      },
+    },
     deltas: {
       fullRouteWallMs: arms.candidate && arms.control
         ? arms.candidate.fullRouteWallMs - arms.control.fullRouteWallMs
