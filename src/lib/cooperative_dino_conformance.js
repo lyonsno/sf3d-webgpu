@@ -2,7 +2,7 @@
  * SF3D cooperative-DINO adapter conformance.
  *
  * Consumes the Kaminos kit's runWebGpuCooperativeAdapterConformance() (kit
- * >=0.1.41) to prove the DINO cooperative boundary's ORCHESTRATION on the four
+ * >=0.1.42) to prove the DINO cooperative boundary's ORCHESTRATION on the four
  * conformance scenarios (cooperative success, disabled success, cancellation,
  * runtime failure), per cranial-depth-enema directive
  * `bind-sf3d-candidate-to-kit-0138-conformance`.
@@ -19,7 +19,7 @@
  *     output-shape identity. Any block omission/dup/reorder/range-drift/dispatch
  *     -drift must change the fingerprint. Not a constant label, not mesh counts.
  *   - initialResources ["dinov2.weights"], expectedFinalResources
- *     ["dinov2.weights","dinov2.tokens"]; kitVersion must equal 0.1.41.
+ *     ["dinov2.weights","dinov2.tokens"]; kitVersion must equal 0.1.42.
  *
  * No real GPU is used here: conformance is deterministic. A trace-recording
  * tokenizer stand-in emits the exact dispatch sequence sf3d_backbone.js would,
@@ -31,7 +31,7 @@ import { recordDinoDispatchTrace, VIT_NUM_BLOCKS } from './sf3d_backbone.js';
 
 export const SF3D_DINO_ADAPTER_ID = 'sf3d.dino.cooperative.webgpu.v0';
 export const SF3D_CONFORMANCE_ID = 'sf3d:cooperative-adapter:v0';
-export const REQUIRED_KIT_VERSION = '0.1.41';
+export const REQUIRED_KIT_VERSION = '0.1.42';
 
 /**
  * Deterministic SHA-256 over a string, using WebCrypto (browser + Node 20+).
@@ -123,7 +123,8 @@ export function createSf3dCooperativeDinoAdapter(chunkBlocks = 1) {
         encodeInto();
         return { __dinoChunk: `${blockStart}-${blockEnd}` };
       },
-      submitChunk: () => { /* harness measureSubmission owns submission */ },
+      // kit >=0.1.41: the kit owns queue.submit; encodeChunk returns the command
+      // buffer and there is no producer-side submit callback.
       // encodeTokenizer receives the per-chunk driver from the shared boundary
       // driver and runs the deterministic recording pass, cutting on the same
       // fixed chunks. It returns { chunks, output } — the canonical trace.

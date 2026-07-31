@@ -19,6 +19,8 @@ import { execFileSync, spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 import { readJsonReport, writeJsonReportAtomic } from './json_report_atomic.mjs';
 import { evaluatePostProcessorSmokeAcceptance } from './post_processor_smoke_acceptance.mjs';
+import { acceptBoundedPrefixArm, expectedChannelDutyCount } from './bounded_prefix_acceptance.mjs';
+import { assemblePartialArmFailure } from './partial_arm_failure.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -47,6 +49,7 @@ const REPORT_PATH = path.resolve(argValue(
 ));
 const CHANNELS_PER_DUTY = Number(argValue('--channels-per-duty', '16'));
 const ARM_SELECTION = argValue('--arms', 'all');
+const INJECT_FAIL_ARM = argValue('--inject-fail-arm', process.env.SF3D_INJECT_FAIL_ARM || '');
 const ALLOW_DIRTY_SOURCE = process.argv.includes('--allow-dirty-source');
 const WEIGHTS = path.join(REPO, 'public', 'weights.bin');
 const processes = [];
@@ -352,12 +355,29 @@ try {
   }, imageBase64);
   await page.bringToFront();
 
-  const arms = await page.evaluate(async ({ channelsPerDuty, armSelection }) => {
+  // Deterministic F2 fault injection hook: SF3D_INJECT_FAIL_ARM=<arm-name> makes
+  // that arm throw after it has completed at least one accepted duty. Used by the
+  // partial-arm failure witness test; unset in normal runs.
+  if (INJECT_FAIL_ARM) {
+    await page.evaluate((armName) => { window.__ppInjectFailArm = armName; }, INJECT_FAIL_ARM);
+  }
+
+  let arms;
+  try {
+    arms = await page.evaluate(async ({ channelsPerDuty, armSelection }) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const device = window._sf3d_device;
     const pipelines = window._sf3d_pipelines;
     const weights = window._sf3d_weights;
     const inputImage = window.__postProcessorAssayImage;
+
+    // F2 (cranial 7393ab06 review): checkpoint each completed arm across the
+    // browser/Node boundary so a later-arm throw does not discard the already
+    // completed strict/control evidence. runArm appends to this browser-owned
+    // ledger the instant an arm returns; the Node catch path retrieves it before
+    // writing the atomic failure report. Ordered by completion.
+    window.__ppArmLedger = [];
+    window.__ppArmFailure = null;
 
     async function digest(arrayBuffer) {
       const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', arrayBuffer));
@@ -365,6 +385,9 @@ try {
     }
 
     async function runArm(name, options) {
+      // Record the in-flight arm so a throw can name the failing arm even though
+      // the ledger only holds COMPLETED arms.
+      window.__ppCurrentArm = name;
       const frameGaps = [];
       const progress = [];
       let active = true;
@@ -405,7 +428,27 @@ try {
         .map((frame) => frame.gap)
         .sort((left, right) => left - right);
       const cooperative = output.cooperativeReports?.['post-processor'] ?? null;
-      return {
+
+      // Deterministic F2 fault injection: when the harness requests a failure on
+      // this arm, throw AFTER the arm's cooperative work has completed at least
+      // one accepted duty (the report exists with issued duties). This proves the
+      // partial-arm checkpoint path preserves prior-arm evidence and the failing
+      // arm's post-drain settlement, per the review's required failure witness.
+      if (window.__ppInjectFailArm === name) {
+        const drain = cooperative ? {
+          status: cooperative.status,
+          completionPolicy: cooperative.completionPolicy ?? null,
+          issuedGpuDutyCount: cooperative.issuedGpuDutyCount ?? null,
+          retiredGpuDutyCount: cooperative.retiredGpuDutyCount ?? null,
+          inFlightGpuDutyCount: cooperative.inFlightGpuDutyCount ?? null,
+          maxObservedInFlightGpuDuties: cooperative.maxObservedInFlightGpuDuties ?? null,
+        } : null;
+        const injected = new Error(`injected failure in arm ${name}`);
+        injected.__ppInjectedDrain = drain;
+        throw injected;
+      }
+
+      const armResult = {
         name,
         requestedOptions: options,
         glbBytes: output.glb.byteLength,
@@ -430,28 +473,33 @@ try {
           visibilityAtStart,
           visibilityAtEnd,
         },
-        cooperative: cooperative ? {
-          status: cooperative.status,
-          schedulingMode: cooperative.schedulingMode,
-          queueCompletionAuthority: cooperative.queueCompletionAuthority,
-          completedItems: cooperative.progress?.completedItems,
-          totalItems: cooperative.progress?.totalItems,
-          rangeCount: cooperative.boundaries?.[0]?.actualRangeCount,
-          // Bounded-prefix settlement (kit 0.1.41): effective policy/depth +
-          // issued/retired/in-flight duty counts — the directive's required
-          // settlement truth.
-          completionPolicy: cooperative.completionPolicy ?? null,
-          maxInFlightGpuDuties: cooperative.maxInFlightGpuDuties ?? null,
-          maxObservedInFlightGpuDuties: cooperative.maxObservedInFlightGpuDuties ?? null,
-          issuedGpuDutyCount: cooperative.issuedGpuDutyCount ?? null,
-          retiredGpuDutyCount: cooperative.retiredGpuDutyCount ?? null,
-          inFlightGpuDutyCount: cooperative.inFlightGpuDutyCount ?? null,
-          adapterTelemetry: cooperative.adapterTelemetry,
-        } : null,
+        // Preserve the COMPLETE kit execution report verbatim — including the
+        // full `gpuDuties` ledger (each duty's rawQueueDurationMs, timingAuthority,
+        // retirement status), settlement counts, boundaries, terminal progress,
+        // retention, and lastTrustworthyBoundary. cranial's review of 7393ab06
+        // (F1) found the prior scalar projection dropped this ledger, letting the
+        // bounded gate certify incomplete evidence. The public kit validator
+        // `validateWebGpuCooperativeExecutionReport` consumes this whole object.
+        cooperative,
         progress,
       };
+      // F2 checkpoint: record this completed arm before any later arm runs, so a
+      // later-arm throw cannot erase it.
+      window.__ppArmLedger.push({
+        name,
+        glbSha256: armResult.glbSha256,
+        glbBytes: armResult.glbBytes,
+        mesh: armResult.mesh,
+        cooperativeStatus: cooperative?.status ?? null,
+        completionPolicy: cooperative?.completionPolicy ?? null,
+        issuedGpuDutyCount: cooperative?.issuedGpuDutyCount ?? null,
+        retiredGpuDutyCount: cooperative?.retiredGpuDutyCount ?? null,
+        inFlightGpuDutyCount: cooperative?.inFlightGpuDutyCount ?? null,
+      });
+      return armResult;
     }
 
+    try {
     const control = armSelection === 'all' || armSelection === 'pair'
       ? await runArm('monolithic-control', {
         cooperativeDino: false,
@@ -494,7 +542,35 @@ try {
       postProcessorMaxInFlightGpuDuties: 2,
     });
     return { control, plane, candidate, channel, channelBounded };
-  }, { channelsPerDuty: CHANNELS_PER_DUTY, armSelection: ARM_SELECTION });
+    } catch (armError) {
+      // F2: an arm threw. Preserve the completed-arm ledger and name the failing
+      // arm, the last completed prior arm, and the failing arm's post-drain
+      // settlement (attached by the injection, or null for a real fault). Node's
+      // catch path reads window.__ppArmFailure + window.__ppArmLedger.
+      const completed = window.__ppArmLedger;
+      window.__ppArmFailure = {
+        message: armError?.message ?? String(armError),
+        failingArm: window.__ppCurrentArm ?? null,
+        completedArms: completed.map((entry) => entry.name),
+        lastCompletedArm: completed.length ? completed[completed.length - 1].name : null,
+        drainAfterFailure: armError?.__ppInjectedDrain ?? null,
+      };
+      throw armError;
+    }
+    }, { channelsPerDuty: CHANNELS_PER_DUTY, armSelection: ARM_SELECTION });
+  } catch (armEvalError) {
+    // F2: an arm threw inside the browser. Retrieve the browser-owned partial
+    // ledger + failure record so the durable failure report demonstrates
+    // drain-on-failure and preserves the already completed strict/control
+    // evidence, instead of falling back to the browser-setup checkpoint.
+    const partial = await page.evaluate(() => ({
+      ledger: window.__ppArmLedger ?? [],
+      failure: window.__ppArmFailure ?? null,
+    })).catch(() => ({ ledger: [], failure: null }));
+    const partialFailure = assemblePartialArmFailure(partial);
+    lastTrustworthyEvidence = { ...partialFailure, routeIdentity };
+    fail(armEvalError, 'browser-arms', partialFailure);
+  }
 
   lastTrustworthyEvidence = { phase: 'browser-arms', routeIdentity, arms };
   if (pageErrors.length) fail(
@@ -520,27 +596,27 @@ try {
         && JSON.stringify(arms.control.mesh) === JSON.stringify(arms.candidate.mesh)
       ))
     : null;
+  // Layer/channel STRICT arms read the complete kit report: terminal progress
+  // denominator (progress.completedItems/totalItems), boundary range coverage
+  // (boundaries[0].actualRangeCount), and adapter telemetry (which remains on
+  // the report alongside the validator-consumed gpuDuties ledger).
   const layerComplete = !arms.candidate || (arms.candidate.cooperative?.status === 'succeeded'
     && arms.candidate.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence'
-    && arms.candidate.cooperative?.completedItems === 18
-    && arms.candidate.cooperative?.totalItems === 18
-    && arms.candidate.cooperative?.rangeCount === 18
+    && arms.candidate.cooperative?.progress?.completedItems === 18
+    && arms.candidate.cooperative?.progress?.totalItems === 18
+    && arms.candidate.cooperative?.boundaries?.[0]?.actualRangeCount === 18
     && arms.candidate.cooperative?.adapterTelemetry?.stageDuties?.length === 18
     && arms.candidate.cooperative?.adapterTelemetry?.queueFences?.length === 18
     && arms.candidate.cooperative?.adapterTelemetry?.browserYields?.length === 18);
   const layerProgressHonest = !arms.candidate || arms.candidate.progress.some(
     (message) => /Post-processor duties 18\/18 \(100%\)/.test(message),
   );
-  const expectedChannelDuties = 3 * (
-    2
-    + 3 * Math.ceil(1024 / CHANNELS_PER_DUTY)
-    + Math.ceil(640 / CHANNELS_PER_DUTY)
-  );
+  const expectedChannelDuties = expectedChannelDutyCount(CHANNELS_PER_DUTY);
   const channelComplete = arms.channel.cooperative?.status === 'succeeded'
     && arms.channel.cooperative?.queueCompletionAuthority === 'per-gpu-duty-prefix-fence'
-    && arms.channel.cooperative?.completedItems === expectedChannelDuties
-    && arms.channel.cooperative?.totalItems === expectedChannelDuties
-    && arms.channel.cooperative?.rangeCount === expectedChannelDuties
+    && arms.channel.cooperative?.progress?.completedItems === expectedChannelDuties
+    && arms.channel.cooperative?.progress?.totalItems === expectedChannelDuties
+    && arms.channel.cooperative?.boundaries?.[0]?.actualRangeCount === expectedChannelDuties
     && arms.channel.cooperative?.adapterTelemetry?.channelsPerDuty === CHANNELS_PER_DUTY
     && arms.channel.cooperative?.adapterTelemetry?.stageDuties?.length === expectedChannelDuties
     && arms.channel.cooperative?.adapterTelemetry?.queueFences?.length === expectedChannelDuties
@@ -550,21 +626,24 @@ try {
       `Post-processor duties ${expectedChannelDuties}/${expectedChannelDuties} \\(100%\\)`,
     ).test(message),
   );
-  // Bounded-prefix candidate: succeeded, effective policy is bounded-prefix at
-  // depth 2, DRAINED at terminal (retired == issued == expected duties), and the
-  // depth was actually exercised without breach: 1 < maxObservedInFlight <= 2.
-  const b = arms.channelBounded.cooperative;
-  const boundedPrefixHonored = b?.status === 'succeeded'
-    && b?.completionPolicy === 'bounded-prefix'
-    && b?.maxInFlightGpuDuties === 2
-    && b?.completedItems === expectedChannelDuties
-    && b?.totalItems === expectedChannelDuties
-    && b?.issuedGpuDutyCount === expectedChannelDuties
-    && b?.retiredGpuDutyCount === expectedChannelDuties
-    && b?.inFlightGpuDutyCount === 0
-    && b?.maxObservedInFlightGpuDuties >= 2
-    && b?.maxObservedInFlightGpuDuties <= 2
-    && b?.adapterTelemetry?.queueFences?.length > 0;
+  // Bounded-prefix candidate acceptance is delegated to the PUBLIC kit validator
+  // `validateWebGpuCooperativeExecutionReport` over the COMPLETE report (route/
+  // manifest/invocation identity, cooperative+bounded-prefix policy,
+  // expectedGpuDutyCount, depth 2 with requireConfiguredDepthObserved, full
+  // gpuDuties ledger with finite raw queue durations + correct timing authority,
+  // exact prefix-fence settlement, zero unfenced submissions, zero terminal
+  // in-flight, range↔duty bijection) plus the SF3D denominator-bearing progress
+  // string. This replaces the hand-rolled predicate cranial's 7393ab06 review
+  // (F1) found could certify one-fence / no-progress / nonfinite-raw-queue
+  // evidence. The full verdict (validator errors + progress) is preserved in the
+  // durable report.
+  const boundedAcceptance = acceptBoundedPrefixArm({
+    report: arms.channelBounded.cooperative,
+    progressMessages: arms.channelBounded.progress,
+    expectedGpuDutyCount: expectedChannelDuties,
+    maxInFlightGpuDuties: 2,
+  });
+  const boundedPrefixHonored = boundedAcceptance.ok;
   const cooperativeComplete = layerComplete && channelComplete && boundedPrefixHonored;
   const progressHonest = layerProgressHonest && channelProgressHonest;
   const selectedArms = [
@@ -603,6 +682,13 @@ try {
     expectedChannelDuties,
     boundedPrefix: {
       candidate: arms.channelBounded.cooperative,
+      // Public kit validator verdict over the complete report: ok + any errors +
+      // effective route/manifest/invocation/policy/depth identity. This is the
+      // authoritative acceptance record; boundedPrefixHonored === validation.ok
+      // && SF3D progress honest.
+      validation: boundedAcceptance.validation,
+      progressHonest: boundedAcceptance.progressHonest,
+      acceptanceErrors: boundedAcceptance.errors,
       // bounded-prefix (candidate) vs strict-prefix (channel) on the same fixed
       // channel-range boundary — the source-local A/B the directive requires.
       versusStrict: {
