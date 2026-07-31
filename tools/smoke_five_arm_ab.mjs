@@ -249,7 +249,11 @@ const fail = (m, phase = 'unknown') => {
   lastEvidence = { source };
 
   const port = await allocatePort();
-  const vite = spawn('npx', ['vite', '--port', String(port), '--strictPort'], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
+  // Bind explicitly to 127.0.0.1: without --host vite binds to `localhost`,
+  // which resolves to IPv6 ::1 on this host while the harness navigates to the
+  // IPv4 127.0.0.1 port below, producing ERR_CONNECTION_REFUSED. The
+  // postprocessor A/B already pins --host 127.0.0.1 for the same reason.
+  const vite = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
   procs.push(vite);
   await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error('vite timeout')), 40000); vite.stdout.on('data', d => { if (/Local:|ready/.test(d.toString())) { clearTimeout(to); res(); } }); vite.on('error', e => { clearTimeout(to); rej(e); }); }).catch(e => fail(e.message, 'vite'));
 
