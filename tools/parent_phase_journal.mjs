@@ -18,13 +18,28 @@ function eventHash(event) {
   return crypto.createHash('sha256').update(stableJson(body)).digest('hex');
 }
 
-function assertDurablePath(journalPath) {
+export function resolveDurableArtifactPath(journalPath, { createParent = true } = {}) {
   const resolved = path.resolve(journalPath);
   const volatileRoots = ['/tmp', '/private/tmp'];
   if (volatileRoots.some(root => resolved === root || resolved.startsWith(`${root}/`))) {
-    throw new Error(`journal path is volatile and will not survive host recovery: ${resolved}`);
+    throw new Error(`artifact path is volatile and will not survive host recovery: ${resolved}`);
   }
-  return resolved;
+  const parent = path.dirname(resolved);
+  if (createParent) fs.mkdirSync(parent, { recursive: true });
+  const realParent = fs.realpathSync(parent);
+  if (volatileRoots.some(root => realParent === root || realParent.startsWith(`${root}/`))) {
+    throw new Error(`journal parent resolves to volatile storage: ${realParent}`);
+  }
+  return path.join(realParent, path.basename(resolved));
+}
+
+function syncDirectory(directory) {
+  const directoryFd = fs.openSync(directory, 'r');
+  try {
+    fs.fsyncSync(directoryFd);
+  } finally {
+    fs.closeSync(directoryFd);
+  }
 }
 
 function assertObject(value, label) {
@@ -34,13 +49,11 @@ function assertObject(value, label) {
 }
 
 export function createParentPhaseJournal({ journalPath, invocationId, requested }) {
-  const resolvedPath = assertDurablePath(journalPath);
+  const resolvedPath = resolveDurableArtifactPath(journalPath);
   if (typeof invocationId !== 'string' || !invocationId.trim()) {
     throw new TypeError('invocationId must be a nonempty string');
   }
   assertObject(requested, 'requested');
-  fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
-
   let fd;
   try {
     fd = fs.openSync(resolvedPath, 'wx', 0o600);
@@ -50,6 +63,7 @@ export function createParentPhaseJournal({ journalPath, invocationId, requested 
     }
     throw error;
   }
+  syncDirectory(path.dirname(resolvedPath));
 
   let sequence = 0;
   let previousHash = ZERO_HASH;
@@ -64,6 +78,12 @@ export function createParentPhaseJournal({ journalPath, invocationId, requested 
     if (type === 'heavy-work-start' && !effectiveIdentityRecorded) {
       throw new Error('effective identity must be durable before heavy work starts');
     }
+    let safePayload;
+    try {
+      safePayload = JSON.parse(JSON.stringify(payload));
+    } catch (error) {
+      throw new TypeError(`event payload must be JSON-serializable: ${error.message}`);
+    }
     const event = {
       schema: SCHEMA,
       invocationId,
@@ -72,7 +92,7 @@ export function createParentPhaseJournal({ journalPath, invocationId, requested 
       writtenAt: new Date().toISOString(),
       monotonicMs: Number(process.hrtime.bigint() - monotonicOrigin) / 1e6,
       previousHash,
-      payload,
+      payload: safePayload,
     };
     event.eventHash = eventHash(event);
     fs.writeSync(fd, `${JSON.stringify(event)}\n`, null, 'utf8');
@@ -94,6 +114,26 @@ export function createParentPhaseJournal({ journalPath, invocationId, requested 
       closed = true;
     },
   };
+}
+
+export function writeJsonReportDurable(reportPath, report) {
+  const resolvedPath = resolveDurableArtifactPath(reportPath);
+  const temporaryPath = `${resolvedPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  const data = JSON.stringify(report, null, 2);
+  let fd;
+  try {
+    fd = fs.openSync(temporaryPath, 'wx', 0o600);
+    fs.writeFileSync(fd, data, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temporaryPath, resolvedPath);
+    syncDirectory(path.dirname(resolvedPath));
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    fs.rmSync(temporaryPath, { force: true });
+  }
+  return resolvedPath;
 }
 
 export function replayParentPhaseJournal(journalPath) {
@@ -142,4 +182,3 @@ export function replayParentPhaseJournal(journalPath) {
     events,
   };
 }
-

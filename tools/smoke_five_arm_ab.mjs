@@ -67,6 +67,7 @@ const requestedOptions = Object.freeze({
 const REPORT_PATH = path.resolve(
   requestedOptions.report.value || '/tmp/sf3d-five-arm-ab.json',
 );
+fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
 let IMAGE;
 let BATCH;
 let EXPECTED_REVISION;
@@ -175,6 +176,7 @@ const fail = (m, phase = 'unknown') => {
     fail('--single-arm is valid only with --profile single-arm', 'requested-config');
   }
   SELECTED_ARM_ORDER = PROFILE === 'single-arm' ? [SINGLE_ARM] : ARM_ORDERS[PROFILE];
+  const stagedProfile = PROFILE === 'setup-only' || PROFILE === 'single-arm';
   if (EXPECTED_OUTPUT_SHA && !/^[a-f0-9]{64}$/i.test(EXPECTED_OUTPUT_SHA)) {
     fail('--expected-output-sha must be a 64-character hexadecimal SHA-256', 'requested-config');
   }
@@ -298,7 +300,21 @@ const fail = (m, phase = 'unknown') => {
   emitParentCheckpoint('phase-before', { phase: 'vite-start', port });
   const vite = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
   procs.push(vite);
-  await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error('vite timeout')), 40000); vite.stdout.on('data', d => { if (/Local:|ready/.test(d.toString())) { clearTimeout(to); res(); } }); vite.on('error', e => { clearTimeout(to); rej(e); }); }).catch(e => fail(e.message, 'vite'));
+  await new Promise((resolve, reject) => {
+    const timeout = stagedProfile
+      ? null
+      : setTimeout(() => reject(new Error('vite timeout')), 40000);
+    vite.stdout.on('data', data => {
+      if (/Local:|ready/.test(data.toString())) {
+        if (timeout) clearTimeout(timeout);
+        resolve();
+      }
+    });
+    vite.on('error', reject);
+    vite.on('exit', code => {
+      if (code && code !== 0) reject(new Error(`vite exited ${code}`));
+    });
+  }).catch(e => fail(e.message, 'vite'));
   emitParentCheckpoint('phase-after', {
     phase: 'vite-start',
     boundary: 'vite-listening',
@@ -317,7 +333,7 @@ const fail = (m, phase = 'unknown') => {
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     headless: false,
-    protocolTimeout: 1200000,
+    protocolTimeout: stagedProfile ? 0 : 1200000,
     args: browserArgs,
   });
   emitParentCheckpoint('phase-after', {
@@ -329,9 +345,37 @@ const fail = (m, phase = 'unknown') => {
   const page = await browser.newPage();
   await page.bringToFront();
   const pageErrors = []; page.on('pageerror', e => pageErrors.push(e.message));
+  let preRouteBackend = null;
+  if (stagedProfile) {
+    emitParentCheckpoint('phase-before', { phase: 'adapter-probe' });
+    await page.goto(`http://127.0.0.1:${port}/webgpu_probe.html`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 0,
+    });
+    preRouteBackend = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+      const info = adapter?.info;
+      return {
+        webgpuAvailable: Boolean(navigator.gpu),
+        adapterAvailable: Boolean(adapter),
+        vendor: info?.vendor ?? null,
+        architecture: info?.architecture ?? null,
+        device: info?.device ?? null,
+        description: info?.description ?? null,
+      };
+    });
+    if (!preRouteBackend.adapterAvailable) fail('pre-route WebGPU adapter probe failed', 'adapter-probe');
+    emitParentCheckpoint('phase-after', {
+      phase: 'adapter-probe', boundary: 'pre-route-adapter-verified',
+      trustworthy: true, backend: preRouteBackend,
+    });
+  }
   const setupStartedAt = Date.now();
   emitParentCheckpoint('phase-before', { phase: 'route-navigation' });
-  await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.goto(`http://127.0.0.1:${port}/`, {
+    waitUntil: 'domcontentloaded',
+    timeout: stagedProfile ? 0 : 30000,
+  });
   emitParentCheckpoint('phase-after', {
     phase: 'route-navigation',
     boundary: 'route-document-loaded',
@@ -339,7 +383,7 @@ const fail = (m, phase = 'unknown') => {
   });
   const start = Date.now();
   let readyStatus = '';
-  while (Date.now() - start < 180000) {
+  while (stagedProfile || Date.now() - start < 180000) {
     readyStatus = await page.$eval('#status', el => el.textContent).catch(() => '');
     if (readyStatus.includes('Ready')) break;
     if (/error|failed/i.test(readyStatus)) fail(`route setup failed: ${readyStatus}`, 'route-setup');
@@ -373,6 +417,7 @@ const fail = (m, phase = 'unknown') => {
       } : null,
     };
   });
+  source.preRouteBackend = preRouteBackend;
   emitParentCheckpoint('phase-after', {
     phase: 'runtime-setup',
     boundary: 'model-and-pipelines-ready',

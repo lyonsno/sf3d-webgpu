@@ -6,6 +6,8 @@ import { spawnSync } from 'node:child_process';
 import {
   createParentPhaseJournal,
   replayParentPhaseJournal,
+  resolveDurableArtifactPath,
+  writeJsonReportDurable,
 } from './parent_phase_journal.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
@@ -27,6 +29,14 @@ try {
     }),
     /volatile/i,
     'production journals must reject /tmp and /private/tmp',
+  );
+
+  const volatileLink = path.join(testRoot, 'volatile-link');
+  fs.symlinkSync('/private/tmp', volatileLink);
+  assert.throws(
+    () => resolveDurableArtifactPath(path.join(volatileLink, 'escaped.jsonl')),
+    /resolves to volatile/i,
+    'a durable-looking symlink must not escape into volatile storage',
   );
 
   const journal = createParentPhaseJournal({
@@ -62,6 +72,7 @@ try {
   journal.append('resource-heartbeat', {
     childPid: 123,
     hostFreeMemoryBytes: 456,
+    optionalBrowserPid: undefined,
   });
   journal.close();
 
@@ -74,6 +85,11 @@ try {
     interrupted.events.map(event => event.sequence),
     [0, 1, 2, 3, 4],
   );
+  assert.equal('optionalBrowserPid' in interrupted.events[4].payload, false);
+
+  const replayPath = path.join(testRoot, 'reports', 'episode.report.json');
+  writeJsonReportDurable(replayPath, interrupted);
+  assert.equal(JSON.parse(fs.readFileSync(replayPath, 'utf8')).integrityOk, true);
 
   assert.throws(
     () => createParentPhaseJournal({
