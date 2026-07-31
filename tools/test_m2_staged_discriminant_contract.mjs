@@ -111,6 +111,12 @@ assert.match(smokeSource, /single-arm/);
 assert.match(smokeSource, /__sf3dParentCheckpoint/);
 assert.match(smokeSource, /emitParentCheckpoint\('phase-before'/);
 assert.match(smokeSource, /emitParentCheckpoint\('phase-after'/);
+assert.match(smokeSource, /writeJsonReportDurable\(REPORT_PATH/);
+assert.doesNotMatch(smokeSource, /writeFileSync\(REPORT_PATH/);
+
+const replaySource = fs.readFileSync(new URL('./replay_parent_phase_journal.mjs', import.meta.url), 'utf8');
+assert.match(replaySource, /writeJsonReportDurable\(reportPath/);
+assert.doesNotMatch(replaySource, /writeJsonReportAtomic/);
 
 const wrapperSource = fs.readFileSync(new URL('./smoke_m2_staged_discriminant.mjs', import.meta.url), 'utf8');
 assert.match(wrapperSource, /resource-heartbeat/);

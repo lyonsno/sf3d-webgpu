@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-import fs from 'node:fs';
 import path from 'node:path';
-import { replayParentPhaseJournal } from './parent_phase_journal.mjs';
-import { writeJsonReportAtomic } from './json_report_atomic.mjs';
+import {
+  replayParentPhaseJournal,
+  writeJsonReportDurable,
+} from './parent_phase_journal.mjs';
 
 function option(flag) {
   const indexes = process.argv
@@ -24,11 +25,9 @@ const journalArgument = option('--journal');
 if (!journalArgument) throw new Error('--journal is required');
 const journalPath = path.resolve(journalArgument);
 const replay = replayParentPhaseJournal(journalPath);
+process.stdout.write(`${JSON.stringify(replay, null, 2)}\n`);
 const reportArgument = option('--report');
 if (reportArgument) {
   const reportPath = path.resolve(reportArgument);
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  writeJsonReportAtomic(reportPath, replay);
+  writeJsonReportDurable(reportPath, replay);
 }
-process.stdout.write(`${JSON.stringify(replay, null, 2)}\n`);
-

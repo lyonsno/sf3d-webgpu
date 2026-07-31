@@ -35,6 +35,8 @@ import {
   summarizeCounterbalancedPair,
   validateGlbPayload,
 } from './full_route_benchmark_contract.mjs';
+import { writeJsonReportAtomic } from './json_report_atomic.mjs';
+import { writeJsonReportDurable } from './parent_phase_journal.mjs';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
@@ -68,6 +70,11 @@ const REPORT_PATH = path.resolve(
   requestedOptions.report.value || '/tmp/sf3d-five-arm-ab.json',
 );
 fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
+const STAGED_REPORT = ['setup-only', 'single-arm'].includes(requestedOptions.profile.value);
+const writeChildReport = (report) => {
+  if (STAGED_REPORT) return writeJsonReportDurable(REPORT_PATH, report);
+  return writeJsonReportAtomic(REPORT_PATH, report);
+};
 let IMAGE;
 let BATCH;
 let EXPECTED_REVISION;
@@ -137,7 +144,7 @@ let lastEvidence = {};
 const fail = (m, phase = 'unknown') => {
   emitParentCheckpoint('failure', { phase, message: String(m) });
   const failure = buildBenchmarkFailureReport(m, phase, lastEvidence);
-  fs.writeFileSync(REPORT_PATH, JSON.stringify(failure, null, 2));
+  writeChildReport(failure);
   console.error(`\n✗ SMOKE FAILED [${phase}]: ${m}`);
   cleanup();
   process.exit(1);
@@ -450,7 +457,7 @@ const fail = (m, phase = 'unknown') => {
       completedMode: 'setup-only',
     };
     lastEvidence = report;
-    fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+    writeChildReport(report);
     emitParentCheckpoint('phase-after', {
       phase: 'setup-only',
       boundary: 'setup-only-complete',
@@ -486,7 +493,7 @@ const fail = (m, phase = 'unknown') => {
       completedEpisodeCount: partialArms.length,
       arms: [...partialArms],
     };
-    fs.writeFileSync(REPORT_PATH, JSON.stringify(lastEvidence, null, 2));
+    writeChildReport(lastEvidence);
   });
 
   const arms = await page.evaluate(async (BATCH, ORDER) => {
@@ -721,7 +728,7 @@ const fail = (m, phase = 'unknown') => {
     else if (!gapCollapsed) acceptanceError = `arena+worker did not collapse attributed gap: ${best.bakeMaxAttributedGapMs}ms vs monolithic ${mono.bakeMaxAttributedGapMs}ms`;
   }
   lastEvidence = report;
-  fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+  writeChildReport(report);
   emitParentCheckpoint('phase-after', {
     phase: 'report-finalization',
     boundary: 'child-report-finalized',

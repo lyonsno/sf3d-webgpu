@@ -91,6 +91,22 @@ try {
   writeJsonReportDurable(replayPath, interrupted);
   assert.equal(JSON.parse(fs.readFileSync(replayPath, 'utf8')).integrityOk, true);
 
+  const volatileReplay = spawnSync(
+    process.execPath,
+    [
+      'tools/replay_parent_phase_journal.mjs',
+      '--journal', journalPath,
+      '--report', '/private/tmp/sf3d-unsafe-replay.json',
+    ],
+    { cwd: repo, encoding: 'utf8' },
+  );
+  assert.notEqual(volatileReplay.status, 0, 'volatile replay output must fail loud');
+  assert.equal(
+    JSON.parse(volatileReplay.stdout).lastTrustworthyBoundary,
+    'browser-ready',
+    'optional report failure must not suppress valid stdout replay',
+  );
+
   assert.throws(
     () => createParentPhaseJournal({
       journalPath,
