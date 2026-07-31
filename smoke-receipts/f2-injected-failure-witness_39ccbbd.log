@@ -1,0 +1,2 @@
+SMOKE FAILED [browser-arms]: injected failure in arm channel-range-bounded-prefix-2
+runArm (pptr:evaluate;file%3A%2F%2F%2Fprivate%2Ftmp%2Fsf3d-webgpu-slow-bounded-prefix-0730%2Ftools%2Fsmoke_cooperative_post_processor_ab.mjs%3A367%3A23:80:26)
