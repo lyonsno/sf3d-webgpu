@@ -1,0 +1,16 @@
+
+=== SF3D paired full-route scheduling comparison ===
+source 3ea891c92c clean=true apple/metal-3 batch=4096
+GLB identical across all episodes: true (sha e1f70de3407d…)
+episode               routeWall  routeMaxGap  bakeWall  bakeAttrib  scratchMB  cpuMatMs  xferMs
+1:monolithic            26769.7        224.9       212       170.5        n/a       n/a     n/a
+2:arena-plus-worker     26886.8        157.9     341.4         9.4        3.0       200     195
+3:arena-plus-worker     64777.1        468.7    1783.9        34.3        3.0      1676    1670
+4:monolithic            82271.7        799.7     970.5       799.7        n/a       n/a     n/a
+
+median observed full-route delta: -8688.7ms (0.840634x)
+median texture-bake mechanism delta: 471.4ms (1.797294x)
+median outside-texture-bake observed delta: -9160.1ms (not scheduler-causal)
+median attributed bake cadence: 485.1ms -> 21.8ms (0.045042x)
+order drift: control 55502ms, candidate 37890.3ms
+✓ SMOKE PASSED — paired output and scheduling contracts hold. report: /tmp/slow-fullroute-product.json
