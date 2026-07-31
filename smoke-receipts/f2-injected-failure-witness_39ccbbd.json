@@ -1,0 +1,172 @@
+{
+  "schema": "sf3d.cooperative-post-processor-abcd.v1",
+  "ok": false,
+  "failure": {
+    "phase": "browser-arms",
+    "message": "injected failure in arm channel-range-bounded-prefix-2\nrunArm (pptr:evaluate;file%3A%2F%2F%2Fprivate%2Ftmp%2Fsf3d-webgpu-slow-bounded-prefix-0730%2Ftools%2Fsmoke_cooperative_post_processor_ab.mjs%3A367%3A23:80:26)",
+    "details": {
+      "phase": "browser-arms-partial",
+      "completedArms": [
+        {
+          "name": "monolithic-control",
+          "glbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7",
+          "glbBytes": 2511516,
+          "mesh": {
+            "vertices": 9988,
+            "faces": 19976
+          },
+          "cooperativeStatus": null,
+          "completionPolicy": null,
+          "issuedGpuDutyCount": null,
+          "retiredGpuDutyCount": null,
+          "inFlightGpuDutyCount": null
+        },
+        {
+          "name": "channel-range-cooperative",
+          "glbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7",
+          "glbBytes": 2511516,
+          "mesh": {
+            "vertices": 9988,
+            "faces": 19976
+          },
+          "cooperativeStatus": "succeeded",
+          "completionPolicy": "strict-prefix",
+          "issuedGpuDutyCount": 0,
+          "retiredGpuDutyCount": 0,
+          "inFlightGpuDutyCount": 0
+        }
+      ],
+      "completedArmNames": [
+        "monolithic-control",
+        "channel-range-cooperative"
+      ],
+      "lastCompletedArm": "channel-range-cooperative",
+      "failingArm": "channel-range-bounded-prefix-2",
+      "failureMessage": "injected failure in arm channel-range-bounded-prefix-2",
+      "drainAfterFailure": {
+        "status": "succeeded",
+        "completionPolicy": "bounded-prefix",
+        "issuedGpuDutyCount": 702,
+        "retiredGpuDutyCount": 702,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 2
+      },
+      "evidencePreserved": true
+    }
+  },
+  "lastTrustworthyEvidence": {
+    "phase": "browser-arms-partial",
+    "completedArms": [
+      {
+        "name": "monolithic-control",
+        "glbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7",
+        "glbBytes": 2511516,
+        "mesh": {
+          "vertices": 9988,
+          "faces": 19976
+        },
+        "cooperativeStatus": null,
+        "completionPolicy": null,
+        "issuedGpuDutyCount": null,
+        "retiredGpuDutyCount": null,
+        "inFlightGpuDutyCount": null
+      },
+      {
+        "name": "channel-range-cooperative",
+        "glbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7",
+        "glbBytes": 2511516,
+        "mesh": {
+          "vertices": 9988,
+          "faces": 19976
+        },
+        "cooperativeStatus": "succeeded",
+        "completionPolicy": "strict-prefix",
+        "issuedGpuDutyCount": 0,
+        "retiredGpuDutyCount": 0,
+        "inFlightGpuDutyCount": 0
+      }
+    ],
+    "completedArmNames": [
+      "monolithic-control",
+      "channel-range-cooperative"
+    ],
+    "lastCompletedArm": "channel-range-cooperative",
+    "failingArm": "channel-range-bounded-prefix-2",
+    "failureMessage": "injected failure in arm channel-range-bounded-prefix-2",
+    "drainAfterFailure": {
+      "status": "succeeded",
+      "completionPolicy": "bounded-prefix",
+      "issuedGpuDutyCount": 702,
+      "retiredGpuDutyCount": 702,
+      "inFlightGpuDutyCount": 0,
+      "maxObservedInFlightGpuDuties": 2
+    },
+    "evidencePreserved": true,
+    "routeIdentity": {
+      "source": {
+        "revision": "39ccbbd3b10e9dfb4ad9cc101e1c847fc1f5b5ba",
+        "requestedRevision": "39ccbbd3b10e9dfb4ad9cc101e1c847fc1f5b5ba",
+        "matchesRequestedRevision": true,
+        "clean": true,
+        "dirtyModeExplicit": false,
+        "dirtyDiffSha256": null,
+        "dirtyPaths": [],
+        "worktree": "/private/tmp/sf3d-webgpu-slow-bounded-prefix-0730"
+      },
+      "input": {
+        "path": "/Users/noahlyons/.local/state/gpu-greenroom/outputs/b4fe3aa9e629/input.png",
+        "bytes": 118673,
+        "sha256": "3220e5ef5d598ae99f303834358d36e89d5a7dc73e6584b62e30de80c22eb624"
+      },
+      "weights": {
+        "requestedPath": "/private/tmp/sf3d-webgpu-slow-bounded-prefix-0730/public/weights.bin",
+        "effectivePath": "/Users/noahlyons/dev/sf3d-webgpu/public/weights.bin",
+        "bytes": 2285308688,
+        "sha256": "0e5c23c8c502492c0b4432006ac30f2d11b2a4c102a3bf9f21c2fcf094ddbffd"
+      },
+      "requestedArms": [
+        {
+          "name": "monolithic-control",
+          "cooperativePostProcessor": false
+        },
+        {
+          "name": "channel-range-cooperative",
+          "cooperativePostProcessor": true,
+          "postProcessorSchedulingMode": "cooperative",
+          "postProcessorDutyGranularity": "channel-range",
+          "postProcessorChannelsPerDuty": 16
+        }
+      ],
+      "armSelection": "pair",
+      "browser": {
+        "executablePath": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "headless": false,
+        "args": [
+          "--enable-unsafe-webgpu",
+          "--use-angle=metal",
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding"
+        ]
+      },
+      "backend": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+        "adapterInfo": {
+          "vendor": "apple",
+          "architecture": "metal-3",
+          "device": null,
+          "description": null,
+          "subgroupMinSize": 32,
+          "subgroupMaxSize": 32
+        },
+        "effectiveDeviceInitialized": true,
+        "effectiveWeightsInitialized": true,
+        "effectivePipelinesInitialized": true
+      }
+    }
+  },
+  "teardown": {
+    "status": "graceful",
+    "ownedPid": 1428
+  }
+}
