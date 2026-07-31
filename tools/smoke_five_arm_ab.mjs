@@ -18,7 +18,8 @@
  * one resident model, and setup excluded from each arm).
  *
  * Usage: node tools/smoke_five_arm_ab.mjs --expected-revision SHA
- *   [--profile six-arm|paired] [--image P] [--batch N]
+ *   [--profile six-arm|paired|setup-only|single-arm]
+ *   [--single-arm monolithic|arena-plus-worker] [--image P] [--batch N]
  */
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
@@ -61,6 +62,7 @@ const requestedOptions = Object.freeze({
   expectedRevision: readOption('--expected-revision'),
   expectedOutputSha: readOption('--expected-output-sha'),
   profile: readOption('--profile'),
+  singleArm: readOption('--single-arm'),
 });
 const REPORT_PATH = path.resolve(
   requestedOptions.report.value || '/tmp/sf3d-five-arm-ab.json',
@@ -70,6 +72,8 @@ let BATCH;
 let EXPECTED_REVISION;
 let EXPECTED_OUTPUT_SHA;
 let PROFILE;
+let SINGLE_ARM;
+let SELECTED_ARM_ORDER;
 const ALLOW_DIRTY = process.argv.includes('--allow-dirty-source');
 const ARM_ORDERS = Object.freeze({
   'six-arm': Object.freeze([
@@ -86,7 +90,14 @@ const ARM_ORDERS = Object.freeze({
     'arena-plus-worker',
     'monolithic',
   ]),
+  'setup-only': Object.freeze([]),
 });
+
+const parentCheckpointFd = process.env.SF3D_PARENT_CHECKPOINT_FD === '3' ? 3 : null;
+const emitParentCheckpoint = (event, details = {}) => {
+  if (parentCheckpointFd === null) return;
+  fs.writeSync(parentCheckpointFd, `${JSON.stringify({ event, ...details })}\n`);
+};
 
 const allocatePort = () => new Promise((res, rej) => { const s = net.createServer(); s.unref(); s.on('error', rej); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => res(port)); }); });
 const sha256File = (p) => execFileSync('shasum', ['-a', '256', p], { encoding: 'utf8' }).trim().split(/\s+/)[0];
@@ -123,6 +134,7 @@ const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch {} } };
 let lastEvidence = {};
 const fail = (m, phase = 'unknown') => {
+  emitParentCheckpoint('failure', { phase, message: String(m) });
   const failure = buildBenchmarkFailureReport(m, phase, lastEvidence);
   fs.writeFileSync(REPORT_PATH, JSON.stringify(failure, null, 2));
   console.error(`\n✗ SMOKE FAILED [${phase}]: ${m}`);
@@ -131,6 +143,7 @@ const fail = (m, phase = 'unknown') => {
 };
 
 (async () => {
+  emitParentCheckpoint('phase-before', { phase: 'requested-config' });
   for (const option of Object.values(requestedOptions)) {
     if (option.duplicate) fail(`${option.flag} may be provided only once`, 'requested-config');
     if (option.provided && option.value === undefined) {
@@ -153,13 +166,31 @@ const fail = (m, phase = 'unknown') => {
     || '';
   EXPECTED_OUTPUT_SHA = requestedOptions.expectedOutputSha.value || '';
   PROFILE = requestedOptions.profile.value || 'six-arm';
-  if (!ARM_ORDERS[PROFILE]) fail(`unknown profile: ${PROFILE}`, 'profile');
+  SINGLE_ARM = requestedOptions.singleArm.value || null;
+  if (!ARM_ORDERS[PROFILE] && PROFILE !== 'single-arm') fail(`unknown profile: ${PROFILE}`, 'profile');
+  if (PROFILE === 'single-arm' && !['monolithic', 'arena-plus-worker'].includes(SINGLE_ARM)) {
+    fail('--single-arm must be monolithic or arena-plus-worker', 'requested-config');
+  }
+  if (PROFILE !== 'single-arm' && SINGLE_ARM) {
+    fail('--single-arm is valid only with --profile single-arm', 'requested-config');
+  }
+  SELECTED_ARM_ORDER = PROFILE === 'single-arm' ? [SINGLE_ARM] : ARM_ORDERS[PROFILE];
   if (EXPECTED_OUTPUT_SHA && !/^[a-f0-9]{64}$/i.test(EXPECTED_OUTPUT_SHA)) {
     fail('--expected-output-sha must be a 64-character hexadecimal SHA-256', 'requested-config');
   }
   if (PROFILE === 'paired' && !EXPECTED_OUTPUT_SHA) {
     fail('--expected-output-sha is required for the paired profile', 'requested-config');
   }
+  if (PROFILE === 'single-arm' && !EXPECTED_OUTPUT_SHA) {
+    fail('--expected-output-sha is required for the single-arm profile', 'requested-config');
+  }
+  emitParentCheckpoint('phase-after', {
+    phase: 'requested-config',
+    boundary: 'requested-config-validated',
+    trustworthy: true,
+    profile: PROFILE,
+    singleArm: SINGLE_ARM,
+  });
   // Source identity gate.
   const effectiveRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
   const dirty = execFileSync('git', ['status', '--short'], { cwd: REPO, encoding: 'utf8' }).trim();
@@ -213,6 +244,7 @@ const fail = (m, phase = 'unknown') => {
       weightsPath: requestedWeightsPath,
       requestedBatch: batchIdentity.requested,
       profile: requestedOptions.profile.value || 'six-arm',
+      singleArm: SINGLE_ARM,
       expectedOutputSha: EXPECTED_OUTPUT_SHA || null,
       allowDirtySource: ALLOW_DIRTY,
     },
@@ -225,6 +257,7 @@ const fail = (m, phase = 'unknown') => {
       weightsBytes: fs.statSync(effectiveWeightsPath).size,
       batch: BATCH,
       profile: PROFILE,
+      singleArm: SINGLE_ARM,
       browserPath: fs.realpathSync(CHROME_PATH),
       kit: effectiveKit,
       dirtyStatus: dirty || null,
@@ -247,15 +280,31 @@ const fail = (m, phase = 'unknown') => {
     },
   };
   lastEvidence = { source };
+  emitParentCheckpoint('phase-after', {
+    phase: 'source-identity',
+    boundary: 'source-and-package-identity-verified',
+    trustworthy: true,
+    revision: source.revision,
+    profile: PROFILE,
+    singleArm: SINGLE_ARM,
+    kit: source.effective.kit,
+  });
 
   const port = await allocatePort();
   // Bind explicitly to 127.0.0.1: without --host vite binds to `localhost`,
   // which resolves to IPv6 ::1 on this host while the harness navigates to the
   // IPv4 127.0.0.1 port below, producing ERR_CONNECTION_REFUSED. The
   // postprocessor A/B already pins --host 127.0.0.1 for the same reason.
+  emitParentCheckpoint('phase-before', { phase: 'vite-start', port });
   const vite = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
   procs.push(vite);
   await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error('vite timeout')), 40000); vite.stdout.on('data', d => { if (/Local:|ready/.test(d.toString())) { clearTimeout(to); res(); } }); vite.on('error', e => { clearTimeout(to); rej(e); }); }).catch(e => fail(e.message, 'vite'));
+  emitParentCheckpoint('phase-after', {
+    phase: 'vite-start',
+    boundary: 'vite-listening',
+    trustworthy: true,
+    port,
+  });
 
   const browserArgs = [
     '--enable-unsafe-webgpu',
@@ -264,17 +313,30 @@ const fail = (m, phase = 'unknown') => {
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
   ];
+  emitParentCheckpoint('phase-before', { phase: 'browser-launch' });
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     headless: false,
     protocolTimeout: 1200000,
     args: browserArgs,
   });
+  emitParentCheckpoint('phase-after', {
+    phase: 'browser-launch',
+    boundary: 'browser-process-started',
+    trustworthy: true,
+    browserPid: browser.process()?.pid ?? null,
+  });
   const page = await browser.newPage();
   await page.bringToFront();
   const pageErrors = []; page.on('pageerror', e => pageErrors.push(e.message));
   const setupStartedAt = Date.now();
+  emitParentCheckpoint('phase-before', { phase: 'route-navigation' });
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  emitParentCheckpoint('phase-after', {
+    phase: 'route-navigation',
+    boundary: 'route-document-loaded',
+    trustworthy: true,
+  });
   const start = Date.now();
   let readyStatus = '';
   while (Date.now() - start < 180000) {
@@ -289,7 +351,7 @@ const fail = (m, phase = 'unknown') => {
     setupIncludesModelLoadAndPipelineInitialization: true,
     armTotalsExcludeSetup: true,
     allArmsShareOneResidentModel: true,
-    armOrder: ARM_ORDERS[PROFILE],
+    armOrder: SELECTED_ARM_ORDER,
     browserControlArgs: browserArgs,
   };
   source.backend = await page.evaluate(async () => {
@@ -311,6 +373,13 @@ const fail = (m, phase = 'unknown') => {
       } : null,
     };
   });
+  emitParentCheckpoint('phase-after', {
+    phase: 'runtime-setup',
+    boundary: 'model-and-pipelines-ready',
+    trustworthy: true,
+    setupWallMs: source.timingScope.setupWallMs,
+    backend: source.backend,
+  });
   const browserExecutedKit = await page.evaluate(async () => {
     const witness = await import('/tools/browser_kit_identity.js');
     return witness.readBrowserKitIdentity();
@@ -327,8 +396,39 @@ const fail = (m, phase = 'unknown') => {
   }
   lastEvidence = { source };
 
+  if (PROFILE === 'setup-only') {
+    const report = {
+      schema: 'sf3d.m2-staged-setup-only.v0',
+      ok: true,
+      status: 'succeeded',
+      source,
+      completedMode: 'setup-only',
+    };
+    lastEvidence = report;
+    fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+    emitParentCheckpoint('phase-after', {
+      phase: 'setup-only',
+      boundary: 'setup-only-complete',
+      trustworthy: true,
+      reportPath: REPORT_PATH,
+    });
+    await browser.close().catch(() => {});
+    cleanup();
+    console.log(`✓ SETUP-ONLY PASSED — report: ${REPORT_PATH}`);
+    process.exit(0);
+  }
+
   const imageB64 = fs.readFileSync(IMAGE).toString('base64');
+  emitParentCheckpoint('phase-before', { phase: 'input-materialization' });
   await page.evaluate(async (b64) => { await new Promise((res, rej) => { const img = new Image(); img.onload = () => { window._img = img; res(); }; img.onerror = rej; img.src = 'data:image/png;base64,' + b64; }); }, imageB64);
+  emitParentCheckpoint('phase-after', {
+    phase: 'input-materialization',
+    boundary: 'input-image-loaded',
+    trustworthy: true,
+  });
+  await page.exposeFunction('__sf3dParentCheckpoint', checkpoint => {
+    emitParentCheckpoint(checkpoint.event, checkpoint);
+  });
   const partialArms = [];
   await page.exposeFunction('__sf3dBenchmarkCheckpoint', rawArm => {
     const arm = hashGlbArm(rawArm);
@@ -344,7 +444,7 @@ const fail = (m, phase = 'unknown') => {
     fs.writeFileSync(REPORT_PATH, JSON.stringify(lastEvidence, null, 2));
   });
 
-  const arms = await page.evaluate(async (BATCH, PROFILE) => {
+  const arms = await page.evaluate(async (BATCH, ORDER) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const { buildFullRouteArmReceipt } = await import('/tools/full_route_benchmark_contract.mjs');
     const device = window._sf3d_device, weights = window._sf3d_weights, pipelines = window._sf3d_pipelines, img = window._img;
@@ -362,6 +462,12 @@ const fail = (m, phase = 'unknown') => {
         requestAnimationFrame(tick);
         resolve();
       }));
+      await globalThis.__sf3dParentCheckpoint({
+        event: 'phase-before',
+        phase: 'full-route-arm',
+        arm: name,
+        ordinal,
+      });
       const pipelineStartMs = performance.now();
       const out = await runFullPipelineToGlb(device, pipelines, weights, img, opts);
       const pipelineEndMs = performance.now();
@@ -378,6 +484,15 @@ const fail = (m, phase = 'unknown') => {
         frames,
         pipelineStartMs,
         pipelineEndMs,
+      });
+      await globalThis.__sf3dParentCheckpoint({
+        event: 'phase-after',
+        phase: 'full-route-arm',
+        boundary: `arm:${name}:complete`,
+        trustworthy: true,
+        arm: name,
+        ordinal,
+        totalMs: route.totalMs,
       });
       const bake = out.cooperativeReports?.['texture-bake'] || null;
       const tel = bake?.textureBakeTelemetry || null;
@@ -417,18 +532,15 @@ const fail = (m, phase = 'unknown') => {
       }
       throw new Error(`unknown arm: ${name}`);
     };
-    const order = PROFILE === 'paired'
-      ? ['monolithic', 'arena-plus-worker', 'arena-plus-worker', 'monolithic']
-      : ['monolithic', 'current-cooperative', 'arena-only', 'worker-only', 'arena-plus-worker', 'arena-disabled'];
     const results = [];
-    for (let index = 0; index < order.length; index++) {
-      const result = await runByName(order[index], index + 1);
+    for (let index = 0; index < ORDER.length; index++) {
+      const result = await runByName(ORDER[index], index + 1);
       results.push(result);
       await globalThis.__sf3dBenchmarkCheckpoint(result);
     }
     if (matWorker) matWorker.terminate();
     return results;
-  }, BATCH, PROFILE);
+  }, BATCH, SELECTED_ARM_ORDER);
 
   await browser.close().catch(() => {}); cleanup();
   if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`, 'browser');
@@ -496,6 +608,28 @@ const fail = (m, phase = 'unknown') => {
     else if (!pairedComparison.cadenceHypothesisSatisfied) {
       acceptanceError = `counterbalanced texture-bake cadence did not collapse: ${pairedComparison.medians.candidateMechanismMaxAttributedGapMs}ms vs ${pairedComparison.medians.controlMechanismMaxAttributedGapMs}ms`;
     }
+  } else if (PROFILE === 'single-arm') {
+    const arm = withSha[0];
+    const cadenceObserved = Number.isFinite(arm?.cadence?.wholeRoute?.maxMs)
+      && arm.cadence.wholeRoute.maxMs >= 0;
+    report = {
+      schema: 'sf3d.m2-staged-single-arm.v0',
+      ok: withSha.length === 1 && expectedOutputMatches && cadenceObserved,
+      status: withSha.length === 1 && expectedOutputMatches && cadenceObserved
+        ? 'succeeded'
+        : 'failed',
+      source,
+      completedMode: 'single-arm',
+      selectedArm: SINGLE_ARM,
+      expectedOutputSha: EXPECTED_OUTPUT_SHA,
+      expectedOutputMatches,
+      canonicalGlbSha: arm?.glbSha ?? null,
+      cadenceObserved,
+      arm,
+    };
+    if (withSha.length !== 1) acceptanceError = `single-arm mode returned ${withSha.length} episodes`;
+    else if (!expectedOutputMatches) acceptanceError = `GLB does not match expected SHA-256 ${EXPECTED_OUTPUT_SHA}`;
+    else if (!cadenceObserved) acceptanceError = 'single-arm cadence was not observed';
   } else {
     // Six-arm acceptance retains the mechanism decomposition. Full-route
     // performance claims belong to the counterbalanced paired profile.
@@ -543,6 +677,13 @@ const fail = (m, phase = 'unknown') => {
   }
   lastEvidence = report;
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+  emitParentCheckpoint('phase-after', {
+    phase: 'report-finalization',
+    boundary: 'child-report-finalized',
+    trustworthy: true,
+    reportPath: REPORT_PATH,
+    ok: report.ok,
+  });
 
   console.log(`\n=== SF3D ${PROFILE} full-route scheduling comparison ===`);
   console.log(`source ${source.revision.slice(0, 10)} clean=${source.clean} ${source.backend.vendor}/${source.backend.architecture} batch=${BATCH}`);
@@ -567,7 +708,7 @@ const fail = (m, phase = 'unknown') => {
     console.log(`median outside-texture-bake observed delta: ${medians.outsideMechanismObservedDeltaMs}ms (not scheduler-causal)`);
     console.log(`median attributed bake cadence: ${medians.controlMechanismMaxAttributedGapMs}ms -> ${medians.candidateMechanismMaxAttributedGapMs}ms (${medians.mechanismCadenceRatio}x)`);
     console.log(`order drift: control ${report.pairedComparison.orderDrift.controlLastMinusFirstMs}ms, candidate ${report.pairedComparison.orderDrift.candidateSecondMinusFirstMs}ms`);
-  } else {
+  } else if (PROFILE === 'six-arm') {
     const comparison = report.comparisons.monolithicVsArenaPlusWorker;
     console.log(`\nobserved full-route delta: ${comparison.observedFullRouteDeltaMs}ms (${comparison.observedFullRouteRatio}x)`);
     console.log(`texture-bake mechanism delta: ${comparison.mechanismStageDeltaMs}ms (${comparison.mechanismStageRatio}x)`);
