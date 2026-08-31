@@ -68,11 +68,11 @@ if (!fs.existsSync(imagePath)) {
 
 const { port, serverProcess: sp } = await ensureViteServer();
 serverProcess = sp;
-const URL = `http://localhost:${port}`;
+const APP_URL = `http://localhost:${port}`;
 
 console.log(`\n=== SF3D WebGPU Inference Smoke ===`);
 console.log(`Image: ${imagePath}`);
-console.log(`URL: ${URL}\n`);
+console.log(`URL: ${APP_URL}\n`);
 
 const browser = await puppeteer.launch({
   executablePath: CHROME_PATH,
@@ -137,7 +137,7 @@ async function waitForStatus(match, timeoutMs = 300000) {
 
 try {
   console.log('Navigating...');
-  await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
   // Wait for model to be ready
   console.log('Waiting for weight loading and pipeline init...');
