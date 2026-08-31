@@ -14,11 +14,8 @@ No server, no Python, no ONNX at inference time. Image in, textured GLB out.
 # 1. Install JS dependencies
 npm install
 
-# 2. Produce the model weights (one-time, ~2.1 GB output)
-#    Requires Python 3.10+, PyTorch, and the Stable Fast 3D package importable
-#    (see "Model weights" below). Downloads the gated safetensors from
-#    HuggingFace and writes the flat WebGPU binary straight into public/.
-python tools/convert_weights.py --output public/weights.bin --dtype fp16
+# 2. Download the model weights (~2.1 GB) into public/
+hf download BasinShapers/sf3d-webgpu-weights weights.bin --local-dir public/
 
 # 3. Run
 npm run dev            # or: npx vite --port 5177
@@ -31,21 +28,32 @@ npm run dev            # or: npx vite --port 5177
 ### Model weights
 
 Inference needs `public/weights.bin` — a ~2.1 GB fp16 flat binary (gitignored,
-never committed). `tools/convert_weights.py` builds it from Stability AI's
-original checkpoint. It requires:
+never committed). The quickest path is the pre-converted download above from
+[`BasinShapers/sf3d-webgpu-weights`](https://huggingface.co/BasinShapers/sf3d-webgpu-weights)
+(needs the [`hf` CLI](https://huggingface.co/docs/huggingface_hub/guides/cli):
+`pip install -U huggingface_hub`).
+
+**Or build it yourself** from Stability AI's original checkpoint with
+`tools/convert_weights.py`, which requires:
 
 - **PyTorch** and the [`stable-fast-3d`](https://github.com/Stability-AI/stable-fast-3d)
   package importable on `PYTHONPATH` (the converter imports `sf3d.system`; point
   it at a checkout with `SF3D_REPO=/path/to/stable-fast-3d`).
 - **HuggingFace access** to the gated
   [`stabilityai/stable-fast-3d`](https://huggingface.co/stabilityai/stable-fast-3d)
-  model — accept its license and authenticate (`huggingface-cli login`) before
-  running. Pass `--model-path /local/checkout` to convert from a local copy
-  instead of downloading.
+  model — accept its license and authenticate (`huggingface-cli login`), then:
 
-> **Note:** a pre-converted `weights.bin` download is not yet hosted. Until it
-> is, first run requires the conversion step above. (Hosting the converted
-> binary is subject to the upstream model license.)
+  ```bash
+  python tools/convert_weights.py --output public/weights.bin --dtype fp16
+  ```
+
+  Pass `--model-path /local/checkout` to convert from a local copy instead of
+  downloading.
+
+Both the hosted weights and the original model are governed by the
+[Stability AI Community License](https://huggingface.co/BasinShapers/sf3d-webgpu-weights/blob/main/LICENSE.md)
+(free for research, non-commercial, and commercial use under US $1M annual
+revenue). **Powered by Stability AI.**
 
 ## Production Build
 
