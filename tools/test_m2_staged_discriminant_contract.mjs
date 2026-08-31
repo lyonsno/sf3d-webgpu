@@ -178,6 +178,7 @@ assert.match(pressureObserverSource, /hostMemoryPressureFreePercent/);
 
 const prefixSource = fs.readFileSync(new URL('./smoke_m2_cold_browser_prefix.mjs', import.meta.url), 'utf8');
 const weightLoaderSource = fs.readFileSync(new URL('../src/lib/weights.js', import.meta.url), 'utf8');
+const fullPipelineSource = fs.readFileSync(new URL('../src/lib/full_pipeline.js', import.meta.url), 'utf8');
 const boundarySources = `${prefixSource}\n${weightLoaderSource}`;
 for (const boundary of [
   'weights-fetch-started',
@@ -198,6 +199,12 @@ for (const boundary of [
   assert.match(boundarySources, new RegExp(boundary));
 }
 assert.match(prefixSource, /__sf3dParentCheckpoint/);
+assert.match(prefixSource, /armEntryOnly:\s*true/);
+assert.match(fullPipelineSource, /options\.onArmEntry/);
+assert.ok(
+  fullPipelineSource.indexOf('options.onArmEntry') < fullPipelineSource.indexOf('await runInference'),
+  'arm-entry callback must run inside the full-pipeline body before inference begins',
+);
 assert.match(prefixSource, /writeJsonReportDurable\(options\.reportPath/);
 assert.doesNotMatch(prefixSource, /setTimeout\([^)]*process\.kill/);
 

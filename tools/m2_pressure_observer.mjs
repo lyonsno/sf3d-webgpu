@@ -65,10 +65,13 @@ export function collectChromeProcessCoalition(rootPid, { exec = execute } = {}) 
       role: chromeRole(process.command, process.pid === rootPid),
     }))
     .sort((left, right) => left.pid - right.pid);
+  const observable = coalition.some(process => process.pid === rootPid);
   return {
     rootPid,
-    observable: coalition.some(process => process.pid === rootPid),
-    totalRssBytes: coalition.reduce((sum, process) => sum + process.rssBytes, 0),
+    observable,
+    totalRssBytes: observable
+      ? coalition.reduce((sum, process) => sum + process.rssBytes, 0)
+      : null,
     processes: coalition,
   };
 }
@@ -85,15 +88,17 @@ export function parseSwapUsage(text) {
 
 export function parseVmStat(text) {
   const pageSize = Number(text.match(/page size of (\d+) bytes/i)?.[1] ?? 0);
-  const readPages = label => Number(
-    text.match(new RegExp(`^${label}:\\s+(\\d+)\\.`, 'mi'))?.[1] ?? 0,
-  );
+  const readPages = label => {
+    const match = text.match(new RegExp(`^${label}:\\s+(\\d+)\\.`, 'mi'));
+    return match ? Number(match[1]) : null;
+  };
+  const bytes = pages => pages == null ? null : pages * pageSize;
   if (!pageSize) return null;
   return {
     pageSizeBytes: pageSize,
-    freeBytes: readPages('Pages free') * pageSize,
-    compressedMemoryBytes: readPages('Pages occupied by compressor') * pageSize,
-    compressedLogicalBytes: readPages('Pages stored in compressor') * pageSize,
+    freeBytes: bytes(readPages('Pages free')),
+    compressedMemoryBytes: bytes(readPages('Pages occupied by compressor')),
+    compressedLogicalBytes: bytes(readPages('Pages stored in compressor')),
   };
 }
 

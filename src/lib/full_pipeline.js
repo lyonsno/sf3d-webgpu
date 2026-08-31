@@ -72,6 +72,19 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   const report = (msg) => { if (onProgress) onProgress(msg); };
   const t0 = performance.now();
 
+  // Diagnostic callers may prove that the real arm body was entered without
+  // beginning inference. The callback is inside this function so an external
+  // "about to call" checkpoint cannot masquerade as arm-entry evidence.
+  if (options.onArmEntry) await options.onArmEntry();
+  if (options.armEntryOnly) {
+    return {
+      armEntryOnly: true,
+      stageSpans: [],
+      glb: null,
+      totalMs: performance.now() - t0,
+    };
+  }
+
   // Absolute-timestamp stage spans on the same performance.now() clock as any
   // caller-side rAF probe, so each foreground frame gap can be attributed to the
   // stage executing during it. Inference substages (dinov2/two-stream/triplane/

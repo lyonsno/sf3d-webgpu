@@ -30,6 +30,7 @@ assert.equal(coalition.totalRssBytes, (200000 + 300000 + 400000 + 50000) * 1024)
 
 const missingRoot = collectChromeProcessCoalition(999, { exec: () => processTable });
 assert.equal(missingRoot.observable, false);
+assert.equal(missingRoot.totalRssBytes, null);
 assert.deepEqual(missingRoot.processes, []);
 
 assert.deepEqual(
@@ -50,6 +51,15 @@ Pages occupied by compressor: 20.
   freeBytes: 100 * 16384,
   compressedMemoryBytes: 20 * 16384,
   compressedLogicalBytes: 300 * 16384,
+});
+assert.deepEqual(parseVmStat(`
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 100.
+`), {
+  pageSizeBytes: 16384,
+  freeBytes: 100 * 16384,
+  compressedMemoryBytes: null,
+  compressedLogicalBytes: null,
 });
 assert.deepEqual(
   parseMemoryPressure('System-wide memory free percentage: 7%'),

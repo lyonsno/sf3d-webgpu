@@ -337,11 +337,6 @@ try {
         arm: 'arena-plus-worker', batch,
       });
       const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
-      await globalThis.__sf3dParentCheckpoint({
-        event: 'phase-after', phase: 'arm-entry',
-        boundary: 'arm-body-entered', trustworthy: true,
-        arm: 'arena-plus-worker', batch,
-      });
       const output = await runFullPipelineToGlb(
         globalThis.__sf3dPrefixDevice,
         globalThis.__sf3dPrefixPipelines,
@@ -353,10 +348,21 @@ try {
           bakeBatchTexels: batch,
           decoderArena: true,
           materializeWorker: globalThis.__sf3dPrefixWorker,
+          armEntryOnly: true,
+          onArmEntry: async () => {
+            await globalThis.__sf3dParentCheckpoint({
+              event: 'phase-after', phase: 'arm-entry',
+              boundary: 'arm-body-entered', trustworthy: true,
+              arm: 'arena-plus-worker', batch,
+            });
+          },
         },
       );
-      return { glbBytes: output.glb.byteLength, totalMs: output.totalMs };
+      return { armEntryOnly: output.armEntryOnly, totalMs: output.totalMs };
     }, { batch: options.batch, imageB64 });
+    if (!prefixResult.armEntryOnly) {
+      throw new Error('arm-entry prefix did not stop before inference');
+    }
   }
 
   if (pageErrors.length) throw new Error(`page errors: ${pageErrors.join(' | ')}`);
