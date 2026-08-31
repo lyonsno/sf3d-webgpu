@@ -1,12 +1,14 @@
 import path from 'node:path';
 
-const MODES = new Set(['setup-only', 'single-arm']);
+const MODES = new Set(['setup-only', 'single-arm', 'prefix']);
 const ARMS = new Set(['monolithic', 'arena-plus-worker']);
+const PREFIXES = new Set(['weights', 'model', 'pipelines', 'arena', 'worker', 'arm-entry']);
 const VALUE_OPTIONS = new Set([
   '--journal',
   '--report',
   '--mode',
   '--arm',
+  '--prefix',
   '--expected-revision',
   '--expected-output-sha',
   '--image',
@@ -50,11 +52,15 @@ export function parseM2StagedDiscriminantOptions(argv) {
   const journal = values.get('--journal');
   if (!journal) throw new Error('--journal is required');
   const mode = values.get('--mode');
-  if (!MODES.has(mode)) throw new Error('--mode must be setup-only or single-arm');
+  if (!MODES.has(mode)) throw new Error('--mode must be setup-only, single-arm, or prefix');
   const arm = values.get('--arm') ?? null;
+  const prefix = values.get('--prefix') ?? null;
   if (mode === 'single-arm' && !arm) throw new Error('--arm is required for single-arm');
-  if (mode === 'setup-only' && arm) throw new Error('setup-only does not accept --arm');
+  if (mode !== 'single-arm' && arm) throw new Error(`${mode} does not accept --arm`);
   if (arm && !ARMS.has(arm)) throw new Error(`unknown arm: ${arm}`);
+  if (mode === 'prefix' && !prefix) throw new Error('--prefix is required for prefix mode');
+  if (mode !== 'prefix' && prefix) throw new Error(`${mode} does not accept --prefix`);
+  if (prefix && !PREFIXES.has(prefix)) throw new Error(`unknown prefix: ${prefix}`);
 
   const expectedRevision = values.get('--expected-revision');
   if (!expectedRevision || !/^[a-f0-9]{40}$/i.test(expectedRevision)) {
@@ -87,6 +93,7 @@ export function parseM2StagedDiscriminantOptions(argv) {
     childReportPath: childReportPathFor(reportPath),
     mode,
     arm,
+    prefix,
     expectedRevision: expectedRevision.toLowerCase(),
     expectedOutputSha: expectedOutputSha?.toLowerCase() ?? null,
     image: values.get('--image') ? path.resolve(values.get('--image')) : null,
@@ -100,6 +107,21 @@ export function parseM2StagedDiscriminantOptions(argv) {
 }
 
 export function buildM2ChildInvocation(options) {
+  if (options.mode === 'prefix') {
+    const args = [
+      'tools/smoke_m2_cold_browser_prefix.mjs',
+      '--prefix', options.prefix,
+      '--expected-revision', options.expectedRevision,
+      '--report', options.childReportPath,
+      '--batch', String(options.batch),
+    ];
+    if (options.image) args.push('--image', options.image);
+    return {
+      command: process.execPath,
+      args,
+      env: { ...process.env, SF3D_PARENT_CHECKPOINT_FD: '3' },
+    };
+  }
   const args = [
     'tools/smoke_five_arm_ab.mjs',
     '--profile', options.mode,
@@ -132,7 +154,7 @@ export function buildGreenroomClaimArgs({
     '--process-group', String(processGroup),
     '--effective-route', effectiveRoute, '--backend', 'webgpu-metal',
     '--device', 'chrome-webgpu:metal',
-    '--profile', `sf3d-m2-${options.mode}-${options.arm ?? 'setup'}`,
+    '--profile', `sf3d-m2-${options.mode}-${options.prefix ?? options.arm ?? 'setup'}`,
     '--supports-checkpoints', '--ttl-seconds', '300',
   ];
   if (options.greenroomHandoffBumpId) {

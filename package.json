@@ -30,7 +30,7 @@
     "test:bounded-prefix-acceptance": "node tools/test_bounded_prefix_acceptance_contract.mjs",
     "test:partial-arm-failure": "node tools/test_partial_arm_failure_contract.mjs",
     "test:parent-phase-journal": "node tools/test_parent_phase_journal_contract.mjs",
-    "test:m2-staged-discriminant": "node tools/test_m2_staged_discriminant_contract.mjs",
+    "test:m2-staged-discriminant": "node tools/test_m2_staged_discriminant_contract.mjs && node tools/test_m2_pressure_observer_contract.mjs",
     "smoke:m2-staged": "node tools/smoke_m2_staged_discriminant.mjs",
     "replay:m2-journal": "node tools/replay_parent_phase_journal.mjs"
   },

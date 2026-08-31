@@ -146,7 +146,11 @@ function extractBytes(chunkedBuffer, offset, size) {
 /**
  * Load SF3D weights and organize into component structure.
  */
-export async function loadWeights(device, url, onProgress) {
+export async function loadWeights(device, url, onProgress, onBoundary) {
+  const boundary = async (name, details = {}) => {
+    if (onBoundary) await onBoundary(name, details);
+  };
+  await boundary('weights-fetch-started', { url });
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Failed to fetch weights: ${response.status}`);
 
@@ -163,6 +167,13 @@ export async function loadWeights(device, url, onProgress) {
     received += value.length;
     if (onProgress) onProgress(received, contentLength);
   }
+  await boundary('weights-fetch-completed', {
+    url,
+    receivedBytes: received,
+    declaredBytes: contentLength || null,
+  });
+  await boundary('model-construction-started', { weightsBytes: received });
+  await boundary('model-upload-started', { weightsBytes: received });
 
   // Build a chunked buffer that avoids a single >2GB ArrayBuffer
   const chunkedBuffer = { chunks, offsets: chunkOffsets, totalSize: received };
@@ -376,7 +387,7 @@ export async function loadWeights(device, url, onProgress) {
   const _rawTryGet = (name) => tryGet(name);
   const _rawHas = (name) => tensors.has(name);
 
-  return {
+  const model = {
     imageTokenizer,
     cameraEmbedder,
     tokenizer,
@@ -389,4 +400,15 @@ export async function loadWeights(device, url, onProgress) {
     _rawTryGet,
     _rawHas,
   };
+  await boundary('model-upload-completed', {
+    weightsBytes: received,
+    tensorCount: tensors.size,
+    deferredRawTensorAccess: true,
+  });
+  await boundary('model-construction-completed', {
+    weightsBytes: received,
+    tensorCount: tensors.size,
+    deferredRawTensorAccess: true,
+  });
+  return model;
 }

@@ -18,6 +18,10 @@ import {
   resolveDurableArtifactPath,
   writeJsonReportDurable,
 } from './parent_phase_journal.mjs';
+import {
+  collectChromeProcessCoalition,
+  observeMacHostPressure,
+} from './m2_pressure_observer.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const ROUTE_ID = 'sf3d.image-to-mesh.webgpu-local.v0';
@@ -43,6 +47,7 @@ const journal = createParentPhaseJournal({
     revision: options.expectedRevision,
     mode: options.mode,
     arm: options.arm,
+    prefix: options.prefix,
     expectedOutputSha: options.expectedOutputSha,
     image: options.image,
     batch: options.batch,
@@ -102,6 +107,7 @@ function sourceIdentity() {
     dirtyPaths: dirty ? dirty.split('\n') : [],
     mode: options.mode,
     arm: options.arm,
+    prefix: options.prefix,
     browserPath: fs.realpathSync(CHROME_PATH),
     kit: kit ? { version: kit.version, resolved: kit.resolved, integrity: kit.integrity } : null,
     greenroom: {
@@ -207,9 +213,17 @@ function consumeCheckpointData(chunk) {
       if (Number.isSafeInteger(checkpoint.browserPid)) observedBrowserPid = checkpoint.browserPid;
       const type = checkpoint.event === 'phase-after' && checkpoint.trustworthy
         ? 'phase-checkpoint' : 'child-checkpoint';
+      const resourceObservation = type === 'phase-checkpoint'
+        ? observeResourceState()
+        : null;
       journal.append(type, type === 'phase-checkpoint'
-        ? { ...checkpoint, boundary: checkpoint.boundary ?? checkpoint.phase }
+        ? {
+          ...checkpoint,
+          boundary: checkpoint.boundary ?? checkpoint.phase,
+          resourceObservation,
+        }
         : checkpoint);
+      if (resourceObservation) appendPressureIndicatorIfChanged(resourceObservation);
     } catch (error) {
       if (acceptCheckpoints) journal.append('checkpoint-parse-failure', { line, error: error.message });
     }
@@ -218,6 +232,33 @@ function consumeCheckpointData(chunk) {
 
 let heartbeat = null;
 let renewal = null;
+let lastPressureIndicatorKey = null;
+function observeResourceState() {
+  const browserProcessCoalition = collectChromeProcessCoalition(observedBrowserPid);
+  const hostPressure = observeMacHostPressure();
+  return {
+    childPid: child?.pid ?? null,
+    childRssBytes: processRssBytes(child?.pid),
+    browserPid: observedBrowserPid,
+    browserRssBytes: processRssBytes(observedBrowserPid),
+    browserProcessCoalition,
+    ...hostPressure,
+    greenroomLeaseId: lease?.lease_id ?? null,
+  };
+}
+function appendPressureIndicatorIfChanged(resourceObservation) {
+  const indicators = resourceObservation.indicators ?? [];
+  const indicatorKey = JSON.stringify(indicators);
+  if (indicators.length && indicatorKey !== lastPressureIndicatorKey) {
+    journal.append('pressure-indicator', {
+      indicators,
+      diagnosticOnly: true,
+      workloadAltered: false,
+      ...resourceObservation,
+    });
+  }
+  lastPressureIndicatorKey = indicatorKey;
+}
 function stopIntervals() {
   if (heartbeat) clearInterval(heartbeat);
   if (renewal) clearInterval(renewal);
@@ -272,12 +313,9 @@ try {
 
   heartbeat = setInterval(() => {
     if (!acceptCheckpoints) return;
-    journal.append('resource-heartbeat', {
-      childPid: child.pid, childRssBytes: processRssBytes(child.pid),
-      browserPid: observedBrowserPid, browserRssBytes: processRssBytes(observedBrowserPid),
-      hostFreeMemoryBytes: os.freemem(), hostTotalMemoryBytes: os.totalmem(),
-      hostLoadAverage: os.loadavg(), greenroomLeaseId: lease.lease_id,
-    });
+    const resourceObservation = observeResourceState();
+    journal.append('resource-heartbeat', resourceObservation);
+    appendPressureIndicatorIfChanged(resourceObservation);
   }, 5000);
   heartbeat.unref();
   renewal = setInterval(() => {

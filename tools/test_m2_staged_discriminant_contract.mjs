@@ -55,6 +55,25 @@ assert.throws(
   /unknown option --timeout/,
   'the staged runner must not silently impose an execution timeout',
 );
+assert.throws(
+  () => parseM2StagedDiscriminantOptions([
+    '--journal', '/Users/noahlyons/.local/state/sf3d/prefix.jsonl',
+    '--mode', 'prefix',
+    '--expected-revision', revision,
+    ...greenroomArgs,
+  ]),
+  /--prefix is required/,
+);
+assert.throws(
+  () => parseM2StagedDiscriminantOptions([
+    '--journal', '/Users/noahlyons/.local/state/sf3d/prefix.jsonl',
+    '--mode', 'prefix',
+    '--prefix', 'not-a-boundary',
+    '--expected-revision', revision,
+    ...greenroomArgs,
+  ]),
+  /unknown prefix/,
+);
 
 const setup = parseM2StagedDiscriminantOptions([
   '--journal', '/Users/noahlyons/.local/state/sf3d/setup.jsonl',
@@ -82,6 +101,24 @@ assert.ok(invocation.args.includes('single-arm'));
 assert.ok(invocation.args.includes('arena-plus-worker'));
 assert.ok(invocation.args.includes(canonicalSha));
 assert.equal(invocation.env.SF3D_PARENT_CHECKPOINT_FD, '3');
+
+const prefix = parseM2StagedDiscriminantOptions([
+  '--journal', '/Users/noahlyons/.local/state/sf3d/prefix.jsonl',
+  '--mode', 'prefix',
+  '--prefix', 'weights',
+  '--expected-revision', revision,
+  '--batch', '4096',
+  ...greenroomArgs,
+]);
+assert.equal(prefix.mode, 'prefix');
+assert.equal(prefix.prefix, 'weights');
+assert.equal(prefix.expectedOutputSha, null);
+const prefixInvocation = buildM2ChildInvocation(prefix);
+assert.deepEqual(prefixInvocation.args.slice(0, 2), [
+  'tools/smoke_m2_cold_browser_prefix.mjs', '--prefix',
+]);
+assert.ok(prefixInvocation.args.includes('weights'));
+assert.equal(prefixInvocation.env.SF3D_PARENT_CHECKPOINT_FD, '3');
 
 const claimArgs = buildGreenroomClaimArgs({
   options: { ...single, greenroomHandoffBumpId: 'handoff-7' },
@@ -127,6 +164,41 @@ assert.match(wrapperSource, /if \(terminalWritten\) return/);
 assert.match(wrapperSource, /acceptCheckpoints = false/);
 assert.match(wrapperSource, /replayParentPhaseJournal/);
 assert.match(wrapperSource, /stdio: \['ignore', 'pipe', 'pipe', 'pipe'\]/);
+assert.match(wrapperSource, /collectChromeProcessCoalition/);
+assert.match(wrapperSource, /observeMacHostPressure/);
+assert.match(wrapperSource, /browserProcessCoalition/);
+assert.match(wrapperSource, /resourceObservation/);
+assert.match(wrapperSource, /pressure-indicator/);
 assert.doesNotMatch(wrapperSource, /setTimeout\([^)]*process\.kill/);
+
+const pressureObserverSource = fs.readFileSync(new URL('./m2_pressure_observer.mjs', import.meta.url), 'utf8');
+assert.match(pressureObserverSource, /hostCompressedMemoryBytes/);
+assert.match(pressureObserverSource, /hostSwapUsedBytes/);
+assert.match(pressureObserverSource, /hostMemoryPressureFreePercent/);
+
+const prefixSource = fs.readFileSync(new URL('./smoke_m2_cold_browser_prefix.mjs', import.meta.url), 'utf8');
+const weightLoaderSource = fs.readFileSync(new URL('../src/lib/weights.js', import.meta.url), 'utf8');
+const boundarySources = `${prefixSource}\n${weightLoaderSource}`;
+for (const boundary of [
+  'weights-fetch-started',
+  'weights-fetch-completed',
+  'model-upload-started',
+  'model-upload-completed',
+  'model-construction-started',
+  'model-construction-completed',
+  'pipeline-construction-started',
+  'pipeline-construction-completed',
+  'arena-allocation-started',
+  'arena-allocation-completed',
+  'worker-creation-started',
+  'worker-creation-completed',
+  'arm-start-published',
+  'arm-body-entered',
+]) {
+  assert.match(boundarySources, new RegExp(boundary));
+}
+assert.match(prefixSource, /__sf3dParentCheckpoint/);
+assert.match(prefixSource, /writeJsonReportDurable\(options\.reportPath/);
+assert.doesNotMatch(prefixSource, /setTimeout\([^)]*process\.kill/);
 
 console.log('M2 staged discriminant contract passed');
