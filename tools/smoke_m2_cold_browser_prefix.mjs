@@ -7,7 +7,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 import { writeJsonReportDurable } from './parent_phase_journal.mjs';
-import { closeOwnedBrowser } from './browser_teardown.mjs';
+import { closeOwnedBrowser, stopOwnedChildProcess } from './browser_teardown.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -150,8 +150,9 @@ try {
   const port = await allocatePort();
   failurePhase = 'vite-start';
   emitParentCheckpoint('phase-before', { phase: 'vite-start', port });
-  vite = spawn('npx', [
-    'vite', '--host', '127.0.0.1', '--port', String(port), '--strictPort',
+  const viteEntry = path.join(REPO, 'node_modules', 'vite', 'bin', 'vite.js');
+  vite = spawn(process.execPath, [
+    viteEntry, '--host', '127.0.0.1', '--port', String(port), '--strictPort',
   ], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
   await waitForVite(vite);
   durableBoundary('vite-listening', { port });
@@ -403,14 +404,13 @@ try {
   if (browser) {
     durableBoundary('browser-teardown-completed', browserTeardown);
   }
-  const viteStopRequested = vite ? vite.kill('SIGTERM') : false;
+  const viteTeardown = await stopOwnedChildProcess(vite);
+  if (vite) {
+    durableBoundary('vite-teardown-completed', viteTeardown);
+  }
   const teardown = {
     browser: browserTeardown,
-    vite: {
-      pid: vite?.pid ?? null,
-      stopRequested: viteStopRequested,
-      signal: viteStopRequested ? 'SIGTERM' : null,
-    },
+    vite: viteTeardown,
   };
   reportDocument = {
     ...(reportDocument ?? {
@@ -428,14 +428,16 @@ try {
     checkpoints,
   };
   if (reportDocument.status === 'teardown-pending') {
-    reportDocument.ok = browserTeardown.ok;
-    reportDocument.status = browserTeardown.ok ? 'succeeded' : 'failed';
-    if (!browserTeardown.ok) {
-      reportDocument.failurePhase = 'browser-teardown';
-      reportDocument.error = browserTeardown.terminationError
+    const teardownOk = browserTeardown.ok && viteTeardown.ok;
+    reportDocument.ok = teardownOk;
+    reportDocument.status = teardownOk ? 'succeeded' : 'failed';
+    if (!teardownOk) {
+      reportDocument.failurePhase = !browserTeardown.ok ? 'browser-teardown' : 'vite-teardown';
+      reportDocument.error = browserTeardown.processTeardown?.error
         ?? browserTeardown.disconnectError
         ?? browserTeardown.closeError
-        ?? 'browser teardown failed';
+        ?? viteTeardown.error
+        ?? 'owned process teardown failed';
     }
   }
   writeJsonReportDurable(options.reportPath, reportDocument);

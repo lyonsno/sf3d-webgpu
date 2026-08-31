@@ -201,7 +201,13 @@ for (const boundary of [
 assert.match(prefixSource, /__sf3dParentCheckpoint/);
 assert.match(prefixSource, /teardown-pending/);
 assert.match(prefixSource, /closeOwnedBrowser/);
+assert.match(prefixSource, /stopOwnedChildProcess/);
 assert.match(prefixSource, /browser-teardown-completed/);
+assert.match(prefixSource, /vite-teardown-completed/);
+assert.match(prefixSource, /browserTeardown\.ok\s*&&\s*viteTeardown\.ok/);
+assert.match(prefixSource, /spawn\(process\.execPath/);
+assert.match(prefixSource, /node_modules['"], ['"]vite['"], ['"]bin['"], ['"]vite\.js/);
+assert.doesNotMatch(prefixSource, /spawn\(['"]npx['"]/);
 assert.doesNotMatch(prefixSource, /if \(browser\) await browser\.close/);
 assert.match(prefixSource, /armEntryOnly:\s*true/);
 assert.match(fullPipelineSource, /options\.onArmEntry/);
