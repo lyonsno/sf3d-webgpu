@@ -7,6 +7,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 import { writeJsonReportDurable } from './parent_phase_journal.mjs';
+import { closeOwnedBrowser } from './browser_teardown.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -99,6 +100,8 @@ let browser = null;
 let vite = null;
 let source = null;
 let prefixResult = null;
+let reportDocument = null;
+let successMessage = null;
 let failurePhase = 'preflight';
 
 try {
@@ -367,20 +370,21 @@ try {
 
   if (pageErrors.length) throw new Error(`page errors: ${pageErrors.join(' | ')}`);
   durableBoundary(`prefix:${options.prefix}:complete`, { prefix: options.prefix });
-  const report = {
+  reportDocument = {
     schema: 'sf3d.m2-cold-browser-prefix.v0',
-    ok: true,
-    status: 'succeeded',
+    ok: false,
+    status: 'teardown-pending',
+    workCompleted: true,
     completedPrefix: options.prefix,
     source,
     prefixResult,
     checkpoints,
   };
-  writeJsonReportDurable(options.reportPath, report);
-  console.log(`✓ M2 COLD-BROWSER PREFIX PASSED — ${options.prefix}; report: ${options.reportPath}`);
+  writeJsonReportDurable(options.reportPath, reportDocument);
+  successMessage = `✓ M2 COLD-BROWSER PREFIX PASSED — ${options.prefix}; report: ${options.reportPath}`;
 } catch (error) {
   emitParentCheckpoint('failure', { phase: failurePhase, message: error.message });
-  writeJsonReportDurable(options.reportPath, {
+  reportDocument = {
     schema: 'sf3d.m2-cold-browser-prefix.v0',
     ok: false,
     status: 'failed',
@@ -390,10 +394,51 @@ try {
     source,
     prefixResult,
     checkpoints,
-  });
+  };
+  writeJsonReportDurable(options.reportPath, reportDocument);
   console.error(`M2 COLD-BROWSER PREFIX FAILED [${failurePhase}]: ${error.message}`);
   process.exitCode = 1;
 } finally {
-  if (browser) await browser.close().catch(() => {});
-  if (vite) vite.kill();
+  const browserTeardown = await closeOwnedBrowser(browser);
+  if (browser) {
+    durableBoundary('browser-teardown-completed', browserTeardown);
+  }
+  const viteStopRequested = vite ? vite.kill('SIGTERM') : false;
+  const teardown = {
+    browser: browserTeardown,
+    vite: {
+      pid: vite?.pid ?? null,
+      stopRequested: viteStopRequested,
+      signal: viteStopRequested ? 'SIGTERM' : null,
+    },
+  };
+  reportDocument = {
+    ...(reportDocument ?? {
+      schema: 'sf3d.m2-cold-browser-prefix.v0',
+      ok: false,
+      status: 'failed',
+      requestedPrefix: options.prefix,
+      failurePhase,
+      error: 'child exited without constructing a report',
+      source,
+      prefixResult,
+      checkpoints,
+    }),
+    teardown,
+    checkpoints,
+  };
+  if (reportDocument.status === 'teardown-pending') {
+    reportDocument.ok = browserTeardown.ok;
+    reportDocument.status = browserTeardown.ok ? 'succeeded' : 'failed';
+    if (!browserTeardown.ok) {
+      reportDocument.failurePhase = 'browser-teardown';
+      reportDocument.error = browserTeardown.terminationError
+        ?? browserTeardown.disconnectError
+        ?? browserTeardown.closeError
+        ?? 'browser teardown failed';
+    }
+  }
+  writeJsonReportDurable(options.reportPath, reportDocument);
+  if (!reportDocument.ok) process.exitCode = 1;
+  if (reportDocument.ok && successMessage) console.log(successMessage);
 }

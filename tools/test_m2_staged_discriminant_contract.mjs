@@ -199,6 +199,10 @@ for (const boundary of [
   assert.match(boundarySources, new RegExp(boundary));
 }
 assert.match(prefixSource, /__sf3dParentCheckpoint/);
+assert.match(prefixSource, /teardown-pending/);
+assert.match(prefixSource, /closeOwnedBrowser/);
+assert.match(prefixSource, /browser-teardown-completed/);
+assert.doesNotMatch(prefixSource, /if \(browser\) await browser\.close/);
 assert.match(prefixSource, /armEntryOnly:\s*true/);
 assert.match(fullPipelineSource, /options\.onArmEntry/);
 assert.match(fullPipelineSource, /if \(options\.armEntryOnly\)/);
