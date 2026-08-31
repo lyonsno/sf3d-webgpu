@@ -106,7 +106,7 @@ Measured against the original PyTorch pipeline on the bundled `demo_chair.png`:
 - Vertex count: 9988 vs 10008 (99.8%)
 - Density at known inside vertices: within 4%
 - SDF max: 28.34 vs 28.58
-- Visual texture parity with PyTorch reference (operator-confirmed 2026-07-01)
+- Textured output matches the PyTorch reference render under side-by-side visual inspection
 - Remaining gap is fp16 precision + Lanczos resize interpolation difference
 
 ### Deterministic output receipt
@@ -122,7 +122,7 @@ SHA-256(demo_chair GLB) = e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f183
 The same hash is emitted by both scheduling paths (monolithic and
 arena-plus-worker) across the A/B/C/D product harness — the output is
 independent of GPU-duty scheduling. The cooperative post-processor also passes
-`@kaminos/webgpu-inference-kit`'s
+[`@kaminos/webgpu-inference-kit`](https://github.com/lyonsno/kaminos)'s
 `validateWebGpuCooperativeExecutionReport` against the exact 702-duty
 bounded-prefix contract. Receipts are versioned under
 [`smoke-receipts/`](smoke-receipts/).
@@ -172,7 +172,7 @@ The texture baker implements SF3D's cube-projection UV unwrapper with:
 | Session | Date | Key deliverables |
 |---------|------|-----------------|
 | 1 | 2026-06-27 | MPS bring-up, initial scaffold, DINOv2+backbone dispatch, weight converter |
-| 2 | 2026-06-28 | End-to-end pipeline, 6 bug fixes, coherent mesh, operator smoke pass |
+| 2 | 2026-06-28 | End-to-end pipeline, 6 bug fixes, coherent mesh, first full visual validation |
 | 3 | 2026-06-29 | Texture baking, normal maps, smooth normals, GLB export, 2 reviews |
 | 4 | 2026-06-30 | UV atlas splitting: bbox normalization, overlap detection, sub-texel fixes |
 | 5 | 2026-07-01 | Tangent UV rotation, PyTorch-matching axes, PCA alignment, BVH overlap detection, visual parity |
