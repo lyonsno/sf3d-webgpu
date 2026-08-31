@@ -124,8 +124,44 @@ assert.equal(alreadyExited.outcome, 'already-exited-disconnected');
 assert.equal(deadDisconnected, 1);
 assert.equal(deadCloseCalls, 0);
 
+const normalChild = new EventEmitter();
+normalChild.pid = 19;
+normalChild.exitCode = null;
+normalChild.signalCode = null;
+const normalSignals = [];
+normalChild.kill = signal => { normalSignals.push(signal); return true; };
+let normalCloseCalls = 0;
+let normalDisconnectCalls = 0;
+let normalWaitCalls = 0;
+const normalBrowser = await closeOwnedBrowser({
+  process: () => normalChild,
+  disconnect: () => { normalDisconnectCalls += 1; },
+  close: async () => { normalCloseCalls += 1; },
+}, {
+  probeProcessFn: () => ({ state: 'present', error: null }),
+  waitForExitFn: async () => {
+    normalWaitCalls += 1;
+    return {
+      exited: true,
+      outcome: 'exit-event',
+      exitCode: 0,
+      signalCode: null,
+      finalProbe: { state: 'absent', error: null },
+    };
+  },
+  now: fakeClock(),
+});
+assert.equal(normalBrowser.ok, true);
+assert.equal(normalBrowser.outcome, 'closed-process-exited');
+assert.equal(normalCloseCalls, 1);
+assert.equal(normalDisconnectCalls, 0);
+assert.equal(normalWaitCalls, 1);
+assert.deepEqual(normalSignals, ['SIGTERM']);
+assert.equal(normalBrowser.processTeardown.gracefulWait.outcome, 'exit-event');
+assert.equal(normalBrowser.processTeardown.finalProbe.state, 'absent');
+
 const browserChild = new EventEmitter();
-browserChild.pid = 19;
+browserChild.pid = 20;
 browserChild.exitCode = null;
 browserChild.signalCode = null;
 const browserSignals = [];
@@ -153,7 +189,7 @@ assert.equal(hungBrowser.initialProbe.state, 'unknown');
 assert.deepEqual(browserSignals, ['SIGTERM']);
 
 const unkillableBrowserChild = new EventEmitter();
-unkillableBrowserChild.pid = 20;
+unkillableBrowserChild.pid = 21;
 unkillableBrowserChild.exitCode = null;
 unkillableBrowserChild.signalCode = null;
 unkillableBrowserChild.kill = () => { throw new Error('signal rejected'); };
