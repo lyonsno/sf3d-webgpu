@@ -201,8 +201,25 @@ for (const boundary of [
 assert.match(prefixSource, /__sf3dParentCheckpoint/);
 assert.match(prefixSource, /armEntryOnly:\s*true/);
 assert.match(fullPipelineSource, /options\.onArmEntry/);
+assert.match(fullPipelineSource, /if \(options\.armEntryOnly\)/);
+const armEntryCallbackIndex = fullPipelineSource.indexOf('options.onArmEntry');
+const armEntryOnlyIndex = fullPipelineSource.indexOf('if (options.armEntryOnly)');
+const inferenceIndex = fullPipelineSource.indexOf('await runInference');
 assert.ok(
-  fullPipelineSource.indexOf('options.onArmEntry') < fullPipelineSource.indexOf('await runInference'),
+  armEntryCallbackIndex >= 0 && armEntryCallbackIndex < armEntryOnlyIndex,
+  'the full-pipeline arm-entry callback must run before its entry-only return',
+);
+assert.ok(
+  armEntryOnlyIndex >= 0 && armEntryOnlyIndex < inferenceIndex,
+  'the arm-entry-only guard must return before inference begins',
+);
+assert.match(
+  fullPipelineSource.slice(armEntryOnlyIndex, inferenceIndex),
+  /return\s*\{[\s\S]*armEntryOnly:\s*true/,
+  'the pre-inference arm-entry-only branch must return its witnessed sentinel',
+);
+assert.ok(
+  armEntryCallbackIndex < inferenceIndex,
   'arm-entry callback must run inside the full-pipeline body before inference begins',
 );
 assert.match(prefixSource, /writeJsonReportDurable\(options\.reportPath/);
