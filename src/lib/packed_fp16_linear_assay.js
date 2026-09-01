@@ -32,6 +32,8 @@ export function assertPackedFp16LinearShaderContract(shader) {
     [/var<storage, read> weight: array<u32>;/, 'packed u32 weight storage'],
     [/fn loadWeight\(index: u32\) -> f32/, 'f32 weight load'],
     [/unpack2x16float/, 'unpack2x16float'],
+    [/weight\[index >> 1u\]/, 'packed word index'],
+    [/select\(pair\.x, pair\.y, \(index & 1u\) == 1u\)/, 'packed lane selection'],
   ];
   for (const [pattern, name] of requirements) {
     if (!pattern.test(shader)) throw new Error(`packed linear shader is missing ${name}`);
@@ -89,7 +91,48 @@ export function createPackedFp16LinearFixture({ rows, inDim, outDim }) {
   });
 }
 
-export function runLinearReference({ input, weights, bias, rows, inDim, outDim }) {
+export function createTransposedPackedFp16LinearFixture(fixture) {
+  const { rows, inDim, outDim, fp16Bits, expandedWeights, input, bias, plan } = fixture;
+  positiveDimensions({ rows, inDim, outDim });
+  if (!(fp16Bits instanceof Uint16Array) || fp16Bits.length !== inDim * outDim) {
+    throw new RangeError('fixture fp16Bits must contain inDim * outDim elements');
+  }
+  if (!(expandedWeights instanceof Float32Array) || expandedWeights.length !== inDim * outDim) {
+    throw new RangeError('fixture expandedWeights must contain inDim * outDim elements');
+  }
+  const transposedBits = new Uint16Array(fp16Bits.length);
+  const transposedWeights = new Float32Array(expandedWeights.length);
+  for (let col = 0; col < outDim; col++) {
+    for (let k = 0; k < inDim; k++) {
+      const nativeIndex = col * inDim + k;
+      const transposedIndex = k * outDim + col;
+      transposedBits[transposedIndex] = fp16Bits[nativeIndex];
+      transposedWeights[transposedIndex] = expandedWeights[nativeIndex];
+    }
+  }
+  return Object.freeze({
+    rows,
+    inDim,
+    outDim,
+    fp16Bits: transposedBits,
+    expandedWeights: transposedWeights,
+    unpackedWeights: new Float32Array(transposedWeights),
+    packedWeights: packFp16WeightsToU32(transposedBits),
+    input,
+    bias,
+    plan,
+  });
+}
+
+export function runLinearReference({
+  input,
+  weights,
+  bias,
+  rows,
+  inDim,
+  outDim,
+  transposed = false,
+}) {
   positiveDimensions({ rows, inDim, outDim });
   if (!(input instanceof Float32Array) || input.length !== rows * inDim) {
     throw new RangeError('input must be a Float32Array with rows * inDim elements');
@@ -106,19 +149,19 @@ export function runLinearReference({ input, weights, bias, rows, inDim, outDim }
   for (let row = 0; row < rows; row++) {
     const inputBase = row * inDim;
     for (let col = 0; col < outDim; col++) {
-      const weightBase = col * inDim;
       let s0 = 0;
       let s1 = 0;
       let s2 = 0;
       let s3 = 0;
+      const weightIndex = k => (transposed ? k * outDim + col : col * inDim + k);
       for (let k = 0; k < len4; k += 4) {
-        s0 = Math.fround(s0 + Math.fround(input[inputBase + k] * weights[weightBase + k]));
-        s1 = Math.fround(s1 + Math.fround(input[inputBase + k + 1] * weights[weightBase + k + 1]));
-        s2 = Math.fround(s2 + Math.fround(input[inputBase + k + 2] * weights[weightBase + k + 2]));
-        s3 = Math.fround(s3 + Math.fround(input[inputBase + k + 3] * weights[weightBase + k + 3]));
+        s0 = Math.fround(s0 + Math.fround(input[inputBase + k] * weights[weightIndex(k)]));
+        s1 = Math.fround(s1 + Math.fround(input[inputBase + k + 1] * weights[weightIndex(k + 1)]));
+        s2 = Math.fround(s2 + Math.fround(input[inputBase + k + 2] * weights[weightIndex(k + 2)]));
+        s3 = Math.fround(s3 + Math.fround(input[inputBase + k + 3] * weights[weightIndex(k + 3)]));
       }
       for (let k = len4; k < inDim; k++) {
-        s0 = Math.fround(s0 + Math.fround(input[inputBase + k] * weights[weightBase + k]));
+        s0 = Math.fround(s0 + Math.fround(input[inputBase + k] * weights[weightIndex(k)]));
       }
       output[row * outDim + col] = Math.fround(
         Math.fround(Math.fround(s0 + s1) + Math.fround(s2 + s3)) + bias[col],
@@ -126,60 +169,4 @@ export function runLinearReference({ input, weights, bias, rows, inDim, outDim }
     }
   }
   return output;
-}
-
-export function evaluatePackedFp16LinearSmokeReport(report) {
-  const errors = [];
-  if (!report || typeof report !== 'object' || Array.isArray(report)) {
-    return { ok: false, errors: ['report must be an object'] };
-  }
-  if (report.schema !== 'sf3d.packed-fp16-linear-browser-smoke.v0') {
-    errors.push('unexpected report schema');
-  }
-  if (report.ok !== true) errors.push('report must declare terminal success');
-  if (report.effectiveBackend !== 'webgpu') errors.push('effectiveBackend must be webgpu');
-  if (report.effectiveRepresentation !== 'f16-packed-u32') {
-    errors.push('effectiveRepresentation must be f16-packed-u32');
-  }
-  if (!report.source?.revision) errors.push('source revision is required');
-  if (!report.kit?.packageVersion || !report.kit?.producerRevision || !report.kit?.tarballSha256) {
-    errors.push('kit package, producer revision, and tarball identity are required');
-  }
-  if (!report.browser?.version || !report.browser?.userAgent) {
-    errors.push('browser identity requires version and userAgent');
-  }
-  if (!report.adapter || typeof report.adapter !== 'object') errors.push('adapter identity is required');
-
-  for (const arm of ['control', 'candidate']) {
-    const value = report[arm];
-    if (!value || typeof value !== 'object') {
-      errors.push(`${arm} arm is required`);
-      continue;
-    }
-    if (!Number.isSafeInteger(value.storageByteLength) || value.storageByteLength <= 0) {
-      errors.push(`${arm} storageByteLength must be a positive integer`);
-    }
-    if (!Array.isArray(value.output) || value.output.length === 0) {
-      errors.push(`${arm} output must be a non-empty array`);
-    }
-    if (value.outputFinite !== true) errors.push(`${arm} output must be finite`);
-    if (typeof value.outputSha256 !== 'string' || value.outputSha256.length !== 64) {
-      errors.push(`${arm} outputSha256 must be a SHA-256 hex digest`);
-    }
-  }
-  if (Number.isSafeInteger(report.control?.storageByteLength)
-      && Number.isSafeInteger(report.candidate?.storageByteLength)
-      && report.candidate.storageByteLength >= report.control.storageByteLength) {
-    errors.push('candidate storage must be smaller than control storage');
-  }
-  if (report.comparison?.exact !== true || report.comparison?.maxAbsDiff !== 0) {
-    errors.push('exact output parity with zero maxAbsDiff is required');
-  }
-  if (report.control?.outputSha256 !== report.candidate?.outputSha256) {
-    errors.push('control and candidate output hashes must match');
-  }
-  if (report.terminal?.phase !== 'complete' || report.terminal?.primaryOutputWritten !== true) {
-    errors.push('terminal report must preserve complete primary output');
-  }
-  return { ok: errors.length === 0, errors };
 }

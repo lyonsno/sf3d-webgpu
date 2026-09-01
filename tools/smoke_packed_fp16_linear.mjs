@@ -6,7 +6,8 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 
-import { evaluatePackedFp16LinearSmokeReport } from '../src/lib/packed_fp16_linear_assay.js';
+import { verifyPackageArtifactIdentity } from '../src/lib/package_artifact_identity.js';
+import { evaluatePackedFp16LinearSmokeReport } from '../src/lib/packed_fp16_linear_report.js';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -18,6 +19,13 @@ const REPORT_PATH = path.resolve(argValue('--report', '/private/tmp/sf3d-packed-
 const KIT_TARBALL_ARG = argValue('--kit-tarball');
 const KIT_TARBALL = KIT_TARBALL_ARG ? path.resolve(KIT_TARBALL_ARG) : null;
 const KIT_PRODUCER_REVISION = argValue('--kit-producer-revision');
+const KIT_PRODUCER_REPO_ARG = argValue('--kit-producer-repo');
+const KIT_PRODUCER_REPO = KIT_PRODUCER_REPO_ARG ? path.resolve(KIT_PRODUCER_REPO_ARG) : null;
+const KIT_PRODUCER_REMOTE = argValue('--kit-producer-remote');
+const EXPECTED_SOURCE_REVISION = argValue('--expected-source-revision');
+const EXPECTED_KIT_VERSION = argValue('--expected-kit-version');
+const EXPECTED_KIT_TARBALL_SHA256 = argValue('--expected-kit-tarball-sha256');
+const INSTALLED_PACKAGE_PATH = path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit');
 const rows = Number(argValue('--rows', '3'));
 const inDim = Number(argValue('--in-dim', '5'));
 const outDim = Number(argValue('--out-dim', '7'));
@@ -26,7 +34,6 @@ let browser = null;
 let lastTrustworthyEvidence = { phase: 'argument-parse' };
 
 const sha256 = data => crypto.createHash('sha256').update(data).digest('hex');
-const sha256File = file => sha256(fs.readFileSync(file));
 const git = args => execFileSync('git', args, { cwd: REPO, encoding: 'utf8' }).trim();
 
 function sourceIdentity() {
@@ -48,12 +55,25 @@ function sourceIdentity() {
 
 function writeReport(report) {
   fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
-  fs.writeFileSync(REPORT_PATH, `${JSON.stringify(report, null, 2)}\n`);
+  const temporaryPath = `${REPORT_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  const fd = fs.openSync(temporaryPath, 'wx');
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify(report, null, 2)}\n`);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    fs.renameSync(temporaryPath, REPORT_PATH);
+  } catch (error) {
+    fs.rmSync(temporaryPath, { force: true });
+    throw error;
+  }
 }
 
 function failureReport(error, phase, context) {
   return {
-    schema: 'sf3d.packed-fp16-linear-browser-smoke.v0',
+    schema: 'sf3d.packed-fp16-linear-browser-smoke.v1',
     ok: false,
     failure: { phase, message: error instanceof Error ? error.message : String(error) },
     ...context,
@@ -94,6 +114,13 @@ async function startVite() {
 }
 
 let context = {
+  requestedIdentity: {
+    sourceRevision: EXPECTED_SOURCE_REVISION,
+    kitPackageVersion: EXPECTED_KIT_VERSION,
+    kitProducerRevision: KIT_PRODUCER_REVISION,
+    kitProducerRemote: KIT_PRODUCER_REMOTE,
+    kitTarballSha256: EXPECTED_KIT_TARBALL_SHA256,
+  },
   source: null,
   kit: {
     packageVersion: null,
@@ -105,22 +132,42 @@ let context = {
 };
 
 try {
+  if (!EXPECTED_SOURCE_REVISION) throw new Error('--expected-source-revision is required');
+  if (!EXPECTED_KIT_VERSION) throw new Error('--expected-kit-version is required');
   if (!KIT_PRODUCER_REVISION) throw new Error('--kit-producer-revision is required');
+  if (!KIT_PRODUCER_REPO
+      || !fs.statSync(KIT_PRODUCER_REPO, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error('--kit-producer-repo must name the producer repository');
+  }
+  if (!KIT_PRODUCER_REMOTE) throw new Error('--kit-producer-remote is required');
   if (!KIT_TARBALL || !fs.statSync(KIT_TARBALL, { throwIfNoEntry: false })?.isFile()) {
     throw new Error('--kit-tarball must name the installed producer artifact');
   }
+  if (!EXPECTED_KIT_TARBALL_SHA256) throw new Error('--expected-kit-tarball-sha256 is required');
   const source = sourceIdentity();
-  const installedPackage = JSON.parse(fs.readFileSync(
-    path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit/package.json'),
-    'utf8',
-  ));
+  if (source.revision !== EXPECTED_SOURCE_REVISION) {
+    throw new Error(`source revision ${source.revision} does not match expected ${EXPECTED_SOURCE_REVISION}`);
+  }
+  if (source.dirtyPaths.length !== 0) {
+    throw new Error(`source must be clean; dirty paths: ${source.dirtyPaths.join(', ')}`);
+  }
+  const kitIdentity = verifyPackageArtifactIdentity({
+    producerRepo: KIT_PRODUCER_REPO,
+    producerRevision: KIT_PRODUCER_REVISION,
+    producerRemote: KIT_PRODUCER_REMOTE,
+    packageSubdir: 'webgpu-inference-kit',
+    packageVersion: EXPECTED_KIT_VERSION,
+    tarballPath: KIT_TARBALL,
+    tarballSha256: EXPECTED_KIT_TARBALL_SHA256,
+    installedPackagePath: INSTALLED_PACKAGE_PATH,
+  });
   context = {
+    requestedIdentity: context.requestedIdentity,
     source,
     kit: {
-      packageVersion: installedPackage.version,
-      producerRevision: KIT_PRODUCER_REVISION,
+      ...kitIdentity,
       tarballPath: KIT_TARBALL,
-      tarballSha256: sha256File(KIT_TARBALL),
+      installedPackagePath: fs.realpathSync(INSTALLED_PACKAGE_PATH),
     },
     requested: { rows, inDim, outDim, representation: 'f16-packed-u32' },
   };
@@ -199,15 +246,21 @@ try {
       if (errors.length) throw new Error(`${label} compilation failed: ${errors.map(error => error.message).join('; ')}`);
       return device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' }, label });
     };
-    const dispatch = async ({ pipeline, weight, output, label }) => {
-      const workgroupsX = Math.ceil((rows * outDim) / 256);
+    const dispatch = async ({ pipeline, weight, output, label, fixture: activeFixture, transposed }) => {
+      const workgroupsX = Math.ceil((activeFixture.rows * activeFixture.outDim) / 256);
       const params = createBuffer(
-        new Uint32Array([rows, inDim, outDim, workgroupsX, 0]),
+        new Uint32Array([
+          activeFixture.rows,
+          activeFixture.inDim,
+          activeFixture.outDim,
+          workgroupsX,
+          transposed ? 1 : 0,
+        ]),
         GPUBufferUsage.UNIFORM,
         `${label}-params`,
       );
-      const input = createBuffer(fixture.input, GPUBufferUsage.STORAGE, `${label}-input`);
-      const bias = createBuffer(fixture.bias, GPUBufferUsage.STORAGE, `${label}-bias`);
+      const input = createBuffer(activeFixture.input, GPUBufferUsage.STORAGE, `${label}-input`);
+      const bias = createBuffer(activeFixture.bias, GPUBufferUsage.STORAGE, `${label}-bias`);
       const bindGroup = device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
         entries: [
@@ -235,32 +288,89 @@ try {
         compile(controlShader, 'expanded-f32-linear'),
         compile(candidateShader, 'packed-fp16-linear'),
       ]);
-      const outputBytes = rows * outDim * 4;
-      const controlWeight = createBuffer(fixture.expandedWeights, GPUBufferUsage.STORAGE, 'expanded-f32-weight');
-      const candidateWeight = createBuffer(fixture.packedWeights, GPUBufferUsage.STORAGE, 'packed-fp16-weight');
-      const controlOutputBuffer = createOutput(outputBytes, 'expanded-f32-output');
-      const candidateOutputBuffer = createOutput(outputBytes, 'packed-fp16-output');
-      const controlDurationMs = await dispatch({
-        pipeline: controlPipeline,
-        weight: controlWeight,
-        output: controlOutputBuffer,
-        label: 'expanded-f32-linear',
+      const compare = (left, right) => {
+        let exact = left.length === right.length;
+        let maxAbsDiff = 0;
+        for (let index = 0; index < left.length; index++) {
+          const difference = Math.abs(left[index] - right[index]);
+          maxAbsDiff = Math.max(maxAbsDiff, difference);
+          if (!Object.is(left[index], right[index])) exact = false;
+        }
+        return { exact, maxAbsDiff };
+      };
+      const runPair = async ({ activeFixture, transposed, label }) => {
+        const outputBytes = activeFixture.rows * activeFixture.outDim * 4;
+        const controlWeight = createBuffer(
+          activeFixture.expandedWeights,
+          GPUBufferUsage.STORAGE,
+          `${label}-expanded-f32-weight`,
+        );
+        const candidateWeight = createBuffer(
+          activeFixture.packedWeights,
+          GPUBufferUsage.STORAGE,
+          `${label}-packed-fp16-weight`,
+        );
+        const controlOutputBuffer = createOutput(outputBytes, `${label}-expanded-f32-output`);
+        const candidateOutputBuffer = createOutput(outputBytes, `${label}-packed-fp16-output`);
+        const controlDurationMs = await dispatch({
+          pipeline: controlPipeline,
+          weight: controlWeight,
+          output: controlOutputBuffer,
+          label: `${label}-expanded-f32-linear`,
+          fixture: activeFixture,
+          transposed,
+        });
+        const candidateDurationMs = await dispatch({
+          pipeline: candidatePipeline,
+          weight: candidateWeight,
+          output: candidateOutputBuffer,
+          label: `${label}-packed-fp16-linear`,
+          fixture: activeFixture,
+          transposed,
+        });
+        const controlOutput = await readOutput(controlOutputBuffer, outputBytes);
+        const candidateOutput = await readOutput(candidateOutputBuffer, outputBytes);
+        return {
+          transposed,
+          control: {
+            storageByteLength: controlWeight.size,
+            output: [...controlOutput],
+            outputFinite: [...controlOutput].every(Number.isFinite),
+            durationMs: controlDurationMs,
+          },
+          candidate: {
+            storageByteLength: candidateWeight.size,
+            output: [...candidateOutput],
+            outputFinite: [...candidateOutput].every(Number.isFinite),
+            durationMs: candidateDurationMs,
+          },
+          comparison: compare(controlOutput, candidateOutput),
+        };
+      };
+
+      const mainPair = await runPair({ activeFixture: fixture, transposed: false, label: 'real-shape-native' });
+      const probeNativeFixture = assay.createPackedFp16LinearFixture({ rows: 3, inDim: 5, outDim: 7 });
+      const probeTransposedFixture = assay.createTransposedPackedFp16LinearFixture(probeNativeFixture);
+      const referenceOutput = assay.runLinearReference({
+        input: probeNativeFixture.input,
+        weights: probeNativeFixture.expandedWeights,
+        bias: probeNativeFixture.bias,
+        rows: probeNativeFixture.rows,
+        inDim: probeNativeFixture.inDim,
+        outDim: probeNativeFixture.outDim,
       });
-      const candidateDurationMs = await dispatch({
-        pipeline: candidatePipeline,
-        weight: candidateWeight,
-        output: candidateOutputBuffer,
-        label: 'packed-fp16-linear',
+      const nativeProbe = await runPair({
+        activeFixture: probeNativeFixture,
+        transposed: false,
+        label: 'probe-native',
       });
-      const controlOutput = await readOutput(controlOutputBuffer, outputBytes);
-      const candidateOutput = await readOutput(candidateOutputBuffer, outputBytes);
-      let maxAbsDiff = 0;
-      let exact = controlOutput.length === candidateOutput.length;
-      for (let index = 0; index < controlOutput.length && exact; index++) {
-        const difference = Math.abs(controlOutput[index] - candidateOutput[index]);
-        maxAbsDiff = Math.max(maxAbsDiff, difference);
-        if (!Object.is(controlOutput[index], candidateOutput[index])) exact = false;
-      }
+      const transposedProbe = await runPair({
+        activeFixture: probeTransposedFixture,
+        transposed: true,
+        label: 'probe-transposed',
+      });
+      nativeProbe.referenceComparison = compare(referenceOutput, nativeProbe.control.output);
+      transposedProbe.referenceComparison = compare(referenceOutput, transposedProbe.control.output);
       return {
         browserUserAgent: navigator.userAgent,
         adapter: {
@@ -272,19 +382,26 @@ try {
         },
         effectiveBackend: 'webgpu',
         effectiveRepresentation: fixture.plan.effectiveRepresentation,
-        control: {
-          storageByteLength: controlWeight.size,
-          output: [...controlOutput],
-          outputFinite: [...controlOutput].every(Number.isFinite),
-          durationMs: controlDurationMs,
+        control: mainPair.control,
+        candidate: mainPair.candidate,
+        comparison: mainPair.comparison,
+        layoutProbe: {
+          shape: {
+            rows: probeNativeFixture.rows,
+            inDim: probeNativeFixture.inDim,
+            outDim: probeNativeFixture.outDim,
+          },
+          reference: {
+            output: [...referenceOutput],
+            outputFinite: [...referenceOutput].every(Number.isFinite),
+          },
+          native: nativeProbe,
+          transposed: transposedProbe,
+          crossLayout: {
+            control: compare(nativeProbe.control.output, transposedProbe.control.output),
+            candidate: compare(nativeProbe.candidate.output, transposedProbe.candidate.output),
+          },
         },
-        candidate: {
-          storageByteLength: candidateWeight.size,
-          output: [...candidateOutput],
-          outputFinite: [...candidateOutput].every(Number.isFinite),
-          durationMs: candidateDurationMs,
-        },
-        comparison: { exact, maxAbsDiff },
       };
     } finally {
       for (const buffer of owned) buffer.destroy();
@@ -293,7 +410,7 @@ try {
   }, { controlShader, candidateShader, rows, inDim, outDim });
 
   const report = {
-    schema: 'sf3d.packed-fp16-linear-browser-smoke.v0',
+    schema: 'sf3d.packed-fp16-linear-browser-smoke.v1',
     ok: true,
     ...context,
     ...browserResult,
@@ -304,11 +421,20 @@ try {
     terminal: { phase: 'complete', primaryOutputWritten: true },
   };
   delete report.browserUserAgent;
-  for (const arm of ['control', 'candidate']) {
-    const values = new Float32Array(report[arm].output);
-    report[arm].outputSha256 = sha256(Buffer.from(values.buffer));
+  const attachRawOutput = arm => {
+    const values = new Float32Array(arm.output);
+    const outputBytes = Buffer.from(values.buffer);
+    arm.outputF32Base64 = outputBytes.toString('base64');
+    arm.outputSha256 = sha256(outputBytes);
+  };
+  attachRawOutput(report.control);
+  attachRawOutput(report.candidate);
+  attachRawOutput(report.layoutProbe.reference);
+  for (const layout of ['native', 'transposed']) {
+    attachRawOutput(report.layoutProbe[layout].control);
+    attachRawOutput(report.layoutProbe[layout].candidate);
   }
-  const admission = evaluatePackedFp16LinearSmokeReport(report);
+  const admission = evaluatePackedFp16LinearSmokeReport(report, context.requestedIdentity);
   report.admission = admission;
   if (!admission.ok) report.ok = false;
   writeReport(report);
@@ -336,10 +462,11 @@ try {
       outputSha256: report.candidate.outputSha256,
     },
     comparison: report.comparison,
+    layoutProbe: report.layoutProbe,
     admission: report.admission,
   }, null, 2));
 } catch (error) {
-  if (!fs.existsSync(REPORT_PATH)) writeReport(failureReport(error, lastTrustworthyEvidence.phase, context));
+  writeReport(failureReport(error, lastTrustworthyEvidence.phase, context));
   console.error(error instanceof Error ? error.stack : String(error));
   process.exitCode = 1;
 } finally {
