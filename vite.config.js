@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import { access, cp, rm } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -54,14 +54,23 @@ function copyPublicAssetsWithoutLocalModels() {
   };
 }
 
-export default defineConfig({
-  plugins: [copyPublicAssetsWithoutLocalModels()],
-  server: {
-    port: 5176,
-    open: true,
-  },
-  build: {
-    copyPublicDir: false,
-    target: 'esnext',
-  },
+export default defineConfig(({ mode }) => {
+  // Load .env[.mode] so config-time options can read VITE_* values the same way
+  // the app does. (vite.config runs in Node and does not auto-load .env files.)
+  const env = loadEnv(mode, process.cwd(), '');
+  return {
+    // Base path for hosted builds. GitHub Pages project sites serve from
+    // /<repo>/, so the hosted build sets VITE_BASE=/sf3d-webgpu/. Dev and
+    // root-domain deploys leave it at '/'.
+    base: env.VITE_BASE || '/',
+    plugins: [copyPublicAssetsWithoutLocalModels()],
+    server: {
+      port: 5176,
+      open: true,
+    },
+    build: {
+      copyPublicDir: false,
+      target: 'esnext',
+    },
+  };
 });

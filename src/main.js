@@ -66,9 +66,13 @@ async function init() {
     });
 
     // 2. Load weights
+    // Defaults to the local public/weights.bin for dev; a hosted build can
+    // point VITE_WEIGHTS_URL at a CDN copy (e.g. the HuggingFace mirror) so the
+    // static site never has to serve the ~2.1 GB model itself.
+    const weightsUrl = import.meta.env.VITE_WEIGHTS_URL || 'weights.bin';
     setProgress(0);
     const t0 = performance.now();
-    weights = await loadWeights(device, 'weights.bin', (received, total) => {
+    weights = await loadWeights(device, weightsUrl, (received, total) => {
       if (total > 0) {
         const pct = (received / total) * 100;
         setProgress(pct);
