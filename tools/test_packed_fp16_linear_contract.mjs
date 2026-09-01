@@ -57,6 +57,7 @@ const admittedReport = {
   effectiveRepresentation: 'f16-packed-u32',
   source: { revision: 'fixture', dirtyDiffSha256: null },
   kit: { packageVersion: '0.1.46', producerRevision: 'ace42925', tarballSha256: 'fixture' },
+  browser: { version: 'Chrome/fixture', userAgent: 'fixture-agent' },
   adapter: { vendor: 'fixture-gpu' },
   control: { storageByteLength: 140, output: [1, 2, 3], outputFinite: true, outputSha256: 'a'.repeat(64) },
   candidate: { storageByteLength: 72, output: [1, 2, 3], outputFinite: true, outputSha256: 'a'.repeat(64) },
@@ -68,6 +69,10 @@ assert.equal(evaluatePackedFp16LinearSmokeReport(admittedReport).ok, true);
 const fallback = structuredClone(admittedReport);
 fallback.effectiveBackend = 'cpu-fallback';
 assert.match(evaluatePackedFp16LinearSmokeReport(fallback).errors.join('\n'), /effectiveBackend/);
+
+const missingBrowser = structuredClone(admittedReport);
+delete missingBrowser.browser;
+assert.match(evaluatePackedFp16LinearSmokeReport(missingBrowser).errors.join('\n'), /browser identity/);
 
 const missingOutput = structuredClone(admittedReport);
 delete missingOutput.candidate.output;

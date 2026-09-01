@@ -146,6 +146,7 @@ try {
       '--no-default-browser-check',
     ],
   });
+  const browserVersion = await browser.version();
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${port}/tools/packed_fp16_linear_smoke.html`, { waitUntil: 'load' });
   lastTrustworthyEvidence = { phase: 'browser-page-live', url: page.url() };
@@ -261,6 +262,7 @@ try {
         if (!Object.is(controlOutput[index], candidateOutput[index])) exact = false;
       }
       return {
+        browserUserAgent: navigator.userAgent,
         adapter: {
           vendor: adapter.info?.vendor || null,
           architecture: adapter.info?.architecture || null,
@@ -295,8 +297,13 @@ try {
     ok: true,
     ...context,
     ...browserResult,
+    browser: {
+      version: browserVersion,
+      userAgent: browserResult.browserUserAgent,
+    },
     terminal: { phase: 'complete', primaryOutputWritten: true },
   };
+  delete report.browserUserAgent;
   for (const arm of ['control', 'candidate']) {
     const values = new Float32Array(report[arm].output);
     report[arm].outputSha256 = sha256(Buffer.from(values.buffer));
@@ -312,6 +319,7 @@ try {
     source: report.source,
     kit: report.kit,
     requested: report.requested,
+    browser: report.browser,
     adapter: report.adapter,
     effectiveBackend: report.effectiveBackend,
     effectiveRepresentation: report.effectiveRepresentation,

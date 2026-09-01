@@ -145,6 +145,9 @@ export function evaluatePackedFp16LinearSmokeReport(report) {
   if (!report.kit?.packageVersion || !report.kit?.producerRevision || !report.kit?.tarballSha256) {
     errors.push('kit package, producer revision, and tarball identity are required');
   }
+  if (!report.browser?.version || !report.browser?.userAgent) {
+    errors.push('browser identity requires version and userAgent');
+  }
   if (!report.adapter || typeof report.adapter !== 'object') errors.push('adapter identity is required');
 
   for (const arm of ['control', 'candidate']) {
