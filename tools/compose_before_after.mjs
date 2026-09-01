@@ -35,7 +35,10 @@ const outPath = arg('--out', 'docs/assets/hero-before-after.png');
 // cut-out photo and a full studio render show subjects at matching size.
 const inputScale = parseFloat(arg('--input-scale', '0.82'));
 const renderScale = parseFloat(arg('--render-scale', '1.0'));
-const cardBg = arg('--card-bg', '#eef0f2'); // neutral card fill behind cut-outs
+const cardBg = arg('--card-bg', '#2a2a2a');   // card fill behind cut-outs
+const labelColor = arg('--label-color', '#e5e7eb'); // high-contrast on dark
+const arrowColor = arg('--arrow-color', '#d1d5db');
+const borderColor = arg('--border-color', 'rgba(255,255,255,0.10)');
 
 for (const [label, p] of [['input', inputPath], ['render', renderPath]]) {
   if (!fs.existsSync(p)) { console.error(`${label} not found: ${p}`); process.exit(1); }
@@ -63,6 +66,9 @@ const c = document.getElementById('c');
 const ctx = c.getContext('2d');
 const PAD=${PAD}, CELL=${CELL}, GAP=${GAP}, LABEL_H=${LABEL_H}, RADIUS=${RADIUS};
 const CARD_BG='${cardBg}';
+const LABEL_COLOR='${labelColor}';
+const ARROW_COLOR='${arrowColor}';
+const BORDER_COLOR='${borderColor}';
 
 function roundRect(x, y, w, h, r) {
   ctx.beginPath();
@@ -92,7 +98,7 @@ function drawInCard(img, x, y, size, scale) {
 
 function label(text, cx, cw, y) {
   ctx.font = '600 32px -apple-system, Helvetica, Arial, sans-serif';
-  ctx.fillStyle = '#4b5563';
+  ctx.fillStyle = LABEL_COLOR;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, cx + cw / 2, y);
@@ -111,12 +117,13 @@ function loadImg(src){return new Promise((res,rej)=>{const i=new Image();i.onloa
   label('Input photo', leftX, CELL, PAD + LABEL_H / 2);
   label('Generated 3D mesh', rightX, CELL, PAD + LABEL_H / 2);
 
-  // Soft drop shadow under each card.
+  // Card base fill (matches the images' own dark background so there is no
+  // visible seam between card and artwork).
   ctx.save();
-  ctx.shadowColor = 'rgba(15,23,42,0.18)';
-  ctx.shadowBlur = 28;
-  ctx.shadowOffsetY = 10;
-  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur = 30;
+  ctx.shadowOffsetY = 12;
+  ctx.fillStyle = CARD_BG;
   roundRect(leftX, cellY, CELL, CELL, RADIUS); ctx.fill();
   roundRect(rightX, cellY, CELL, CELL, RADIUS); ctx.fill();
   ctx.restore();
@@ -125,7 +132,7 @@ function loadImg(src){return new Promise((res,rej)=>{const i=new Image();i.onloa
   drawInCard(render, rightX, cellY, CELL, ${renderScale});
 
   // Hairline border on each card.
-  ctx.strokeStyle = 'rgba(15,23,42,0.10)';
+  ctx.strokeStyle = BORDER_COLOR;
   ctx.lineWidth = 2;
   roundRect(leftX, cellY, CELL, CELL, RADIUS); ctx.stroke();
   roundRect(rightX, cellY, CELL, CELL, RADIUS); ctx.stroke();
@@ -133,8 +140,8 @@ function loadImg(src){return new Promise((res,rej)=>{const i=new Image();i.onloa
   // Arrow in the gutter.
   const ay = cellY + CELL / 2;
   const ax1 = rightX - 30;
-  ctx.strokeStyle = '#9ca3af';
-  ctx.fillStyle = '#9ca3af';
+  ctx.strokeStyle = ARROW_COLOR;
+  ctx.fillStyle = ARROW_COLOR;
   ctx.lineWidth = 9;
   ctx.lineCap = 'round';
   ctx.beginPath();
