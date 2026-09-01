@@ -7,7 +7,10 @@ import { execFileSync, spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 
 import { verifyPackageArtifactIdentity } from '../src/lib/package_artifact_identity.js';
-import { evaluatePackedFp16LinearSmokeReport } from '../src/lib/packed_fp16_linear_report.js';
+import {
+  createPackedFp16LinearAdmissionFailureReport,
+  evaluatePackedFp16LinearSmokeReport,
+} from '../src/lib/packed_fp16_linear_report.js';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -33,6 +36,7 @@ const inDim = Number(argValue('--in-dim', '5'));
 const outDim = Number(argValue('--out-dim', '7'));
 const children = [];
 let browser = null;
+let currentInvocationReportWritten = false;
 let lastTrustworthyEvidence = { phase: 'argument-parse' };
 
 const sha256 = data => crypto.createHash('sha256').update(data).digest('hex');
@@ -449,10 +453,15 @@ try {
     attachRawOutput(report.layoutProbe[layout].candidate);
   }
   const admission = evaluatePackedFp16LinearSmokeReport(report, context.requestedIdentity);
+  if (!admission.ok) {
+    const failedReport = createPackedFp16LinearAdmissionFailureReport(report, admission.errors);
+    writeReport(failedReport);
+    currentInvocationReportWritten = true;
+    throw new Error(`browser smoke admission failed: ${admission.errors.join('; ')}`);
+  }
   report.admission = admission;
-  if (!admission.ok) report.ok = false;
   writeReport(report);
-  if (!admission.ok) throw new Error(`browser smoke admission failed: ${admission.errors.join('; ')}`);
+  currentInvocationReportWritten = true;
   console.log(JSON.stringify({
     schema: report.schema,
     ok: report.ok,
@@ -480,7 +489,9 @@ try {
     admission: report.admission,
   }, null, 2));
 } catch (error) {
-  writeReport(failureReport(error, lastTrustworthyEvidence.phase, context));
+  if (!currentInvocationReportWritten) {
+    writeReport(failureReport(error, lastTrustworthyEvidence.phase, context));
+  }
   console.error(error instanceof Error ? error.stack : String(error));
   process.exitCode = 1;
 } finally {

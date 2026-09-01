@@ -70,7 +70,7 @@ function meaningfulAdapter(adapter) {
     .some(field => typeof adapter[field] === 'string' && adapter[field].trim().length > 0);
 }
 
-function compareDecoded(label, left, right, declaration, errors) {
+function compareDecoded(label, left, right, declaration, errors, { requireExact = true } = {}) {
   if (!left || !right) return;
   let exact = left.decoded.length === right.decoded.length;
   let maxAbsDiff = 0;
@@ -79,11 +79,15 @@ function compareDecoded(label, left, right, declaration, errors) {
     maxAbsDiff = Math.max(maxAbsDiff, difference);
     if (!Object.is(left.decoded[index], right.decoded[index])) exact = false;
   }
-  if (!exact || maxAbsDiff !== 0) errors.push(`${label} raw outputs must be exactly equal`);
+  if (requireExact && (!exact || maxAbsDiff !== 0)) {
+    errors.push(`${label} raw outputs must be exactly equal`);
+  }
   if (declaration?.exact !== exact || declaration?.maxAbsDiff !== maxAbsDiff) {
     errors.push(`${label} comparison declarations must match recomputed raw output parity`);
   }
-  if (left.digest !== right.digest) errors.push(`${label} recomputed output hashes must match`);
+  if (requireExact && left.digest !== right.digest) {
+    errors.push(`${label} recomputed output hashes must match`);
+  }
 }
 
 function evaluateLayoutProbe(layoutProbe, errors) {
@@ -114,7 +118,14 @@ function evaluateLayoutProbe(layoutProbe, errors) {
     const control = decodeOutput(`layoutProbe ${name} control`, layout.control, outputCount, errors);
     const candidate = decodeOutput(`layoutProbe ${name} candidate`, layout.candidate, outputCount, errors);
     compareDecoded(`layoutProbe ${name}`, control, candidate, layout.comparison, errors);
-    compareDecoded(`layoutProbe ${name} reference`, reference, control, layout.referenceComparison, errors);
+    compareDecoded(
+      `layoutProbe ${name} reference`,
+      reference,
+      control,
+      layout.referenceComparison,
+      errors,
+      { requireExact: false },
+    );
     decodedLayouts[name] = { control, candidate };
   }
   compareDecoded(
@@ -249,4 +260,20 @@ export function evaluatePackedFp16LinearSmokeReport(report, expectedIdentity = {
     errors.push('terminal report must preserve complete primary output');
   }
   return { ok: errors.length === 0, errors };
+}
+
+export function createPackedFp16LinearAdmissionFailureReport(report, errors) {
+  if (!report || typeof report !== 'object' || Array.isArray(report)) {
+    throw new TypeError('report must be an object');
+  }
+  if (!Array.isArray(errors) || errors.length === 0 || errors.some(error => typeof error !== 'string')) {
+    throw new TypeError('admission errors must be a non-empty string array');
+  }
+  return {
+    ...report,
+    ok: false,
+    admission: { ok: false, errors: [...errors] },
+    failure: { phase: 'admission', message: errors.join('; ') },
+    terminal: { phase: 'admission', primaryOutputWritten: true },
+  };
 }

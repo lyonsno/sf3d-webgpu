@@ -10,7 +10,10 @@ import {
   createTransposedPackedFp16LinearFixture,
   runLinearReference,
 } from '../src/lib/packed_fp16_linear_assay.js';
-import { evaluatePackedFp16LinearSmokeReport } from '../src/lib/packed_fp16_linear_report.js';
+import {
+  createPackedFp16LinearAdmissionFailureReport,
+  evaluatePackedFp16LinearSmokeReport,
+} from '../src/lib/packed_fp16_linear_report.js';
 import { packFp16WeightsToU32 } from '@kaminos/webgpu-inference-kit';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -266,6 +269,35 @@ failedBeforeOutput.terminal = { phase: 'dispatch', primaryOutputWritten: false }
 assert.match(
   evaluatePackedFp16LinearSmokeReport(failedBeforeOutput, expectedIdentity).errors.join('\n'),
   /terminal success/,
+);
+
+const admissionFailure = createPackedFp16LinearAdmissionFailureReport(
+  admittedReport,
+  ['layoutProbe transposed output mismatch'],
+);
+assert.equal(admissionFailure.ok, false);
+assert.equal(admissionFailure.failure.phase, 'admission');
+assert.equal(admissionFailure.terminal.primaryOutputWritten, true);
+assert.deepEqual(admissionFailure.layoutProbe.transposed.candidate.output, [1, 2, 3]);
+assert.equal(admissionFailure.layoutProbe.transposed.candidate.outputF32Base64.length > 0, true);
+
+const diagnosticReference = structuredClone(admittedReport);
+diagnosticReference.layoutProbe.reference.output = [Math.fround(1.0001), 2, 3];
+diagnosticReference.layoutProbe.reference.outputF32Base64 = Buffer.from(
+  new Float32Array([1.0001, 2, 3]).buffer,
+).toString('base64');
+diagnosticReference.layoutProbe.reference.outputSha256 = hashOutput([1.0001, 2, 3]);
+for (const layout of ['native', 'transposed']) {
+  diagnosticReference.layoutProbe[layout].referenceComparison = {
+    exact: false,
+    maxAbsDiff: Math.abs(Math.fround(1.0001) - 1),
+  };
+}
+const diagnosticAdmission = evaluatePackedFp16LinearSmokeReport(diagnosticReference, expectedIdentity);
+assert.equal(
+  diagnosticAdmission.ok,
+  true,
+  `CPU reference drift is diagnostic when GPU comparisons are exact: ${diagnosticAdmission.errors.join('; ')}`,
 );
 
 console.log('packed fp16 linear contracts passed');
