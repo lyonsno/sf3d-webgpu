@@ -18,6 +18,8 @@
     "test:two-stream-linear-ranges": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_two_stream_linear_ranges.mjs && node tools/test_two_stream_smoke_acceptance.mjs",
     "test:packed-fp16-linear": "node tools/test_packed_fp16_linear_contract.mjs && node tools/test_packed_fp16_linear_failure_report.mjs && node tools/test_packed_fp16_package_identity.mjs && node tools/test_sf3d_weight_inventory.mjs",
     "test:image-tokenizer-packed-weights": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_image_tokenizer_packed_weights.mjs && node tools/test_image_tokenizer_packed_loader.mjs",
+    "test:dino-weight-representation-assay": "node tools/test_dino_weight_representation_assay_contract.mjs",
+    "smoke:dino-weight-representation-ab": "node tools/smoke_dino_weight_representation_ab.mjs",
     "test:worker-lifecycle": "node tools/test_worker_call_lifecycle.mjs",
     "test:cooperative-texture-telemetry": "node tools/test_cooperative_texture_bake_telemetry.mjs && node tools/test_cooperative_texture_bake_failures.mjs && node tools/test_cooperative_texture_bake_source_identity.mjs",
     "test:decoder-arena": "node tools/test_decoder_scratch_arena.mjs",
