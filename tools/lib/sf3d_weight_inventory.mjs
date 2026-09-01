@@ -107,17 +107,22 @@ export async function readSf3dWeightInventory(filePath, { source } = {}) {
     if (dtypeCode !== 0 && dtypeCode !== 1) throw new Error(`${name} has unsupported dtype ${dtypeCode}`);
     const dtype = dtypeCode === 1 ? 'fp16' : 'fp32';
     const ndim = header.readUInt32LE(entryOffset + 132);
-    if (ndim > 4) throw new Error(`${name} rank ${ndim} exceeds the format maximum`);
+    if (ndim > 32) throw new Error(`${name} rank ${ndim} is not credible`);
+    const shapeComplete = ndim <= 4;
     const shape = [];
-    for (let dimension = 0; dimension < ndim; dimension++) {
+    for (let dimension = 0; dimension < Math.min(ndim, 4); dimension++) {
       shape.push(header.readUInt32LE(entryOffset + 136 + dimension * 4));
     }
-    const elementCount = checkedProduct(shape, name);
     const relativeOffset = header.readUInt32LE(entryOffset + 152);
     const sourceByteLength = header.readUInt32LE(entryOffset + 156);
-    const expectedByteLength = elementCount * (dtype === 'fp16' ? 2 : 4);
-    if (sourceByteLength !== expectedByteLength) {
-      throw new Error(`${name} size ${sourceByteLength} does not match shape-derived ${expectedByteLength}`);
+    const elementByteLength = dtype === 'fp16' ? 2 : 4;
+    if (sourceByteLength % elementByteLength !== 0) {
+      throw new Error(`${name} size ${sourceByteLength} is not divisible by its dtype byte width`);
+    }
+    const byteDerivedElementCount = sourceByteLength / elementByteLength;
+    const elementCount = shapeComplete ? checkedProduct(shape, name) : byteDerivedElementCount;
+    if (shapeComplete && sourceByteLength !== elementCount * elementByteLength) {
+      throw new Error(`${name} size ${sourceByteLength} does not match shape-derived ${elementCount * elementByteLength}`);
     }
     const absoluteOffset = headerSize + relativeOffset;
     const absoluteEnd = absoluteOffset + sourceByteLength;
@@ -127,7 +132,9 @@ export async function readSf3dWeightInventory(filePath, { source } = {}) {
     tensors.push({
       name,
       dtype,
+      declaredRank: ndim,
       shape,
+      shapeComplete,
       elementCount,
       relativeOffset,
       absoluteOffset,
@@ -147,19 +154,20 @@ export async function readSf3dWeightInventory(filePath, { source } = {}) {
   const bySourceDtype = { fp16: emptyCount(), fp32: emptyCount() };
   const fp16Classes = {
     matrix: emptyCount(),
-    convolution4d: emptyCount(),
-    tokenizerPositionEmbedding: emptyCount(),
+    postprocessorConvolution: emptyCount(),
+    tokenizerEmbedding: emptyCount(),
     remaining: emptyCount(),
   };
   for (const tensor of tensors) {
     addCount(bySourceDtype[tensor.dtype], tensor.sourceByteLength);
     if (tensor.dtype !== 'fp16') continue;
-    if (tensor.name === 'image_tokenizer.model.embeddings.position_embeddings') {
-      addCount(fp16Classes.tokenizerPositionEmbedding, tensor.sourceByteLength);
-    } else if (tensor.shape.length === 2) {
+    if (tensor.shapeComplete && tensor.shape.length === 2) {
       addCount(fp16Classes.matrix, tensor.sourceByteLength);
-    } else if (tensor.shape.length === 4) {
-      addCount(fp16Classes.convolution4d, tensor.sourceByteLength);
+    } else if (tensor.shapeComplete && tensor.shape.length === 4
+        && tensor.name.startsWith('post_processor.')) {
+      addCount(fp16Classes.postprocessorConvolution, tensor.sourceByteLength);
+    } else if (tensor.name === 'tokenizer.embeddings') {
+      addCount(fp16Classes.tokenizerEmbedding, tensor.sourceByteLength);
     } else {
       addCount(fp16Classes.remaining, tensor.sourceByteLength);
     }

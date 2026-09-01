@@ -150,6 +150,25 @@ export function evaluatePackedFp16LinearSmokeReport(report, expectedIdentity = {
   if (!GIT_SHA_HEX.test(expectedIdentity.sourceRevision || '')) {
     errors.push('expected source revision must be an exact Git SHA');
   }
+  if (!GIT_SHA_HEX.test(expectedIdentity.kitProducerTree || '')) {
+    errors.push('expected kit producer tree must be an exact Git SHA');
+  }
+  if (!SHA256_HEX.test(expectedIdentity.kitManifestSha256 || '')) {
+    errors.push('expected kit manifest must be a SHA-256 digest');
+  }
+  for (const field of [
+    'sourceRevision',
+    'kitPackageVersion',
+    'kitProducerRevision',
+    'kitProducerRemote',
+    'kitProducerTree',
+    'kitTarballSha256',
+    'kitManifestSha256',
+  ]) {
+    if (report.requestedIdentity?.[field] !== expectedIdentity[field]) {
+      errors.push(`requested identity ${field} must match the caller-owned expectation`);
+    }
+  }
   if (!GIT_SHA_HEX.test(report.source?.revision || '')
       || report.source?.revision !== expectedIdentity.sourceRevision) {
     errors.push('source revision must match the expected exact Git SHA');
@@ -178,9 +197,14 @@ export function evaluatePackedFp16LinearSmokeReport(report, expectedIdentity = {
         || kit.producerRemote !== expectedIdentity.kitProducerRemote) {
       errors.push('kit producer remote must match expected identity');
     }
-    if (!GIT_SHA_HEX.test(kit.producerTree || '')) errors.push('kit producer tree is required');
+    if (!GIT_SHA_HEX.test(kit.producerTree || '')
+        || kit.producerTree !== expectedIdentity.kitProducerTree) {
+      errors.push('kit producer tree must match expected identity');
+    }
     for (const field of ['tarballManifestSha256', 'installedManifestSha256', 'sourceManifestSha256']) {
-      if (!SHA256_HEX.test(kit[field] || '')) errors.push(`kit ${field} must be a SHA-256 digest`);
+      if (!SHA256_HEX.test(kit[field] || '') || kit[field] !== expectedIdentity.kitManifestSha256) {
+        errors.push(`kit ${field} must match the expected package manifest`);
+      }
     }
     if (kit.tarballManifestSha256 !== kit.installedManifestSha256
         || kit.tarballManifestSha256 !== kit.sourceManifestSha256) {

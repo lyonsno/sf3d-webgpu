@@ -25,6 +25,8 @@ const KIT_PRODUCER_REMOTE = argValue('--kit-producer-remote');
 const EXPECTED_SOURCE_REVISION = argValue('--expected-source-revision');
 const EXPECTED_KIT_VERSION = argValue('--expected-kit-version');
 const EXPECTED_KIT_TARBALL_SHA256 = argValue('--expected-kit-tarball-sha256');
+const EXPECTED_KIT_PRODUCER_TREE = argValue('--expected-kit-producer-tree');
+const EXPECTED_KIT_MANIFEST_SHA256 = argValue('--expected-kit-manifest-sha256');
 const INSTALLED_PACKAGE_PATH = path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit');
 const rows = Number(argValue('--rows', '3'));
 const inDim = Number(argValue('--in-dim', '5'));
@@ -119,7 +121,9 @@ let context = {
     kitPackageVersion: EXPECTED_KIT_VERSION,
     kitProducerRevision: KIT_PRODUCER_REVISION,
     kitProducerRemote: KIT_PRODUCER_REMOTE,
+    kitProducerTree: EXPECTED_KIT_PRODUCER_TREE,
     kitTarballSha256: EXPECTED_KIT_TARBALL_SHA256,
+    kitManifestSha256: EXPECTED_KIT_MANIFEST_SHA256,
   },
   source: null,
   kit: {
@@ -144,6 +148,8 @@ try {
     throw new Error('--kit-tarball must name the installed producer artifact');
   }
   if (!EXPECTED_KIT_TARBALL_SHA256) throw new Error('--expected-kit-tarball-sha256 is required');
+  if (!EXPECTED_KIT_PRODUCER_TREE) throw new Error('--expected-kit-producer-tree is required');
+  if (!EXPECTED_KIT_MANIFEST_SHA256) throw new Error('--expected-kit-manifest-sha256 is required');
   const source = sourceIdentity();
   if (source.revision !== EXPECTED_SOURCE_REVISION) {
     throw new Error(`source revision ${source.revision} does not match expected ${EXPECTED_SOURCE_REVISION}`);
@@ -161,6 +167,14 @@ try {
     tarballSha256: EXPECTED_KIT_TARBALL_SHA256,
     installedPackagePath: INSTALLED_PACKAGE_PATH,
   });
+  if (kitIdentity.producerTree !== EXPECTED_KIT_PRODUCER_TREE) {
+    throw new Error(`kit producer tree ${kitIdentity.producerTree} does not match expected ${EXPECTED_KIT_PRODUCER_TREE}`);
+  }
+  if (kitIdentity.tarballManifestSha256 !== EXPECTED_KIT_MANIFEST_SHA256) {
+    throw new Error(
+      `kit package manifest ${kitIdentity.tarballManifestSha256} does not match expected ${EXPECTED_KIT_MANIFEST_SHA256}`,
+    );
+  }
   context = {
     requestedIdentity: context.requestedIdentity,
     source,

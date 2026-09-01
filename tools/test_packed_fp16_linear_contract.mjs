@@ -187,7 +187,10 @@ const expectedIdentity = {
   kitProducerRevision: admittedReport.kit.producerRevision,
   kitTarballSha256: admittedReport.kit.tarballSha256,
   kitProducerRemote: admittedReport.kit.producerRemote,
+  kitProducerTree: admittedReport.kit.producerTree,
+  kitManifestSha256: admittedReport.kit.tarballManifestSha256,
 };
+admittedReport.requestedIdentity = structuredClone(expectedIdentity);
 assert.equal(
   evaluatePackedFp16LinearSmokeReport(admittedReport, expectedIdentity).ok,
   true,
@@ -211,6 +214,15 @@ const falseReports = [
     report.kit.packageVersion = '9.9.9';
     report.kit.producerRevision = '9'.repeat(40);
     report.kit.tarballSha256 = '8'.repeat(64);
+  }],
+  ['coherently forged package manifests', report => {
+    report.kit.producerTree = '6'.repeat(40);
+    report.kit.tarballManifestSha256 = '7'.repeat(64);
+    report.kit.installedManifestSha256 = '7'.repeat(64);
+    report.kit.sourceManifestSha256 = '7'.repeat(64);
+  }],
+  ['requested identity differs from the caller contract', report => {
+    report.requestedIdentity.kitProducerRevision = '8'.repeat(40);
   }],
   ['blank adapter identity', report => { report.adapter = {}; }],
   ['missing transposed layout probe', report => { delete report.layoutProbe.transposed; }],

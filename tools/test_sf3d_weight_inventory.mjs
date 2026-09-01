@@ -48,7 +48,8 @@ const weightPath = path.join(root, 'weights.bin');
 const weightBytes = buildWeightFile([
   { name: 'decoder.linear.weight', dtype: 1, shape: [3, 5], data: Buffer.alloc(30, 0x11) },
   { name: 'post_processor.conv.weight', dtype: 1, shape: [2, 3, 3, 3], data: Buffer.alloc(108, 0x22) },
-  { name: 'image_tokenizer.model.embeddings.position_embeddings', dtype: 1, shape: [1, 7, 4], data: Buffer.alloc(56, 0x33) },
+  { name: 'tokenizer.embeddings', dtype: 1, shape: [1, 7, 4], data: Buffer.alloc(56, 0x33) },
+  { name: 'image_tokenizer.image_mean', dtype: 1, shape: [1, 1, 3, 1, 1], data: Buffer.alloc(6, 0x35) },
   { name: 'image_estimator.proj.weight', dtype: 0, shape: [2, 2], data: Buffer.alloc(16, 0x44) },
 ]);
 fs.writeFileSync(weightPath, weightBytes);
@@ -69,20 +70,25 @@ assert.equal(
 );
 assert.equal(inventory.format.magic, 'SF3D');
 assert.equal(inventory.format.version, 1);
-assert.equal(inventory.format.tensorCount, 4);
-assert.equal(inventory.tensors.length, 4);
+assert.equal(inventory.format.tensorCount, 5);
+assert.equal(inventory.tensors.length, 5);
 assert.deepEqual(inventory.summary.bySourceDtype, {
-  fp16: { tensorCount: 3, sourceByteLength: 194 },
+  fp16: { tensorCount: 4, sourceByteLength: 200 },
   fp32: { tensorCount: 1, sourceByteLength: 16 },
 });
 assert.deepEqual(inventory.summary.fp16Classes, {
   matrix: { tensorCount: 1, sourceByteLength: 30 },
-  convolution4d: { tensorCount: 1, sourceByteLength: 108 },
-  tokenizerPositionEmbedding: { tensorCount: 1, sourceByteLength: 56 },
-  remaining: { tensorCount: 0, sourceByteLength: 0 },
+  postprocessorConvolution: { tensorCount: 1, sourceByteLength: 108 },
+  tokenizerEmbedding: { tensorCount: 1, sourceByteLength: 56 },
+  remaining: { tensorCount: 1, sourceByteLength: 6 },
 });
-assert.equal(inventory.summary.expandedFp32GpuByteLength, 404);
-assert.equal(inventory.summary.fp16StorageSavingsByteLength, 194);
+assert.equal(inventory.summary.expandedFp32GpuByteLength, 416);
+assert.equal(inventory.summary.fp16StorageSavingsByteLength, 200);
+const incompleteShape = inventory.tensors.find(tensor => tensor.name === 'image_tokenizer.image_mean');
+assert.equal(incompleteShape.declaredRank, 5);
+assert.deepEqual(incompleteShape.shape, [1, 1, 3, 1]);
+assert.equal(incompleteShape.shapeComplete, false);
+assert.equal(incompleteShape.elementCount, 3);
 
 async function rejectsMutation(label, mutate, pattern) {
   const mutatedPath = path.join(root, `${label}.bin`);
