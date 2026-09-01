@@ -60,7 +60,7 @@ export function validateDinoWeightRepresentationAssay(report, expectedSource) {
     assert.equal(stats?.savedVsExpandedFp32ByteLength, expectedSaving,
       `${representation} saving authority drifted`);
 
-    assert.equal(arm.cooperative?.status, 'completed',
+    assert.equal(arm.cooperative?.status, 'succeeded',
       `${representation} cooperative execution did not complete`);
     assert.equal(arm.cooperative?.completedItems, 24,
       `${representation} returned a partial DINO execution`);

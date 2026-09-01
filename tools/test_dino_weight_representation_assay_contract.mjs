@@ -27,7 +27,7 @@ function arm(representation) {
       savedVsExpandedFp32ByteLength: packed ? 754_974_720 : 0,
     },
     cooperative: {
-      status: 'completed',
+      status: 'succeeded',
       completedItems: 24,
       totalItems: 24,
     },
