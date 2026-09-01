@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
 
 import { validateDinoWeightRepresentationAssay } from './dino_weight_representation_assay_contract.mjs';
+import { createAssayWeightMiddleware } from './vite_dino_assay_config.mjs';
 
 const source = {
   commit: '5a161a06c32ac9fe1ade001dd0d558ef355f21f9',
@@ -75,3 +80,28 @@ for (const mutate of [
 }
 
 console.log('DINO weight-representation assay false-closure contracts passed');
+
+const servedBytes = Buffer.from('authenticated-weight-bytes');
+const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sf3d-dino-assay-weight-'));
+const weightPath = path.join(temporaryDirectory, 'weights.bin');
+fs.writeFileSync(weightPath, servedBytes);
+const middleware = createAssayWeightMiddleware(weightPath);
+const response = new PassThrough();
+const headers = new Map();
+response.setHeader = (name, value) => headers.set(name.toLowerCase(), String(value));
+const chunks = [];
+response.on('data', chunk => chunks.push(chunk));
+const finished = new Promise(resolve => response.on('finish', resolve));
+middleware({ url: '/weights.bin?cache-bust=1' }, response, () => {
+  throw new Error('weight request must not fall through');
+});
+await finished;
+assert.equal(headers.get('content-length'), String(servedBytes.length));
+assert.deepEqual(Buffer.concat(chunks), servedBytes);
+
+let fellThrough = false;
+middleware({ url: '/src/main.js' }, new PassThrough(), () => { fellThrough = true; });
+assert.equal(fellThrough, true);
+fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+
+console.log('DINO assay authenticated weight middleware contracts passed');

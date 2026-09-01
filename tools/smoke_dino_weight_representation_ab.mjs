@@ -105,14 +105,24 @@ function allocatePort() {
 }
 
 async function launchVite(port) {
-  const process = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
+  const viteProcess = spawn('npx', [
+    'vite',
+    '--config',
+    'tools/vite_dino_assay_config.mjs',
+    '--host',
+    '127.0.0.1',
+    '--port',
+    String(port),
+    '--strictPort',
+  ], {
     cwd: REPO,
+    env: { ...process.env, SF3D_ASSAY_WEIGHTS_PATH: WEIGHTS },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
   const append = chunk => { output = `${output}${chunk}`.slice(-16_384); };
-  process.stdout.on('data', append);
-  process.stderr.on('data', append);
+  viteProcess.stdout.on('data', append);
+  viteProcess.stderr.on('data', append);
   await new Promise((resolve, reject) => {
     const onData = chunk => {
       if (/Local:|ready in/i.test(String(chunk))) {
@@ -125,15 +135,15 @@ async function launchVite(port) {
       reject(new Error(`Vite exited before serving (code ${code}): ${output}`));
     };
     const cleanup = () => {
-      process.stdout.off('data', onData);
-      process.stderr.off('data', onData);
-      process.off('exit', onExit);
+      viteProcess.stdout.off('data', onData);
+      viteProcess.stderr.off('data', onData);
+      viteProcess.off('exit', onExit);
     };
-    process.stdout.on('data', onData);
-    process.stderr.on('data', onData);
-    process.on('exit', onExit);
+    viteProcess.stdout.on('data', onData);
+    viteProcess.stderr.on('data', onData);
+    viteProcess.on('exit', onExit);
   });
-  return process;
+  return viteProcess;
 }
 
 async function runArm(baseUrl, representation) {
@@ -294,8 +304,6 @@ async function runArm(baseUrl, representation) {
 async function main() {
   writeReport();
   let vite = null;
-  let createdWeightLink = false;
-  const publicWeights = path.join(REPO, 'public', 'weights.bin');
   try {
     report.phase = 'source-verification';
     writeReport();
@@ -339,15 +347,6 @@ async function main() {
       fail('source-verification', 'GPU_GREENROOM_LEASE_ID is required for an acceptance run');
     }
     writeReport();
-
-    if (fs.existsSync(publicWeights)) {
-      if (fs.realpathSync(publicWeights) !== fs.realpathSync(WEIGHTS)) {
-        fail('source-verification', `public/weights.bin resolves outside the authenticated artifact`);
-      }
-    } else {
-      fs.symlinkSync(WEIGHTS, publicWeights);
-      createdWeightLink = true;
-    }
 
     const port = await allocatePort();
     vite = await launchVite(port);
@@ -413,7 +412,6 @@ async function main() {
     process.exitCode = 1;
   } finally {
     if (vite) vite.kill();
-    if (createdWeightLink) fs.rmSync(publicWeights, { force: true });
   }
 }
 
