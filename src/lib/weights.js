@@ -14,9 +14,15 @@
  */
 
 import { createStorageBuffer } from './gpu.js';
+import {
+  createWebGpuWeightRepresentationPlan,
+  packFp16WeightsToU32,
+} from '@kaminos/webgpu-inference-kit';
 
 const MAGIC = 0x33445346; // "SF3D" in little-endian
 const ENTRY_SIZE = 160;
+const IMAGE_TOKENIZER_BLOCK_COUNT = 24;
+const IMAGE_TOKENIZER_MATRICES_PER_BLOCK = 8;
 
 function parseHeader(buffer) {
   const view = new DataView(buffer);
@@ -66,15 +72,66 @@ function fp16ToFp32(h) {
   return sign ? -val : val;
 }
 
-function extractTensor(device, buffer, info) {
+export function extractTensor(device, buffer, info, representationOptions = null) {
   const { dtype, offset, size } = info;
   const raw = extractBytes(buffer, offset, size);
   if (dtype === 0) {
+    if (representationOptions?.representation
+        && representationOptions.representation !== 'f32-expanded') {
+      throw new RangeError(
+        `FP32 tensor cannot use ${representationOptions.representation}`,
+      );
+    }
     // fp32 — raw bytes are already float32
     const fp32 = new Float32Array(raw.buffer, raw.byteOffset, size / 4);
-    return createStorageBuffer(device, fp32);
+    const gpuBuffer = createStorageBuffer(device, fp32);
+    if (!representationOptions) return gpuBuffer;
+    return Object.freeze({
+      buffer: gpuBuffer,
+      representation: 'f32-expanded',
+      sourceDtype: 'fp32',
+      elementCount: fp32.length,
+      sourceByteLength: size,
+      storageByteLength: gpuBuffer.size ?? size,
+      expandedFp32ByteLength: size,
+      savedVsExpandedFp32ByteLength: 0,
+      shape: Object.freeze([...(info.shape || [])]),
+    });
   } else {
     const fp16 = new Uint16Array(raw.buffer, raw.byteOffset, size / 2);
+    if (representationOptions) {
+      const plan = createWebGpuWeightRepresentationPlan({
+        sourceDtype: 'fp16',
+        elementCount: fp16.length,
+        candidates: [representationOptions.representation],
+        adapterFeatures: representationOptions.adapterFeatures || [],
+        maxStorageByteLength: representationOptions.maxStorageByteLength,
+      });
+      let storage;
+      if (plan.effectiveRepresentation === 'f16-packed-u32') {
+        storage = packFp16WeightsToU32(fp16);
+      } else if (plan.effectiveRepresentation === 'f32-expanded') {
+        storage = new Float32Array(fp16.length);
+        for (let i = 0; i < fp16.length; i++) storage[i] = fp16ToFp32(fp16[i]);
+      } else {
+        throw new RangeError(
+          `SF3D loader does not yet materialize ${plan.effectiveRepresentation}`,
+        );
+      }
+      const gpuBuffer = createStorageBuffer(device, storage);
+      return Object.freeze({
+        buffer: gpuBuffer,
+        representation: plan.effectiveRepresentation,
+        sourceDtype: plan.sourceDtype,
+        elementCount: plan.elementCount,
+        sourceByteLength: plan.sourceByteLength,
+        storageByteLength: plan.storageByteLength,
+        expandedFp32ByteLength: plan.expandedFp32ByteLength,
+        savedVsExpandedFp32ByteLength: plan.savedVsExpandedFp32ByteLength,
+        shape: Object.freeze([...(info.shape || [])]),
+        plan,
+      });
+    }
     const fp32 = new Float32Array(fp16.length);
     for (let i = 0; i < fp16.length; i++) fp32[i] = fp16ToFp32(fp16[i]);
     return createStorageBuffer(device, fp32);
@@ -146,7 +203,14 @@ function extractBytes(chunkedBuffer, offset, size) {
 /**
  * Load SF3D weights and organize into component structure.
  */
-export async function loadWeights(device, url, onProgress) {
+export async function loadWeights(device, url, onProgress, options = {}) {
+  const imageTokenizerMatrixRepresentation = options.imageTokenizerMatrixRepresentation
+    ?? 'f32-expanded';
+  if (!['f32-expanded', 'f16-packed-u32'].includes(imageTokenizerMatrixRepresentation)) {
+    throw new RangeError(
+      `unsupported imageTokenizerMatrixRepresentation ${imageTokenizerMatrixRepresentation}`,
+    );
+  }
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Failed to fetch weights: ${response.status}`);
 
@@ -197,6 +261,32 @@ export async function loadWeights(device, url, onProgress) {
     return info;
   };
 
+  const imageTokenizerMatrixStats = {
+    representation: imageTokenizerMatrixRepresentation,
+    tensorCount: 0,
+    sourceByteLength: 0,
+    storageByteLength: 0,
+    expandedFp32ByteLength: 0,
+    savedVsExpandedFp32ByteLength: 0,
+  };
+  const getImageTokenizerMatrix = (name) => {
+    const info = getInfo(name);
+    if (info.dtype !== 1 || info.shape.length !== 2) {
+      throw new Error(`image tokenizer matrix ${name} must be a rank-2 FP16 tensor`);
+    }
+    const resource = extractTensor(device, chunkedBuffer, info, {
+      representation: imageTokenizerMatrixRepresentation,
+      adapterFeatures: options.adapterFeatures || [],
+      maxStorageByteLength: options.maxImageTokenizerMatrixStorageByteLength,
+    });
+    imageTokenizerMatrixStats.tensorCount++;
+    imageTokenizerMatrixStats.sourceByteLength += resource.sourceByteLength;
+    imageTokenizerMatrixStats.storageByteLength += resource.storageByteLength;
+    imageTokenizerMatrixStats.expandedFp32ByteLength += resource.expandedFp32ByteLength;
+    imageTokenizerMatrixStats.savedVsExpandedFp32ByteLength += resource.savedVsExpandedFp32ByteLength;
+    return resource;
+  };
+
   // === Image Tokenizer (DINOv2 ViT-Large with modulation) ===
   const imageTokenizer = {
     imageMean: get('image_tokenizer.image_mean'),
@@ -214,28 +304,37 @@ export async function loadWeights(device, url, onProgress) {
     blocks: [],
   };
 
-  // 24 DINOv2 transformer blocks with AdaNorm modulation
-  for (let l = 0; l < 24; l++) {
+  // DINOv2 transformer blocks with AdaNorm modulation
+  for (let l = 0; l < IMAGE_TOKENIZER_BLOCK_COUNT; l++) {
     const p = `image_tokenizer.model.encoder.layer.${l}`;
     imageTokenizer.blocks.push({
       norm1: { weight: get(`${p}.norm1.weight`), bias: get(`${p}.norm1.bias`) },
       attn: {
-        q: { weight: get(`${p}.attention.attention.query.weight`), bias: get(`${p}.attention.attention.query.bias`) },
-        k: { weight: get(`${p}.attention.attention.key.weight`), bias: get(`${p}.attention.attention.key.bias`) },
-        v: { weight: get(`${p}.attention.attention.value.weight`), bias: get(`${p}.attention.attention.value.bias`) },
-        proj: { weight: get(`${p}.attention.output.dense.weight`), bias: get(`${p}.attention.output.dense.bias`) },
+        q: { weight: getImageTokenizerMatrix(`${p}.attention.attention.query.weight`), bias: get(`${p}.attention.attention.query.bias`) },
+        k: { weight: getImageTokenizerMatrix(`${p}.attention.attention.key.weight`), bias: get(`${p}.attention.attention.key.bias`) },
+        v: { weight: getImageTokenizerMatrix(`${p}.attention.attention.value.weight`), bias: get(`${p}.attention.attention.value.bias`) },
+        proj: { weight: getImageTokenizerMatrix(`${p}.attention.output.dense.weight`), bias: get(`${p}.attention.output.dense.bias`) },
       },
       layerScale1: get(`${p}.layer_scale1.lambda1`),
       norm2: { weight: get(`${p}.norm2.weight`), bias: get(`${p}.norm2.bias`) },
       mlp: {
-        fc1: { weight: get(`${p}.mlp.fc1.weight`), bias: get(`${p}.mlp.fc1.bias`) },
-        fc2: { weight: get(`${p}.mlp.fc2.weight`), bias: get(`${p}.mlp.fc2.bias`) },
+        fc1: { weight: getImageTokenizerMatrix(`${p}.mlp.fc1.weight`), bias: get(`${p}.mlp.fc1.bias`) },
+        fc2: { weight: getImageTokenizerMatrix(`${p}.mlp.fc2.weight`), bias: get(`${p}.mlp.fc2.bias`) },
       },
       layerScale2: get(`${p}.layer_scale2.lambda1`),
       // AdaNorm modulation from camera embeddings
-      norm1Mod: { weight: get(`${p}.norm1_modulation.linear2.weight`), bias: get(`${p}.norm1_modulation.linear2.bias`) },
-      norm2Mod: { weight: get(`${p}.norm2_modulation.linear2.weight`), bias: get(`${p}.norm2_modulation.linear2.bias`) },
+      norm1Mod: { weight: getImageTokenizerMatrix(`${p}.norm1_modulation.linear2.weight`), bias: get(`${p}.norm1_modulation.linear2.bias`) },
+      norm2Mod: { weight: getImageTokenizerMatrix(`${p}.norm2_modulation.linear2.weight`), bias: get(`${p}.norm2_modulation.linear2.bias`) },
     });
+  }
+  const expectedImageTokenizerMatrixCount = (
+    IMAGE_TOKENIZER_BLOCK_COUNT * IMAGE_TOKENIZER_MATRICES_PER_BLOCK
+  );
+  if (imageTokenizerMatrixStats.tensorCount !== expectedImageTokenizerMatrixCount) {
+    throw new Error(
+      `image tokenizer matrix topology drift: expected ${expectedImageTokenizerMatrixCount}, `
+      + `materialized ${imageTokenizerMatrixStats.tensorCount}`,
+    );
   }
 
   // === Camera Embedder ===
@@ -388,5 +487,8 @@ export async function loadWeights(device, url, onProgress) {
     _rawGetCPU,
     _rawTryGet,
     _rawHas,
+    weightRepresentations: Object.freeze({
+      imageTokenizerMatrices: Object.freeze({ ...imageTokenizerMatrixStats }),
+    }),
   };
 }

@@ -57,7 +57,7 @@ const CHUNK = Number(argVal('--chunk', '1')) || 1;
 const REPORT_PATH = path.resolve(argVal('--report', '/tmp/sf3d-cooperative-dino-capsule-report.json'));
 const KAMINOS_REPO = argVal('--kaminos-repo', path.join(process.env.HOME, 'dev/kaminos'));
 const ROUTE_ID = 'sf3d.image-to-mesh.webgpu-local.v0';
-const EXPECTED_KIT = '0.1.42';
+const EXPECTED_KIT = '0.1.47';
 const SHOT_DIR = '/tmp/sf3d-capsule-shots';
 
 // ---------------------------------------------------------------------------

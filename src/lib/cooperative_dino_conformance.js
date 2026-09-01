@@ -19,7 +19,7 @@
  *     output-shape identity. Any block omission/dup/reorder/range-drift/dispatch
  *     -drift must change the fingerprint. Not a constant label, not mesh counts.
  *   - initialResources ["dinov2.weights"], expectedFinalResources
- *     ["dinov2.weights","dinov2.tokens"]; kitVersion must equal 0.1.42.
+ *     ["dinov2.weights","dinov2.tokens"]; kitVersion must equal 0.1.47.
  *
  * No real GPU is used here: conformance is deterministic. A trace-recording
  * tokenizer stand-in emits the exact dispatch sequence sf3d_backbone.js would,
@@ -31,7 +31,7 @@ import { recordDinoDispatchTrace, VIT_NUM_BLOCKS } from './sf3d_backbone.js';
 
 export const SF3D_DINO_ADAPTER_ID = 'sf3d.dino.cooperative.webgpu.v0';
 export const SF3D_CONFORMANCE_ID = 'sf3d:cooperative-adapter:v0';
-export const REQUIRED_KIT_VERSION = '0.1.42';
+export const REQUIRED_KIT_VERSION = '0.1.47';
 
 /**
  * Deterministic SHA-256 over a string, using WebCrypto (browser + Node 20+).

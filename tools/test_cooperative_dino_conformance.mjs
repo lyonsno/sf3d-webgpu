@@ -15,6 +15,7 @@
  */
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 import * as kit from '@kaminos/webgpu-inference-kit';
 import { recordDinoDispatchTrace, VIT_NUM_BLOCKS } from '../src/lib/sf3d_backbone.js';
@@ -30,11 +31,20 @@ const gitRev = (() => {
   catch { return 'unknown'; }
 })();
 
-// --- 1. Kit is exactly 0.1.41 -------------------------------------------------
+// --- 1. Installed kit, manifest pin, and lock identity agree exactly ----------
+const packageManifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const packageLock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+assert.equal(packageManifest.devDependencies['@kaminos/webgpu-inference-kit'], REQUIRED_KIT_VERSION,
+  'package manifest must carry the exact conformance kit pin');
+assert.equal(
+  packageLock.packages['node_modules/@kaminos/webgpu-inference-kit'].version,
+  REQUIRED_KIT_VERSION,
+  'package lock must carry the exact conformance kit version',
+);
 assert.equal(kit.WEBGPU_INFERENCE_KIT_VERSION, REQUIRED_KIT_VERSION,
   `kit must be exactly ${REQUIRED_KIT_VERSION}, got ${kit.WEBGPU_INFERENCE_KIT_VERSION}`);
 assert.equal(typeof kit.runWebGpuCooperativeAdapterConformance, 'function',
-  'kit 0.1.41 must export runWebGpuCooperativeAdapterConformance');
+  `kit ${REQUIRED_KIT_VERSION} must export runWebGpuCooperativeAdapterConformance`);
 console.log(`ok  kit version exactly ${REQUIRED_KIT_VERSION}, conformance harness present`);
 
 // --- 2. Shared trace is the canonical 363-op / 24-range orchestration --------

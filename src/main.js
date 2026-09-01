@@ -68,12 +68,17 @@ async function init() {
     // 2. Load weights
     setProgress(0);
     const t0 = performance.now();
+    const requestedImageTokenizerWeightRepresentation = new URLSearchParams(location.search)
+      .get('imageTokenizerWeightRepresentation') || 'f16-packed-u32';
     weights = await loadWeights(device, 'weights.bin', (received, total) => {
       if (total > 0) {
         const pct = (received / total) * 100;
         setProgress(pct);
         setStatus(`Loading weights... ${(received / 1024 / 1024).toFixed(0)} / ${(total / 1024 / 1024).toFixed(0)} MB`);
       }
+    }, {
+      imageTokenizerMatrixRepresentation: requestedImageTokenizerWeightRepresentation,
+      adapterFeatures: _adapterFeatures,
     });
     const loadTime = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`Weights loaded in ${loadTime}s. Initializing pipelines...`);

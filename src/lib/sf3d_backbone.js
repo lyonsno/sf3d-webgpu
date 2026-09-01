@@ -18,7 +18,9 @@ import patchEmbedWGSL from '../shaders/patch_embed_dinov2.wgsl?raw';
 import layerNormWGSL from '../shaders/layernorm_vit.wgsl?raw';
 import attentionWGSL from '../shaders/attention.wgsl?raw';
 import linearWGSL from '../shaders/linear.wgsl?raw';
+import linearPackedWGSL from '../shaders/linear_f16_packed.wgsl?raw';
 import linearGeluWGSL from '../shaders/linear_gelu.wgsl?raw';
+import linearGeluPackedWGSL from '../shaders/linear_gelu_f16_packed.wgsl?raw';
 import layerscaleWGSL from '../shaders/layerscale.wgsl?raw';
 import activationsWGSL from '../shaders/activations.wgsl?raw';
 
@@ -74,7 +76,9 @@ export class SF3DImageTokenizer {
     this.pipelines.attnSoftmax = make(attentionWGSL, 'softmax');
     this.pipelines.attnApply = make(attentionWGSL, 'applyAttn');
     this.pipelines.linear = make(linearWGSL, 'main');
+    this.pipelines.linearPacked = make(linearPackedWGSL, 'main');
     this.pipelines.linearGelu = make(linearGeluWGSL, 'main');
+    this.pipelines.linearGeluPacked = make(linearGeluPackedWGSL, 'main');
     this.pipelines.layerScale = make(layerscaleWGSL, 'main');
     this.pipelines.activation = make(activationsWGSL, 'activation_main');
 
@@ -390,23 +394,24 @@ export class SF3DImageTokenizer {
 
   _dispatchLinear(encoder, input, output, weight, bias, rows, inDim, outDim) {
     const device = this.device;
+    const resource = this._resolveLinearWeight(weight, 'linear', 'linearPacked');
     const totalWG = ceilDiv(rows * outDim, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([rows, inDim, outDim, wgX, 1]));
 
     const bg = device.createBindGroup({
-      layout: this.pipelines.linear.getBindGroupLayout(0),
+      layout: resource.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: input } },
-        { binding: 2, resource: { buffer: weight } },
+        { binding: 2, resource: { buffer: resource.buffer } },
         { binding: 3, resource: { buffer: bias } },
         { binding: 4, resource: { buffer: output } },
       ],
     });
 
     const pass = encoder.beginComputePass();
-    pass.setPipeline(this.pipelines.linear);
+    pass.setPipeline(resource.pipeline);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(wgX, wgY);
     pass.end();
@@ -566,26 +571,40 @@ export class SF3DImageTokenizer {
   }
 
   _dispatchLinearGelu(encoder, input, output, weight, bias, rows, inDim, outDim) {
+    const resource = this._resolveLinearWeight(weight, 'linearGelu', 'linearGeluPacked');
     const totalWG = ceilDiv(rows * outDim, WG_SIZE);
     const [wgX, wgY] = splitWG(totalWG);
     const params = this._cachedUniform(new Uint32Array([rows, inDim, outDim, wgX, 1]));
 
     const bg = this.device.createBindGroup({
-      layout: this.pipelines.linearGelu.getBindGroupLayout(0),
+      layout: resource.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: input } },
-        { binding: 2, resource: { buffer: weight } },
+        { binding: 2, resource: { buffer: resource.buffer } },
         { binding: 3, resource: { buffer: bias } },
         { binding: 4, resource: { buffer: output } },
       ],
     });
 
     const pass = encoder.beginComputePass();
-    pass.setPipeline(this.pipelines.linearGelu);
+    pass.setPipeline(resource.pipeline);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(wgX, wgY);
     pass.end();
+  }
+
+  _resolveLinearWeight(weight, expandedPipelineKey, packedPipelineKey) {
+    if (!weight || typeof weight !== 'object' || !Object.hasOwn(weight, 'representation')) {
+      return { buffer: weight, pipeline: this.pipelines[expandedPipelineKey] };
+    }
+    if (weight.representation === 'f32-expanded') {
+      return { buffer: weight.buffer, pipeline: this.pipelines[expandedPipelineKey] };
+    }
+    if (weight.representation === 'f16-packed-u32') {
+      return { buffer: weight.buffer, pipeline: this.pipelines[packedPipelineKey] };
+    }
+    throw new RangeError(`unsupported image tokenizer weight representation ${weight.representation}`);
   }
   _dispatchSiLU(encoder, input, output, count) {
     const totalWG = ceilDiv(count, WG_SIZE);

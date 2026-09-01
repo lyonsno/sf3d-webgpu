@@ -17,6 +17,7 @@
     "test:cooperative-two-stream": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_cooperative_two_stream_contract.mjs",
     "test:two-stream-linear-ranges": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_two_stream_linear_ranges.mjs && node tools/test_two_stream_smoke_acceptance.mjs",
     "test:packed-fp16-linear": "node tools/test_packed_fp16_linear_contract.mjs && node tools/test_packed_fp16_linear_failure_report.mjs && node tools/test_packed_fp16_package_identity.mjs && node tools/test_sf3d_weight_inventory.mjs",
+    "test:image-tokenizer-packed-weights": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_image_tokenizer_packed_weights.mjs && node tools/test_image_tokenizer_packed_loader.mjs",
     "test:worker-lifecycle": "node tools/test_worker_call_lifecycle.mjs",
     "test:cooperative-texture-telemetry": "node tools/test_cooperative_texture_bake_telemetry.mjs && node tools/test_cooperative_texture_bake_failures.mjs && node tools/test_cooperative_texture_bake_source_identity.mjs",
     "test:decoder-arena": "node tools/test_decoder_scratch_arena.mjs",
@@ -34,7 +35,7 @@
     "test:partial-arm-failure": "node tools/test_partial_arm_failure_contract.mjs"
   },
   "devDependencies": {
-    "@kaminos/webgpu-inference-kit": "0.1.42",
+    "@kaminos/webgpu-inference-kit": "0.1.47",
     "puppeteer-core": "^25.2.1",
     "vite": "^6.0.0"
   },
