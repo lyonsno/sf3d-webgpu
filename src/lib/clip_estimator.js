@@ -13,21 +13,24 @@
  */
 
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import { createWebGpuResourceCaches } from '@kaminos/webgpu-inference-kit';
+import { callWorker } from './worker_call.js';
+import {
+  clipPrepWeightsFrom,
+  prepareClipEmbeddings,
+  validateClipEmbeddings,
+  validateClipPrepWeights,
+} from './clip_prep_core.js';
 
 const HIDDEN_DIM = 768;
 const NUM_HEADS = 12;
 const HEAD_DIM = 64;
 const MLP_DIM = 3072;
 const NUM_BLOCKS = 12;
-const PATCH_SIZE = 32;
-const IMAGE_SIZE = 224;
-const NUM_PATCHES = (IMAGE_SIZE / PATCH_SIZE) ** 2; // 49
-const NUM_TOKENS = NUM_PATCHES + 1; // 50
+const NUM_TOKENS = 50; // 49 patches + CLS
 const PROJ_DIM = 512;
 const WG_SIZE = 256;
 
-const CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073];
-const CLIP_STD = [0.26862954, 0.26130258, 0.27577711];
 
 let _pipelines = null;
 let _weightBuffers = null;
@@ -187,14 +190,23 @@ function _ensureWeightBuffers(device, weights) {
 
 /**
  * Run CLIP material estimation on an image.
+ *
+ * @param {Uint8ClampedArray|Uint8Array} rgba8  cond-size (512×512) RGBA bytes
+ *   straight from canvas getImageData — the alpha blend, 512→224 resize, and
+ *   patch embedding happen in clip_prep_core (main thread) or, when
+ *   options.clipPrepWorker is supplied, on that Worker with byte-identical
+ *   output. The CPU prep is ~115M multiply-adds; inline it was the route's
+ *   second-largest contiguous main-thread stall (~240ms).
  */
-export async function estimateMaterials(device, imagePixels, imgWidth, imgHeight, weights) {
+export async function estimateMaterials(device, rgba8, imgWidth, imgHeight, weights, options = {}) {
   await _ensurePipelines(device);
   _ensureWeightBuffers(device, weights);
 
-  // Step 1: CPU preprocessing — resize to 224, normalize, patch embed
-  const embeddings = _patchEmbed(
-    _preprocessForCLIP(imagePixels, imgWidth, imgHeight), weights);
+  // Step 1: CPU preprocessing — blend, resize to 224, normalize, patch embed
+  const embeddings = options.clipPrepWorker
+    ? await runClipPrep(options.clipPrepWorker, rgba8, imgWidth, imgHeight, weights,
+        { timeoutMs: options.workerTimeoutMs })
+    : validateClipEmbeddings(prepareClipEmbeddings(rgba8, imgWidth, imgHeight, clipPrepWeightsFrom(weights)));
 
   // Step 2: Visual transformer (CPU fp32 for precision, GPU for speed)
   const USE_CPU_TRANSFORMER = false; // GPU path enabled with fp32 weights
@@ -207,101 +219,64 @@ export async function estimateMaterials(device, imagePixels, imgWidth, imgHeight
   const metallic = _runHead(features, weights, 'metallic');
 
   console.log(`CLIP material estimation: roughness=${roughness.toFixed(3)}, metallic=${metallic.toFixed(3)}`);
-  return { roughness, metallic };
+  return { roughness, metallic, prepOffloaded: Boolean(options.clipPrepWorker) };
 }
 
-const COND_IMAGE_SIZE = 512;
+// Per-worker one-time init (the 9.4MB conv1 weight + embeddings stay resident
+// in the worker). A failed init is forgotten so a later call can retry.
+const _clipPrepInit = new WeakMap();
 
-function _bilinearResize(src, srcW, srcH, dstW, dstH) {
-  // Resize RGBA float32 image using bilinear interpolation (align_corners=False)
-  const dst = new Float32Array(dstW * dstH * 4);
-  for (let y = 0; y < dstH; y++) {
-    for (let x = 0; x < dstW; x++) {
-      const srcX = Math.max(0, (x + 0.5) * (srcW / dstW) - 0.5);
-      const srcY = Math.max(0, (y + 0.5) * (srcH / dstH) - 0.5);
-      const x0 = Math.floor(srcX), y0 = Math.floor(srcY);
-      const x1 = Math.min(x0 + 1, srcW - 1), y1 = Math.min(y0 + 1, srcH - 1);
-      const fx = srcX - x0, fy = srcY - y0;
-      for (let c = 0; c < 4; c++) {
-        dst[(y * dstW + x) * 4 + c] =
-          src[(y0 * srcW + x0) * 4 + c] * (1-fx)*(1-fy) +
-          src[(y0 * srcW + x1) * 4 + c] * fx*(1-fy) +
-          src[(y1 * srcW + x0) * 4 + c] * (1-fx)*fy +
-          src[(y1 * srcW + x1) * 4 + c] * fx*fy;
-      }
-    }
+/**
+ * Run the CLIP CPU prep on a Worker (clip_prep_worker.js). Fail-loud through
+ * callWorker: crash / malformed reply / wedge rejects; never falls back to the
+ * main thread silently. The caller's rgba8 is copied, not detached.
+ */
+export async function runClipPrep(worker, rgba8, width, height, weights, { timeoutMs = 30000 } = {}) {
+  const prep = weights && typeof weights._rawGetCPU === 'function'
+    ? clipPrepWeightsFrom(weights)
+    : validateClipPrepWeights(weights);
+  let init = _clipPrepInit.get(worker);
+  if (!init) {
+    const conv1W = prep.conv1W.slice().buffer;
+    const classEmb = prep.classEmb.slice().buffer;
+    const posEmb = prep.posEmb.slice().buffer;
+    init = callWorker(
+      worker,
+      { type: 'init', id: `clip-init-${Math.random().toString(36).slice(2)}`, conv1W, classEmb, posEmb },
+      [conv1W, classEmb, posEmb],
+      { timeoutMs, onResult: (d) => { if (d.initialized !== true) throw new Error('clip prep init not acknowledged'); return true; } },
+    );
+    _clipPrepInit.set(worker, init);
+    init.catch(() => { if (_clipPrepInit.get(worker) === init) _clipPrepInit.delete(worker); });
   }
-  return dst;
+  await init;
+  const bytes = (rgba8 instanceof Uint8ClampedArray || rgba8 instanceof Uint8Array)
+    ? rgba8 : new Uint8ClampedArray(rgba8);
+  const rgba = bytes.slice().buffer;
+  return await callWorker(
+    worker,
+    { id: `clip-prep-${Math.random().toString(36).slice(2)}`, rgba, width, height },
+    [rgba],
+    { timeoutMs, onResult: (d) => validateClipEmbeddings(new Float32Array(d.embeddings)) },
+  );
 }
 
-function _preprocessForCLIP(pixels, width, height) {
-  // Match PyTorch path: first resize to 512 (cond_image_size), then resize to 224
-  // PyTorch does: PIL resize → alpha blend → F.interpolate bilinear 512→224 → normalize
-  // The input pixels are already alpha-blended and masked, so we just need the two-step resize.
-  let img = pixels;
-  let w = width, h = height;
-
-  // Step 1: resize to cond_image_size (512) if not already
-  if (w !== COND_IMAGE_SIZE || h !== COND_IMAGE_SIZE) {
-    img = _bilinearResize(img, w, h, COND_IMAGE_SIZE, COND_IMAGE_SIZE);
-    w = COND_IMAGE_SIZE;
-    h = COND_IMAGE_SIZE;
+// Inline CLIP shaders (add / GELU / fused attention) bake their sizes into the
+// WGSL, so each is compiled once per device via the kit's resource caches
+// instead of once per block per run (36+ synchronous pipeline compiles on the
+// main thread per estimate).
+const _clipCaches = new WeakMap();
+export function getClipInlinePipeline(device, label, code) {
+  let caches = _clipCaches.get(device);
+  if (!caches) {
+    caches = createWebGpuResourceCaches(device);
+    _clipCaches.set(device, caches);
   }
-
-  // Step 2: resize to 224 (CLIP input size) matching F.interpolate bilinear align_corners=False
-  const out = new Float32Array(3 * IMAGE_SIZE * IMAGE_SIZE);
-  for (let y = 0; y < IMAGE_SIZE; y++) {
-    for (let x = 0; x < IMAGE_SIZE; x++) {
-      const srcX = Math.max(0, (x + 0.5) * (w / IMAGE_SIZE) - 0.5);
-      const srcY = Math.max(0, (y + 0.5) * (h / IMAGE_SIZE) - 0.5);
-      const x0 = Math.floor(srcX), y0 = Math.floor(srcY);
-      const x1 = Math.min(x0 + 1, w - 1), y1 = Math.min(y0 + 1, h - 1);
-      const fx = srcX - x0, fy = srcY - y0;
-      for (let c = 0; c < 3; c++) {
-        const v = img[(y0 * w + x0) * 4 + c] * (1-fx)*(1-fy) +
-                  img[(y0 * w + x1) * 4 + c] * fx*(1-fy) +
-                  img[(y1 * w + x0) * 4 + c] * (1-fx)*fy +
-                  img[(y1 * w + x1) * 4 + c] * fx*fy;
-        out[c * IMAGE_SIZE * IMAGE_SIZE + y * IMAGE_SIZE + x] = (v - CLIP_MEAN[c]) / CLIP_STD[c];
-      }
-    }
-  }
-  return out;
-}
-
-function _patchEmbed(image, weights) {
-  const conv1W = weights._rawGetCPU('image_estimator.model.visual.conv1.weight'); // [768, 3, 32, 32]
-  const classEmb = weights._rawGetCPU('image_estimator.model.visual.class_embedding'); // [768]
-  const posEmb = weights._rawGetCPU('image_estimator.model.visual.positional_embedding'); // [50, 768]
-
-  const patchDim = 3 * PATCH_SIZE * PATCH_SIZE; // 3072
-  const result = new Float32Array(NUM_TOKENS * HIDDEN_DIM);
-
-  // CLS token
-  for (let d = 0; d < HIDDEN_DIM; d++) result[d] = classEmb[d];
-
-  // Patch embeddings: patches[49, 3072] × conv1W[768, 3072]^T → [49, 768]
-  for (let py = 0; py < 7; py++) {
-    for (let px = 0; px < 7; px++) {
-      const patchIdx = py * 7 + px;
-      for (let d = 0; d < HIDDEN_DIM; d++) {
-        let sum = 0;
-        for (let c = 0; c < 3; c++) {
-          for (let dy = 0; dy < PATCH_SIZE; dy++) {
-            for (let dx = 0; dx < PATCH_SIZE; dx++) {
-              sum += image[c * IMAGE_SIZE * IMAGE_SIZE + (py*PATCH_SIZE+dy) * IMAGE_SIZE + (px*PATCH_SIZE+dx)]
-                   * conv1W[d * patchDim + c * PATCH_SIZE * PATCH_SIZE + dy * PATCH_SIZE + dx];
-            }
-          }
-        }
-        result[(patchIdx + 1) * HIDDEN_DIM + d] = sum;
-      }
-    }
-  }
-
-  // Add positional embedding
-  for (let i = 0; i < NUM_TOKENS * HIDDEN_DIM; i++) result[i] += posEmb[i];
-  return result;
+  const module = caches.getShaderModule(label, code);
+  return caches.getComputePipeline(label, {
+    layout: 'auto',
+    compute: { module, entryPoint: 'main' },
+  });
 }
 
 function _runVisualTransformerCPU(embeddings, weights) {
@@ -564,10 +539,7 @@ function _dispatchAdd(encoder, device, a, b, count) {
       out[i] = a[i] + b[i];
     }
   `;
-  const pipeline = device.createComputePipeline({
-    layout: 'auto',
-    compute: { module: device.createShaderModule({ code: shaderCode }), entryPoint: 'main' },
-  });
+  const pipeline = getClipInlinePipeline(device, 'sf3d.clip.add', shaderCode);
   const output = createEmptyBuffer(device, count * 4);
   const bg = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -602,10 +574,7 @@ function _dispatchGelu(encoder, device, input, count) {
       out[i] = x * 0.5 * (1.0 + erf_val);
     }
   `;
-  const pipeline = device.createComputePipeline({
-    layout: 'auto',
-    compute: { module: device.createShaderModule({ code: shaderCode }), entryPoint: 'main' },
-  });
+  const pipeline = getClipInlinePipeline(device, 'sf3d.clip.gelu', shaderCode);
   const output = createEmptyBuffer(device, count * 4);
   const bg = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -661,10 +630,7 @@ function _dispatchFusedAttn(encoder, device, qkvBuf, N) {
       }
     }
   `;
-  const pipeline = device.createComputePipeline({
-    layout: 'auto',
-    compute: { module: device.createShaderModule({ code: shaderCode }), entryPoint: 'main' },
-  });
+  const pipeline = getClipInlinePipeline(device, 'sf3d.clip.fused-attention', shaderCode);
   const output = createEmptyBuffer(device, N * D * 4);
   const bg = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),

@@ -23,7 +23,7 @@ import { runCooperativeTwoStream } from './cooperative_two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
 import { runCooperativePostProcessor } from './cooperative_post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
-import { loadTetData, marchingTetrahedra, scaleTensor } from './marching_tet.js';
+import { loadTetData, marchingTetrahedra, runMarchingTetOnWorker, scaleTensor } from './marching_tet.js';
 
 // Set to true for detailed tensor diagnostics during inference
 const DEBUG = false;
@@ -710,8 +710,15 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   report('Extracting mesh...');
   // Grid vertices need to be in model space with deformation applied
   // The grid is in [0, 1], scale to bbox for the marching tet
-  const mesh = marchingTetrahedra(
-    gridPositions, sdf, tetData.indices, vertexOffsets, CONFIG.isosurfaceResolution);
+  // Optionally offloaded to a Web Worker that owns the resident tet grid
+  // (options.marchingTetWorker) — byte-identical output (same marchingTetrahedra
+  // code); removes the ~30-40ms contiguous CPU stall from the main thread.
+  const mesh = options.marchingTetWorker
+    ? await runMarchingTetOnWorker(options.marchingTetWorker,
+        { sdf, vertexOffsets, bbox, resolution: CONFIG.isosurfaceResolution },
+        { timeoutMs: options.workerTimeoutMs })
+    : marchingTetrahedra(
+        gridPositions, sdf, tetData.indices, vertexOffsets, CONFIG.isosurfaceResolution);
 
   report(`Mesh extracted: ${mesh.numVertices} vertices, ${mesh.numFaces} faces`);
 

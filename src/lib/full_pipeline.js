@@ -93,15 +93,11 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   const clipCtx = clipCanvas.getContext('2d');
   clipCtx.drawImage(inputImage, 0, 0, COND_SIZE, COND_SIZE);
   const clipRaw = clipCtx.getImageData(0, 0, COND_SIZE, COND_SIZE).data;
-  const clipPixels = new Float32Array(COND_SIZE * COND_SIZE * 4);
-  for (let i = 0; i < clipRaw.length; i++) clipPixels[i] = clipRaw[i] / 255.0;
-  for (let i = 0; i < COND_SIZE * COND_SIZE; i++) {
-    const a = clipPixels[i * 4 + 3];
-    clipPixels[i * 4]     = (clipPixels[i * 4] * a + 0.5 * (1 - a)) * a;
-    clipPixels[i * 4 + 1] = (clipPixels[i * 4 + 1] * a + 0.5 * (1 - a)) * a;
-    clipPixels[i * 4 + 2] = (clipPixels[i * 4 + 2] * a + 0.5 * (1 - a)) * a;
-  }
-  const { roughness, metallic } = await estimateMaterials(device, clipPixels, COND_SIZE, COND_SIZE, weights);
+  // Blend / resize / patch-embed run in clip_prep_core — on the main thread, or
+  // on options.clipPrepWorker with byte-identical output.
+  const { roughness, metallic } = await estimateMaterials(
+    device, clipRaw, COND_SIZE, COND_SIZE, weights,
+    { clipPrepWorker: options.clipPrepWorker, workerTimeoutMs: options.workerTimeoutMs });
   mark('clip-material-estimate', clipStart, performance.now());
 
   // Step 3: UV unwrap (CPU). Optionally offloaded to a Web Worker
@@ -175,11 +171,25 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     uvResult.newNumVertices, uvResult.newNumFaces, TEX_RESOLUTION,
     roughness, metallic));
 
+  // Which CPU phases ran off the main thread. Every worker dispatcher is
+  // fail-loud (callWorker never falls back silently), so a requested worker is
+  // an effective worker or a thrown error — this is an effective-route record.
+  const offloads = Object.freeze({
+    preprocess: options.preprocessWorker ? 'worker' : 'main',
+    clipPrep: options.clipPrepWorker ? 'worker' : 'main',
+    marchingTet: options.marchingTetWorker ? 'worker' : 'main',
+    uvUnwrap: options.uvUnwrapWorker ? 'worker' : 'main',
+    materialize: options.materializeWorker ? 'worker' : 'main',
+  });
+
   return {
     stageSpans: spans,
     glb,                                   // ArrayBuffer
     numVertices: meshResult.numVertices,
     numFaces: meshResult.numFaces,
+    vertices: meshResult.vertices,         // Float32Array [numVertices*3]
+    faces: meshResult.faces,               // Uint32Array [numFaces*3]
+    offloads,
     uvNumVertices: uvResult.newNumVertices,
     uvNumFaces: uvResult.newNumFaces,
     roughness,

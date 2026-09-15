@@ -79,9 +79,11 @@ export function defineTwoStreamManifest(options = {}) {
 export async function driveTwoStreamBoundary(cooperative, options) {
   const {
     encodeStage,
-    submitStage,
     now = () => globalThis.performance?.now?.() ?? Date.now(),
   } = options;
+  if (options.submitStage != null) {
+    throw new TypeError('submitStage is unsupported: the kit owns queue.submit (>=0.1.41); encodeStage must return the command buffer');
+  }
   const gpu = cooperative.startBoundary(TWO_STREAM_BOUNDARY_ID);
   const telemetry = [];
 
@@ -112,6 +114,8 @@ export async function driveTwoStreamBoundary(cooperative, options) {
       dutyMs: null,
     };
 
+    // kit >=0.1.41: encode returns the command buffer; the kit submits it and
+    // captures the queue-prefix fence. Submit timing stays null (kit-owned).
     await gpu.runGpuDuty(range, {
       encode() {
         timing.encodeStartedAtMs = now();
@@ -119,13 +123,6 @@ export async function driveTwoStreamBoundary(cooperative, options) {
         timing.encodeCompletedAtMs = now();
         timing.encodeMs = timing.encodeCompletedAtMs - timing.encodeStartedAtMs;
         return commandBuffer;
-      },
-      submit(commandBuffer) {
-        timing.submitStartedAtMs = now();
-        const result = submitStage(commandBuffer, { stageIndex, stageId, range });
-        timing.submitCompletedAtMs = now();
-        timing.submitMs = timing.submitCompletedAtMs - timing.submitStartedAtMs;
-        return result;
       },
     });
 
@@ -148,9 +145,11 @@ export async function driveTwoStreamAttentionBoundary(cooperative, options) {
   const {
     plan,
     encodeDuty,
-    submitDuty,
     now = () => globalThis.performance?.now?.() ?? Date.now(),
   } = options;
+  if (options.submitDuty != null) {
+    throw new TypeError('submitDuty is unsupported: the kit owns queue.submit (>=0.1.41); encodeDuty must return the command buffer');
+  }
   const gpu = cooperative.startBoundary(TWO_STREAM_ATTENTION_BOUNDARY_ID);
   const telemetry = [];
 
@@ -190,6 +189,7 @@ export async function driveTwoStreamAttentionBoundary(cooperative, options) {
       dutyMs: null,
     };
 
+    // kit >=0.1.41: encode returns the command buffer; the kit submits it.
     await gpu.runGpuDuty(range, {
       encode() {
         timing.encodeStartedAtMs = now();
@@ -197,13 +197,6 @@ export async function driveTwoStreamAttentionBoundary(cooperative, options) {
         timing.encodeCompletedAtMs = now();
         timing.encodeMs = timing.encodeCompletedAtMs - timing.encodeStartedAtMs;
         return commandBuffer;
-      },
-      submit(commandBuffer) {
-        timing.submitStartedAtMs = now();
-        const result = submitDuty(commandBuffer, { duty, range });
-        timing.submitCompletedAtMs = now();
-        timing.submitMs = timing.submitCompletedAtMs - timing.submitStartedAtMs;
-        return result;
       },
     });
     timing.dutyCompletedAtMs = now();
@@ -300,9 +293,6 @@ export async function runCooperativeTwoStream(options) {
           backbone.dispatchAttentionForwardDuty(encoder, state, duty.dutyIndex);
           return encoder.finish();
         },
-        submitDuty(commandBuffer) {
-          runtime.queue.submit([commandBuffer]);
-        },
       })
       : await driveTwoStreamBoundary(cooperative, {
         now,
@@ -313,9 +303,6 @@ export async function runCooperativeTwoStream(options) {
           });
           backbone.dispatchForwardStage(encoder, state, stageIndex);
           return encoder.finish();
-        },
-        submitStage(commandBuffer) {
-          runtime.queue.submit([commandBuffer]);
         },
       });
     stageTelemetry = driven.telemetry;

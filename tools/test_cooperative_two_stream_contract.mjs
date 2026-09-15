@@ -44,6 +44,7 @@ assert.equal(boundary.progressWeight, 22);
 assert.deepEqual(boundary.chunking, { mode: 'fixed', chunkItems: 1 });
 console.log('ok  two-stream manifest declares the complete twenty-two-stage graph');
 
+const events = [];
 function makeCooperative(totalRanges = TWO_STREAM_DUTY_COUNT) {
   let index = 0;
   return {
@@ -56,9 +57,14 @@ function makeCooperative(totalRanges = TWO_STREAM_DUTY_COUNT) {
           return { itemStart, itemEnd: itemStart + 1, itemCount: 1 };
         },
         async runGpuDuty(range, duty) {
+          // kit >=0.1.41 contract: encode returns the command buffer, the kit
+          // submits it, and a producer-side submit callback is rejected.
+          if (duty.submit != null) {
+            throw new TypeError('GPU duty submit callbacks are unsupported; encode must return command buffers');
+          }
           const commandBuffer = duty.encode();
-          duty.submit(commandBuffer);
           assert.equal(commandBuffer.stageIndex, range.itemStart);
+          events.push(`kit-submit:${commandBuffer.stageIndex}`);
         },
       };
     },
@@ -66,16 +72,11 @@ function makeCooperative(totalRanges = TWO_STREAM_DUTY_COUNT) {
 }
 
 let clock = 100;
-const events = [];
 const driven = await driveTwoStreamBoundary(makeCooperative(), {
   encodeStage({ stageIndex, stageId }) {
     events.push(`encode:${stageIndex}:${stageId}`);
     clock += 2;
     return { stageIndex, stageId };
-  },
-  submitStage(commandBuffer) {
-    events.push(`submit:${commandBuffer.stageIndex}`);
-    clock += 1;
   },
   now: () => clock,
 });
@@ -94,16 +95,17 @@ assert.deepEqual(
     stageIndex,
     stageId,
     encodeMs: 2,
-    dutyMs: 3,
+    dutyMs: 2,
   })),
 );
-assert.equal(events.length, 44);
-console.log('ok  driver encodes and submits every two-stream stage exactly once');
+assert.equal(events.length, 44, 'one encode + one kit-owned submit per stage');
+assert.ok(driven.telemetry.every(entry => entry.submitMs === null && entry.submitStartedAtMs === null),
+  'submit timing is kit-owned (null) since 0.1.41');
+console.log('ok  driver encodes every two-stream stage exactly once and lets the kit submit');
 
 await assert.rejects(
   driveTwoStreamBoundary(makeCooperative(21), {
     encodeStage: ({ stageIndex }) => ({ stageIndex }),
-    submitStage() {},
   }),
   /exhausted ranges before stage 21/,
 );
@@ -112,7 +114,6 @@ console.log('ok  driver fails loud on missing declared work');
 await assert.rejects(
   driveTwoStreamBoundary(makeCooperative(23), {
     encodeStage: ({ stageIndex }) => ({ stageIndex }),
-    submitStage() {},
   }),
   /left ranges unconsumed/,
 );
@@ -178,17 +179,17 @@ const fineDriven = await driveTwoStreamAttentionBoundary({
         return { itemStart, itemEnd: itemStart + 1, itemCount: 1 };
       },
       async runGpuDuty(_range, duty) {
-        duty.submit(duty.encode());
+        if (duty.submit != null) {
+          throw new TypeError('GPU duty submit callbacks are unsupported; encode must return command buffers');
+        }
+        const commandBuffer = duty.encode();
+        assert.equal(commandBuffer.dutyIndex, fineRangeIndex - 1);
       },
     };
   },
 }, {
   plan: finePlan,
   encodeDuty: ({ duty }) => ({ dutyIndex: duty.dutyIndex }),
-  submitDuty: commandBuffer => assert.equal(
-    commandBuffer.dutyIndex,
-    fineRangeIndex - 1,
-  ),
 });
 assert.equal(fineDriven.completedDuties, finePlan.length);
 assert.equal(fineDriven.telemetry.length, finePlan.length);

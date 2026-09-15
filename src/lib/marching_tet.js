@@ -7,6 +7,8 @@
  * Output: { vertices: Float32Array([x,y,z,...]), faces: Uint32Array([i,j,k,...]) }
  */
 
+import { callWorker } from './worker_call.js';
+
 // Lookup tables (matching the buffers in system.py)
 const TRIANGLE_TABLE = [
   [-1, -1, -1, -1, -1, -1],
@@ -254,4 +256,50 @@ export function scaleTensor(data, fromRange, toRange) {
     result[i] = data[i] * scale + offset;
   }
   return result;
+}
+
+/**
+ * Validate a marching-tet worker reply before it reaches the texture pipeline.
+ * Rejects malformed geometry (wrong lengths, out-of-range indices, non-finite
+ * positions) instead of passing it downstream.
+ */
+export function validateMarchingTetReply(d) {
+  const numVertices = d?.numVertices;
+  const numFaces = d?.numFaces;
+  if (!Number.isSafeInteger(numVertices) || numVertices <= 0) throw new Error(`marching-tet reply numVertices invalid: ${numVertices}`);
+  if (!Number.isSafeInteger(numFaces) || numFaces <= 0) throw new Error(`marching-tet reply numFaces invalid: ${numFaces}`);
+  if (!(d.vertices instanceof ArrayBuffer) || !(d.faces instanceof ArrayBuffer)) {
+    throw new Error('marching-tet reply must carry vertices and faces ArrayBuffers');
+  }
+  const vertices = new Float32Array(d.vertices);
+  const faces = new Uint32Array(d.faces);
+  if (vertices.length !== numVertices * 3) throw new Error(`marching-tet vertices length ${vertices.length} != ${numVertices * 3}`);
+  if (faces.length !== numFaces * 3) throw new Error(`marching-tet faces length ${faces.length} != ${numFaces * 3}`);
+  for (let i = 0; i < vertices.length; i++) {
+    if (!Number.isFinite(vertices[i])) throw new Error(`marching-tet vertex value non-finite at ${i}`);
+  }
+  for (let i = 0; i < faces.length; i++) {
+    if (faces[i] >= numVertices) throw new Error(`marching-tet face index ${faces[i]} out of range at ${i}`);
+  }
+  return { vertices, faces, numVertices, numFaces };
+}
+
+/**
+ * Run marching tetrahedra on a Worker (marching_tet_worker.js), which owns the
+ * resident tet grid and scales it to `bbox` itself. The caller's sdf and
+ * vertexOffsets are copied, not detached (inference still returns sdf for
+ * parity). Fail-loud through callWorker; never falls back silently.
+ */
+export async function runMarchingTetOnWorker(worker, { sdf, vertexOffsets, bbox, resolution }, { timeoutMs = 30000 } = {}) {
+  if (!(sdf instanceof Float32Array)) throw new TypeError('sdf must be a Float32Array');
+  if (vertexOffsets != null && !(vertexOffsets instanceof Float32Array)) throw new TypeError('vertexOffsets must be a Float32Array or null');
+  const sdfBuf = sdf.slice().buffer;
+  const offBuf = vertexOffsets ? vertexOffsets.slice().buffer : null;
+  const transfer = offBuf ? [sdfBuf, offBuf] : [sdfBuf];
+  return await callWorker(
+    worker,
+    { id: `marching-tet-${Math.random().toString(36).slice(2)}`, sdf: sdfBuf, vertexOffsets: offBuf, bbox, resolution },
+    transfer,
+    { timeoutMs, onResult: validateMarchingTetReply },
+  );
 }

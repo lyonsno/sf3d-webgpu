@@ -11,9 +11,13 @@
 
 import { initGPU } from './lib/gpu.js';
 import { loadWeights } from './lib/weights.js';
-import { initPipelines, runInference } from './lib/inference.js';
-import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './lib/texture_baker.js';
-import { estimateMaterials } from './lib/clip_estimator.js';
+import { initPipelines } from './lib/inference.js';
+import { runFullPipelineToGlb } from './lib/full_pipeline.js';
+import {
+  createProductRouteOptions,
+  createProductRouteWorkers,
+  describeProductRouteOptions,
+} from './lib/product_route.js';
 import {
   createSf3dImageToMeshRouteReceipt,
   createStagedSubmitProfile,
@@ -37,6 +41,7 @@ let pipelines = null;
 let weights = null;
 let inputImage = null;
 let lastGLB = null;
+let routeWorkers = null;
 let _adapterInfo = null;
 let _adapterLimits = null;
 let _adapterFeatures = null;
@@ -81,6 +86,9 @@ async function init() {
 
     // 3. Init compute pipelines
     pipelines = initPipelines(device);
+    // Long-lived CPU offload workers for the product route (preprocess, CLIP
+    // prep, marching tet, UV unwrap, texture materialization).
+    routeWorkers = createProductRouteWorkers();
     setStatus(`Ready. Drop an image to generate a 3D mesh.`);
 
     // Expose for test harness
@@ -163,77 +171,40 @@ runBtn.addEventListener('click', async () => {
 
     const t0 = performance.now();
 
-    // Step 1: Run inference to get untextured mesh + triplane data
-    // runInference covers: image-preprocess, dinov2-tokenizer, two-stream-backbone,
-    // triplane-decode, marching-tet
-    const meshResult = await runInference(device, pipelines, weights, inputImage, (msg) => {
+    // The product route: every proven foreground-liveness mechanism on by
+    // default (cooperative GPU duties, decoder arena, five CPU offload workers)
+    // — the same runFullPipelineToGlb the witness harnesses drive.
+    const options = createProductRouteOptions({ workers: routeWorkers });
+    const result = await runFullPipelineToGlb(device, pipelines, weights, inputImage, options, (msg) => {
       setStatus(msg);
     });
+    const meshResult = {
+      numVertices: result.numVertices,
+      numFaces: result.numFaces,
+      vertices: result.vertices,
+      faces: result.faces,
+    };
 
-    // Record stage timings from inference substages
-    const stageTimings = meshResult._stageTimings || {};
+    // Stage timings for the route receipt: inference substages come back as
+    // timings; the outer stages as absolute spans.
+    const stageTimings = result.stageTimings || {};
     for (const name of ['image-preprocess', 'dinov2-tokenizer', 'two-stream-backbone', 'triplane-decode', 'marching-tet']) {
       addStagedSubmitStage(profile, { name, ms: stageTimings[name] || 0 });
     }
+    const spanMs = (name) => {
+      const span = (result.stageSpans || []).find(s => s.name === name);
+      return span ? span.end - span.start : 0;
+    };
+    addStagedSubmitStage(profile, { name: 'texture-bake', ms: spanMs('texture-bake') });
+    addStagedSubmitStage(profile, { name: 'glb-export', ms: spanMs('glb-export') });
 
-    const meshTime = ((performance.now() - t0) / 1000).toFixed(1);
-    setStatus(`Mesh in ${meshTime}s (${meshResult.numVertices} verts). UV unwrapping...`);
-
-    // Step 2: CLIP material estimation
-    // Match PyTorch preprocessing order exactly:
-    //   1. PIL resize to cond_image_size (512) on uint8 RGBA
-    //   2. Convert to float, alpha-blend with grey [0.5, 0.5, 0.5]
-    //   3. Multiply by mask (alpha)
-    //   4. Estimator resizes 512→224 with bilinear
-    // Canvas drawImage handles the uint8 resize (step 1).
-    const COND_SIZE = 512;
-    const clipCanvas = document.createElement('canvas');
-    clipCanvas.width = COND_SIZE;
-    clipCanvas.height = COND_SIZE;
-    const clipCtx = clipCanvas.getContext('2d');
-    clipCtx.drawImage(inputImage, 0, 0, COND_SIZE, COND_SIZE);
-    const clipRaw = clipCtx.getImageData(0, 0, COND_SIZE, COND_SIZE).data;
-    // Step 2-3: convert to float, alpha-blend with grey, multiply by mask
-    const clipPixels = new Float32Array(COND_SIZE * COND_SIZE * 4);
-    for (let i = 0; i < clipRaw.length; i++) clipPixels[i] = clipRaw[i] / 255.0;
-    for (let i = 0; i < COND_SIZE * COND_SIZE; i++) {
-      const a = clipPixels[i * 4 + 3];
-      clipPixels[i * 4]     = (clipPixels[i * 4] * a + 0.5 * (1 - a)) * a;
-      clipPixels[i * 4 + 1] = (clipPixels[i * 4 + 1] * a + 0.5 * (1 - a)) * a;
-      clipPixels[i * 4 + 2] = (clipPixels[i * 4 + 2] * a + 0.5 * (1 - a)) * a;
-    }
-    const { roughness, metallic } = await estimateMaterials(device, clipPixels, COND_SIZE, COND_SIZE, weights);
-
-    // Step 3: UV unwrap (synchronous cube projection)
-    const uvResult = unwrapUV(
-      meshResult.vertices, meshResult.faces,
-      meshResult.numVertices, meshResult.numFaces);
-    setStatus(`UV unwrap done (${uvResult.newNumVertices} verts). Rasterizing UV space...`);
-
-    // Step 4: Rasterize UV space to get 3D positions per texel
     const texResolution = 1024;
-    const rasterResult = rasterizeUV(
-      uvResult.uvs, uvResult.newVertices, uvResult.newFaces,
-      uvResult.newNumFaces, texResolution, uvResult.faceAssignment);
-    setStatus(`Rasterized ${rasterResult.mask.reduce((a, b) => a + b, 0)} texels. Baking texture...`);
-
-    // Step 5: Bake textures (GPU triplane query + features/perturb_normal decoder)
-    const tBake = performance.now();
-    const bakeResult = await bakeTexture(
-      device, meshResult._triplaneDecoder, meshResult._triplanesBuf,
-      meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
-      rasterResult.tbnData, texResolution);
-    addStagedSubmitStage(profile, { name: 'texture-bake', ms: performance.now() - tBake });
-    setStatus('Textures baked. Building GLB...');
-
-    // Step 6: Export as GLB with CLIP-estimated materials
-    const tGlb = performance.now();
-    lastGLB = await exportGLB(
-      uvResult.newVertices, uvResult.newNormals, uvResult.newFaces, uvResult.uvs,
-      bakeResult.albedo, bakeResult.normalMap,
-      uvResult.newNumVertices, uvResult.newNumFaces, texResolution,
-      roughness, metallic);
-    addStagedSubmitStage(profile, { name: 'glb-export', ms: performance.now() - tGlb });
+    lastGLB = result.glb;
+    window._lastRouteOptions = describeProductRouteOptions(options);
+    window._lastOffloads = result.offloads;
+    window._lastCooperativeReports = result.cooperativeReports;
+    window._lastStageSpans = result.stageSpans;
+    window._lastDensity = result.sdf;
 
     const totalTime = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`Done in ${totalTime}s: ${meshResult.numVertices} vertices, ${meshResult.numFaces} faces, textured GLB ready`);
