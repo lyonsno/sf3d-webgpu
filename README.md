@@ -4,6 +4,13 @@ Single-image 3D mesh generation running entirely in WebGPU compute shaders. A br
 
 No server, no Python, no ONNX at inference time. Image in, textured GLB out.
 
+Built on the [Kaminos WebGPU Inference Kit](https://github.com/lyonsno/kaminos/tree/main/webgpu-inference-kit),
+whose cooperative scheduling lets long inference share one GPU with a live
+WebGPU application — the same runtime spine used by the
+[MoGe](https://github.com/lyonsno/moge-webgpu),
+[Kimodo](https://github.com/lyonsno/kimodo-webgpu), and
+[SHARP](https://github.com/lyonsno/sharp-webgpu) browser ports.
+
 ![Input photo of a chair transformed into a generated 3D mesh](docs/assets/hero-before-after.png)
 
 *A single photo becomes a textured, UV-unwrapped GLB in ~33s on an M4 Max — generated entirely by WebGPU compute shaders in the browser. Output above is the bundled `demo_chair.png` example.*
@@ -99,6 +106,37 @@ node tools/compose_before_after.mjs --input public/demo_chair.png \
 
 14 WGSL compute shaders (shared from MOGE port) + 5 inline shaders in `triplane_decoder.js`.
 
+## Kaminos WebGPU Inference Kit
+
+SF3D WebGPU is a model port of the
+[Kaminos WebGPU Inference Kit](https://github.com/lyonsno/kaminos/tree/main/webgpu-inference-kit)
+([`@kaminos/webgpu-inference-kit`](https://www.npmjs.com/package/@kaminos/webgpu-inference-kit)
+on npm) — a shared runtime that gives browser model ports a common session and
+device lifecycle, persistent model routes, queued invocations, cooperative
+scheduling, and runtime telemetry, while the port keeps ownership of its
+weights, kernels, and output construction.
+
+What the kit buys this port:
+
+- **Cooperative execution.** The DINO backbone, two-stream transformer,
+  post-processor, and texture bake are decomposed into bounded GPU duties the
+  kit can schedule cooperatively, so a live application keeps rendering on the
+  same device while a mesh generates.
+- **Scheduling-independent output.** The final GLB is byte-identical across the
+  monolithic and cooperative scheduling paths (see the
+  [deterministic output receipt](#deterministic-output-receipt)).
+- **Route identity and receipts.** Inference runs under a registered route ID
+  with kit-validated route receipts and staged-submit profiles, so what
+  actually executed — backend, stages, kit version — is inspectable rather
+  than assumed.
+
+Sibling ports on the same runtime: [MoGe](https://github.com/lyonsno/moge-webgpu)
+(depth, normals, and point maps from one image),
+[Kimodo](https://github.com/lyonsno/kimodo-webgpu) (browser motion diffusion),
+and [SHARP](https://github.com/lyonsno/sharp-webgpu) (long image-to-splat
+inference). The kit itself lives in the
+[Kaminos](https://github.com/lyonsno/kaminos) browser-native workbench.
+
 ## Numerical Match to PyTorch
 
 Measured against the original PyTorch pipeline on the bundled `demo_chair.png`:
@@ -122,7 +160,7 @@ SHA-256(demo_chair GLB) = e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f183
 The same hash is emitted by both scheduling paths (monolithic and
 arena-plus-worker) across the A/B/C/D product harness — the output is
 independent of GPU-duty scheduling. The cooperative post-processor also passes
-[`@kaminos/webgpu-inference-kit`](https://github.com/lyonsno/kaminos)'s
+[`@kaminos/webgpu-inference-kit`](https://github.com/lyonsno/kaminos/tree/main/webgpu-inference-kit)'s
 `validateWebGpuCooperativeExecutionReport` against the exact 702-duty
 bounded-prefix contract. Receipts are versioned under
 [`smoke-receipts/`](smoke-receipts/).
