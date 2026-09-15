@@ -32,7 +32,7 @@
     "test:partial-arm-failure": "node tools/test_partial_arm_failure_contract.mjs"
   },
   "devDependencies": {
-    "@kaminos/webgpu-inference-kit": "0.1.42",
+    "@kaminos/webgpu-inference-kit": "0.1.48",
     "puppeteer-core": "^25.2.1",
     "vite": "^6.0.0"
   },
