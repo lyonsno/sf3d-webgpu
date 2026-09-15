@@ -1,0 +1,292 @@
+{
+  "schema": "sf3d.product-route-witness.v0",
+  "generatedAt": "2026-09-15T20:08:49.503Z",
+  "arm": "product-default",
+  "source": {
+    "commit": "2bebf7d505b8de9b43d768d4720472cfecb6f3b6",
+    "dirty": false,
+    "kitVersion": "0.1.48",
+    "hostname": "MacBook-Pro-2.local",
+    "node": "v25.9.0",
+    "label": "session10 four-arm",
+    "backend": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "",
+      "description": "",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+    }
+  },
+  "requested": {
+    "cooperativeDino": true,
+    "cooperativeTwoStream": true,
+    "twoStreamDutyGranularity": "attention-tile",
+    "cooperativePostProcessor": true,
+    "postProcessorDutyGranularity": "channel-range",
+    "postProcessorCompletionPolicy": "bounded-prefix",
+    "cooperativeBake": true,
+    "bakeBatchTexels": 4096,
+    "decoderArena": true,
+    "workers": {
+      "preprocessWorker": true,
+      "clipPrepWorker": true,
+      "marchingTetWorker": true,
+      "uvUnwrapWorker": true,
+      "materializeWorker": true
+    }
+  },
+  "effective": {
+    "offloads": {
+      "preprocess": "worker",
+      "clipPrep": "worker",
+      "marchingTet": "worker",
+      "uvUnwrap": "worker",
+      "materialize": "worker"
+    },
+    "cooperative": {
+      "dinov2-tokenizer": {
+        "status": "succeeded",
+        "schedulingMode": "cooperative",
+        "completionPolicy": "strict-prefix",
+        "routeId": "sf3d.image-to-mesh.webgpu-local.v0",
+        "manifestId": "sf3d.dino-encoder-cooperative-boundaries.v0",
+        "invocationId": "sf3d:dino:cooperative",
+        "issuedGpuDutyCount": 0,
+        "retiredGpuDutyCount": 0,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 0,
+        "gpuDutyCount": null,
+        "progress": {
+          "completedItems": 24,
+          "totalItems": 24,
+          "percent": 100
+        }
+      },
+      "two-stream-backbone": {
+        "status": "succeeded",
+        "schedulingMode": "cooperative",
+        "completionPolicy": "strict-prefix",
+        "routeId": "sf3d.image-to-mesh.webgpu-local.v0",
+        "manifestId": "sf3d.two-stream-attention-cooperative-boundaries.v0",
+        "invocationId": "sf3d:two-stream:cooperative",
+        "issuedGpuDutyCount": 0,
+        "retiredGpuDutyCount": 0,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 0,
+        "gpuDutyCount": null,
+        "progress": {
+          "completedItems": 2922,
+          "totalItems": 2922,
+          "percent": 100
+        }
+      },
+      "post-processor": {
+        "status": "succeeded",
+        "schedulingMode": "cooperative",
+        "completionPolicy": "bounded-prefix",
+        "routeId": "sf3d.image-to-mesh.webgpu-local.v0",
+        "manifestId": "sf3d.post-processor-channel-cooperative-boundaries.v0",
+        "invocationId": "sf3d:post-processor:cooperative",
+        "issuedGpuDutyCount": 702,
+        "retiredGpuDutyCount": 702,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 2,
+        "gpuDutyCount": null,
+        "progress": {
+          "completedItems": 702,
+          "totalItems": 702,
+          "percent": 100
+        }
+      },
+      "texture-bake": {
+        "status": "succeeded",
+        "schedulingMode": "cooperative",
+        "completionPolicy": "strict-prefix",
+        "routeId": "sf3d.image-to-mesh.webgpu-local.v0",
+        "manifestId": "sf3d.texture-bake-cooperative-boundaries.v0",
+        "invocationId": "sf3d:texture-bake:cooperative",
+        "issuedGpuDutyCount": 0,
+        "retiredGpuDutyCount": 0,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 0,
+        "gpuDutyCount": null,
+        "progress": {
+          "completedItems": 245837,
+          "totalItems": 245837,
+          "percent": 100
+        }
+      }
+    },
+    "cooperativeValidations": {
+      "post-processor": {
+        "ok": true,
+        "errors": [],
+        "progressHonest": true
+      }
+    },
+    "materializationOffloaded": true,
+    "visibility": "visible"
+  },
+  "contender": {
+    "enabled": false,
+    "submitted": 0,
+    "completed": 0,
+    "errors": []
+  },
+  "inferenceWindow": {
+    "startMs": 12322.100000023842,
+    "endMs": 52180.200000047684
+  },
+  "totalMs": 39858,
+  "output": {
+    "glbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7",
+    "glbBytes": 2511516,
+    "numVertices": 9988,
+    "numFaces": 19976,
+    "roughness": 0.48291463586899686,
+    "metallic": 0.0013339843040887272,
+    "expectedGlbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7"
+  },
+  "cadence": {
+    "wholeRoute": {
+      "frameIntervalCount": 4741,
+      "p50Ms": 8.3,
+      "p95Ms": 9.8,
+      "p99Ms": 10.2,
+      "maxMs": 26.4,
+      "over16_7": 1,
+      "over33_3": 0,
+      "over100": 0,
+      "worst": [
+        {
+          "startMs": 51515.3,
+          "endMs": 51541.7,
+          "gapMs": 26.4
+        },
+        {
+          "startMs": 28046.2,
+          "endMs": 28056.7,
+          "gapMs": 10.5
+        },
+        {
+          "startMs": 13310.8,
+          "endMs": 13321.2,
+          "gapMs": 10.4
+        },
+        {
+          "startMs": 26352.5,
+          "endMs": 26362.9,
+          "gapMs": 10.4
+        },
+        {
+          "startMs": 28035.8,
+          "endMs": 28046.2,
+          "gapMs": 10.4
+        }
+      ]
+    },
+    "byStage": {
+      "image-preprocess": {
+        "gapCount": 7,
+        "summedGapMs": 59.8,
+        "maxGapMs": 10.2,
+        "over33_3": 0,
+        "durationMs": 393.3
+      },
+      "dinov2-tokenizer": {
+        "gapCount": 116,
+        "summedGapMs": 965.1,
+        "maxGapMs": 10.4,
+        "over33_3": 0,
+        "durationMs": 964.3
+      },
+      "two-stream-backbone": {
+        "gapCount": 3912,
+        "summedGapMs": 32605.6,
+        "maxGapMs": 10.5,
+        "over33_3": 0,
+        "durationMs": 32606.9
+      },
+      "post-processor": {
+        "gapCount": 614,
+        "summedGapMs": 5115.1,
+        "maxGapMs": 10.3,
+        "over33_3": 0,
+        "durationMs": 5110.3
+      },
+      "triplane-decode": {
+        "gapCount": 8,
+        "summedGapMs": 68.4,
+        "maxGapMs": 10.2,
+        "over33_3": 0,
+        "durationMs": 5183
+      },
+      "marching-tet": {
+        "gapCount": 5,
+        "summedGapMs": 41.6,
+        "maxGapMs": 10.1,
+        "over33_3": 0,
+        "durationMs": 38
+      },
+      "clip-material-estimate": {
+        "gapCount": 25,
+        "summedGapMs": 223.8,
+        "maxGapMs": 26.4,
+        "over33_3": 0,
+        "durationMs": 221.9
+      },
+      "uv-unwrap": {
+        "gapCount": 17,
+        "summedGapMs": 142.8,
+        "maxGapMs": 10.3,
+        "over33_3": 0,
+        "durationMs": 148.6
+      },
+      "uv-rasterize": {
+        "gapCount": 2,
+        "summedGapMs": 15.7,
+        "maxGapMs": 8.4,
+        "over33_3": 0,
+        "durationMs": 12.9
+      },
+      "texture-bake": {
+        "gapCount": 32,
+        "summedGapMs": 267.7,
+        "maxGapMs": 9.6,
+        "over33_3": 0,
+        "durationMs": 268.3
+      },
+      "glb-export": {
+        "gapCount": 3,
+        "summedGapMs": 21.9,
+        "maxGapMs": 8.4,
+        "over33_3": 0,
+        "durationMs": 20.3
+      }
+    },
+    "rankedByMaxGap": [
+      "clip-material-estimate",
+      "two-stream-backbone",
+      "dinov2-tokenizer",
+      "post-processor",
+      "uv-unwrap",
+      "image-preprocess",
+      "triplane-decode",
+      "marching-tet",
+      "texture-bake",
+      "uv-rasterize",
+      "glb-export"
+    ]
+  },
+  "stageTimingsMs": {
+    "image-preprocess": 393.2999999523163,
+    "dinov2-tokenizer": 964.3000000715256,
+    "two-stream-backbone": 32606.899999976158,
+    "triplane-decode": 5183,
+    "marching-tet": 38
+  },
+  "verdict": {
+    "ok": true,
+    "errors": []
+  }
+}

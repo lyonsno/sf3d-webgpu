@@ -285,7 +285,7 @@ try {
   if (raw.contender.enabled) console.log(`contender: submitted=${raw.contender.submitted} completed=${raw.contender.completed} errors=${raw.contender.errors.length}`);
   console.log(`GLB sha ${report.output.glbSha256.slice(0, 12)}… (${report.output.glbBytes} B, ${report.output.numVertices}v/${report.output.numFaces}f) expected ${EXPECTED_GLB_SHA ? EXPECTED_GLB_SHA.slice(0, 12) + '…' : 'none'}`);
   console.log(`offloads: ${Object.entries(report.effective.offloads).map(([k, v]) => `${k}=${v}`).join(' ')}`);
-  console.log(`cooperative: ${Object.entries(report.effective.cooperative).map(([k, c]) => `${k}=${c.status}(${c.retiredGpuDutyCount ?? '?'}/${c.issuedGpuDutyCount ?? '?'})`).join(' ') || 'none'}`);
+  console.log(`cooperative: ${Object.entries(report.effective.cooperative).map(([k, c]) => `${k}=${c.status}(${c.progress?.completedItems ?? '?'}/${c.progress?.totalItems ?? '?'} duties${c.completionPolicy === 'bounded-prefix' ? `, bounded depth ${c.maxObservedInFlightGpuDuties}` : ''})`).join(' ') || 'none'}`);
   console.log('stages by max gap:');
   for (const name of report.cadence.rankedByMaxGap.slice(0, 8)) {
     const b = report.cadence.byStage[name];

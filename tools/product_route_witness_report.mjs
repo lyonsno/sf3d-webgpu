@@ -243,6 +243,15 @@ export function acceptProductRouteWitness(report, expectations = {}) {
     if (finite(c.issuedGpuDutyCount) && finite(c.retiredGpuDutyCount) && c.issuedGpuDutyCount !== c.retiredGpuDutyCount) {
       errors.push(`${key} issued ${c.issuedGpuDutyCount} != retired ${c.retiredGpuDutyCount}`);
     }
+    // Strict-prefix boundaries do not carry issued/retired counters; their
+    // settlement evidence is complete denominator-bearing progress.
+    if (c.progress && finite(c.progress.totalItems)) {
+      if (c.progress.completedItems !== c.progress.totalItems) {
+        errors.push(`${key} progress ${c.progress.completedItems}/${c.progress.totalItems} incomplete`);
+      }
+    } else {
+      errors.push(`${key} cooperative report carries no denominator-bearing progress`);
+    }
     const v = report.effective?.cooperativeValidations?.[key];
     if (v && v.ok !== true) errors.push(`${key} kit validation failed: ${(v.errors || []).join('; ')}`);
   }

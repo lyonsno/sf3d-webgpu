@@ -1,0 +1,89 @@
+################ product-default ################
+
+=== SF3D product-route witness: product-default ===
+source 2bebf7d505 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 39858ms  frames=4741  p50/p95/p99/max = 8.3/9.8/10.2/26.4ms  >16.7:1 >33.3:0 >100:0
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=worker clipPrep=worker marchingTet=worker uvUnwrap=worker materialize=worker
+cooperative: dinov2-tokenizer=succeeded(0/0) two-stream-backbone=succeeded(0/0) post-processor=succeeded(702/702) texture-bake=succeeded(0/0)
+stages by max gap:
+  clip-material-estimate   maxGap=   26.4ms  >33.3×0  summed=  223.8ms  dur=221.9ms
+  two-stream-backbone      maxGap=   10.5ms  >33.3×0  summed=32605.6ms  dur=32606.9ms
+  dinov2-tokenizer         maxGap=   10.4ms  >33.3×0  summed=  965.1ms  dur=964.3ms
+  post-processor           maxGap=   10.3ms  >33.3×0  summed= 5115.1ms  dur=5110.3ms
+  uv-unwrap                maxGap=   10.3ms  >33.3×0  summed=  142.8ms  dur=148.6ms
+  image-preprocess         maxGap=   10.2ms  >33.3×0  summed=   59.8ms  dur=393.3ms
+  triplane-decode          maxGap=   10.2ms  >33.3×0  summed=   68.4ms  dur=5183ms
+  marching-tet             maxGap=   10.1ms  >33.3×0  summed=   41.6ms  dur=38ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/witness-product-default-0915.json
+
+WITNESS ACCEPTED
+
+################ product-default-contend ################
+
+=== SF3D product-route witness: product-default+contend ===
+source 2bebf7d505 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 39804.7ms  frames=4768  p50/p95/p99/max = 8.3/9.9/10.3/49.4ms  >16.7:3 >33.3:1 >100:0
+contender: submitted=72097 completed=72097 errors=0
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=worker clipPrep=worker marchingTet=worker uvUnwrap=worker materialize=worker
+cooperative: dinov2-tokenizer=succeeded(0/0) two-stream-backbone=succeeded(0/0) post-processor=succeeded(702/702) texture-bake=succeeded(0/0)
+stages by max gap:
+  image-preprocess         maxGap=   49.4ms  >33.3×1  summed=   99.3ms  dur=97.9ms
+  clip-material-estimate   maxGap=   32.2ms  >33.3×0  summed=  200.9ms  dur=202.5ms
+  uv-rasterize             maxGap=   16.8ms  >33.3×0  summed=   16.8ms  dur=13.4ms
+  two-stream-backbone      maxGap=   10.4ms  >33.3×0  summed=32906.9ms  dur=32912.6ms
+  dinov2-tokenizer         maxGap=   10.3ms  >33.3×0  summed=  950.3ms  dur=949ms
+  post-processor           maxGap=   10.3ms  >33.3×0  summed= 5058.5ms  dur=5053.2ms
+  marching-tet             maxGap=   10.1ms  >33.3×0  summed=   42.2ms  dur=37.8ms
+  triplane-decode          maxGap=    9.9ms  >33.3×0  summed=   74.6ms  dur=5132.7ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/witness-product-default-contend-0915.json
+
+WITNESS ACCEPTED
+
+################ monolithic ################
+
+=== SF3D product-route witness: monolithic ===
+source 2bebf7d505 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 22335.1ms  frames=2563  p50/p95/p99/max = 8.3/10.1/10.3/409.9ms  >16.7:5 >33.3:4 >100:4
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=main clipPrep=main marchingTet=main uvUnwrap=main materialize=main
+cooperative: none
+stages by max gap:
+  image-preprocess         maxGap=  409.9ms  >33.3×1  summed=  409.9ms  dur=401.9ms
+  clip-material-estimate   maxGap=  225.9ms  >33.3×1  summed=  299.9ms  dur=307.9ms
+  texture-bake             maxGap=  175.4ms  >33.3×1  summed=  216.8ms  dur=215.2ms
+  uv-unwrap                maxGap=  174.8ms  >33.3×1  summed=  174.8ms  dur=155.3ms
+  marching-tet             maxGap=   33.3ms  >33.3×0  summed=   41.8ms  dur=31.8ms
+  post-processor           maxGap=   10.4ms  >33.3×0  summed=20794.5ms  dur=20796.4ms
+  triplane-decode          maxGap=   10.1ms  >33.3×0  summed=    368ms  dur=21168.9ms
+  glb-export               maxGap=    8.5ms  >33.3×0  summed=   16.1ms  dur=20.9ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/witness-monolithic-0915.json
+
+WITNESS ACCEPTED
+
+################ monolithic-contend ################
+
+=== SF3D product-route witness: monolithic+contend ===
+source 2bebf7d505 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 21899ms  frames=2545  p50/p95/p99/max = 8.3/10/10.3/199.9ms  >16.7:9 >33.3:4 >100:4
+contender: submitted=11635 completed=11635 errors=0
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=main clipPrep=main marchingTet=main uvUnwrap=main materialize=main
+cooperative: none
+stages by max gap:
+  clip-material-estimate   maxGap=  199.9ms  >33.3×1  summed=    266ms  dur=275.1ms
+  texture-bake             maxGap=  176.3ms  >33.3×1  summed=  208.2ms  dur=206.7ms
+  uv-unwrap                maxGap=  175.7ms  >33.3×1  summed=  175.7ms  dur=151.4ms
+  image-preprocess         maxGap=  115.9ms  >33.3×1  summed=  121.2ms  dur=111.6ms
+  marching-tet             maxGap=   25.2ms  >33.3×0  summed=   33.1ms  dur=27.3ms
+  post-processor           maxGap=   23.5ms  >33.3×0  summed=20994.4ms  dur=20994.1ms
+  triplane-decode          maxGap=   10.3ms  >33.3×0  summed=   76.7ms  dur=21076.4ms
+  two-stream-backbone      maxGap=    9.1ms  >33.3×0  summed=    9.1ms  dur=13.9ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/witness-monolithic-contend-0915.json
+
+WITNESS ACCEPTED
+
+################ done ################
+
+[exited with code 0]

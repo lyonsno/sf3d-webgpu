@@ -93,15 +93,16 @@ node tools/compose_before_after.mjs --input public/demo_chair.png \
 
 | Stage | Module | Runs on |
 |-------|--------|---------|
-| Image preprocessing | `inference.js` | CPU |
+| Image preprocessing | `inference.js` | CPU (Web Worker) |
 | Camera embedding | `inference.js` | GPU |
-| DINOv2 ViT-Large backbone | `sf3d_backbone.js` | GPU |
-| Two-stream interleave transformer | `two_stream.js` | GPU |
-| PixelShuffle post-processor | `post_processor.js` | GPU |
+| DINOv2 ViT-Large backbone | `sf3d_backbone.js` | GPU (cooperative duties) |
+| Two-stream interleave transformer | `two_stream.js` | GPU (cooperative duties) |
+| PixelShuffle post-processor | `post_processor.js` | GPU (cooperative duties, bounded-prefix) |
 | Triplane query + MaterialMLP decoder | `triplane_decoder.js` | GPU |
-| Marching tetrahedra | `marching_tet.js` | CPU |
-| UV unwrap (PCA + cube projection + BVH overlap) | `texture_baker.js` | CPU |
-| Texture bake (triplane query per texel) | `texture_baker.js` | GPU |
+| Marching tetrahedra | `marching_tet.js` | CPU (Web Worker) |
+| CLIP material estimate | `clip_estimator.js` | CPU prep (Web Worker) + GPU |
+| UV unwrap (PCA + cube projection + BVH overlap) | `texture_baker.js` | CPU (Web Worker) |
+| Texture bake (triplane query per texel) | `texture_baker.js` | GPU (cooperative duties) + CPU materialization (Web Worker) |
 | GLB export | `texture_baker.js` | CPU |
 
 14 WGSL compute shaders (shared from MOGE port) + 5 inline shaders in `triplane_decoder.js`.
@@ -125,6 +126,9 @@ What the kit buys this port:
 - **Scheduling-independent output.** The final GLB is byte-identical across the
   monolithic and cooperative scheduling paths (see the
   [deterministic output receipt](#deterministic-output-receipt)).
+- **Runtime primitives.** Kit resource caches compile the CLIP estimator's
+  inline kernels once per device, and the kit's numerical-parity comparison
+  drives the PyTorch parity tooling (`tools/smoke_parity.mjs`).
 - **Route identity and receipts.** Inference runs under a registered route ID
   with kit-validated route receipts and staged-submit profiles, so what
   actually executed — backend, stages, kit version — is inspectable rather
@@ -136,6 +140,52 @@ Sibling ports on the same runtime: [MoGe](https://github.com/lyonsno/moge-webgpu
 and [SHARP](https://github.com/lyonsno/sharp-webgpu) (long image-to-splat
 inference). The kit itself lives in the
 [Kaminos](https://github.com/lyonsno/kaminos) browser-native workbench.
+
+## Foreground liveness
+
+The app runs the **product route**: every long GPU stage executes as
+cooperative duties through the kit, and every CPU stage runs on a Web Worker,
+so the page — and any other WebGPU work sharing the device — keeps its frame
+cadence while a mesh generates. This is the default in `src/main.js`, composed
+in one place by [`src/lib/product_route.js`](src/lib/product_route.js):
+
+| Stage | Mechanism |
+|-------|-----------|
+| Image preprocessing (Lanczos resize, blend, normalize) | Web Worker |
+| DINOv2 ViT-Large | 24 cooperative GPU duties (one per block) |
+| Two-stream transformer | cooperative attention-tile duties, 256 linear rows per duty (2,922 duties) |
+| PixelShuffle post-processor | 702 cooperative channel-range duties, bounded-prefix completion, depth 2 |
+| Marching tetrahedra | Web Worker owning the resident tet grid |
+| CLIP material estimate | blend / resize / patch-embed on a Web Worker; transformer on GPU with kit-cached pipelines |
+| UV unwrap | Web Worker |
+| Texture bake | 4,096-texel cooperative GPU duties over a scratch arena; albedo/normal materialization on a Web Worker |
+
+Measured with [`tools/smoke_product_route.mjs`](tools/smoke_product_route.mjs)
+on an M4 Max in Chrome (`apple/metal-3`), same commit and `demo_chair.png`,
+requestAnimationFrame intervals scoped to the inference window. `--contend`
+adds a same-page WebGPU contender on a second device that submits compute work
+continuously, so "smooth" means smooth while sharing the GPU:
+
+| Route | Wall | Frame intervals | p95 / p99 | Max gap | > 33.3 ms | Contender submissions |
+|-------|------|-----------------|-----------|---------|-----------|-----------------------|
+| Single submit, CPU stages on the main thread | 22.3 s | 2,563 | 10.1 / 10.3 ms | 409.9 ms | 4 | — |
+| Single submit + contender | 21.9 s | 2,545 | 10.0 / 10.3 ms | 199.9 ms | 4 | 11,635 |
+| **Product route (default)** | 39.9 s | 4,741 | 9.8 / 10.2 ms | **26.4 ms** | **0** | — |
+| **Product route + contender** | 39.8 s | 4,768 | 9.9 / 10.3 ms | **49.4 ms** | **1** | **72,097** |
+
+The whole-route tail drops from hundreds of milliseconds (image preprocess,
+CLIP, UV unwrap, texture bake) to under two frames, and a co-tenant sharing the
+GPU gets six times more work through, because the two-stream stage no longer
+monopolizes the device between submissions. The cost is wall time: the fine
+two-stream duties make the route about 1.8× longer than the single-submit
+path. The GLB is byte-identical in every row. Receipts:
+[`smoke-receipts/product-route-witness-*_2bebf7d.json`](smoke-receipts/).
+
+```bash
+npm run smoke:product-route                      # product route, idle page
+npm run smoke:product-route -- --contend         # with a same-page WebGPU contender
+npm run smoke:product-route -- --arm monolithic  # the single-submit baseline
+```
 
 ## Numerical Match to PyTorch
 
@@ -178,6 +228,11 @@ src/
     marching_tet.js       CPU marching tetrahedra mesh extraction
     texture_baker.js      UV unwrap, rasterize, bake albedo+normal, GLB export
     weights.js            Weight file loader with tensor name mapping
+    product_route.js      Product default composition (cooperative duties + workers)
+    full_pipeline.js      The complete route as one callable (app + harnesses)
+    clip_prep_core.js     CLIP CPU prep (pure); clip_prep_worker.js runs it
+    marching_tet_worker.js  Marching tetrahedra on a worker owning the tet grid
+    preprocess_worker.js / uv_unwrap_worker.js / materialize_worker.js  CPU offloads
     gpu.js                WebGPU initialization + buffer helpers
     shader_ops.js         Shared shader dispatch helpers
   main.js                 Browser UI wiring
@@ -185,6 +240,8 @@ src/
 tools/
   convert_weights.py      PyTorch -> flat binary fp16 weight converter
   smoke_inference.mjs     Puppeteer-driven browser smoke test
+  smoke_product_route.mjs   Foreground-liveness witness (rAF probe, contender, receipts)
+  smoke_parity.mjs        Per-stage PyTorch parity via the kit's parity primitives
   render_glb_hero.mjs     Render a GLB to a hero still (model-viewer)
   compose_before_after.mjs  Compose input-photo / generated-mesh banner
   compare_density.py      PyTorch reference density comparison
@@ -215,6 +272,7 @@ The texture baker implements SF3D's cube-projection UV unwrapper with:
 | 4 | 2026-06-30 | UV atlas splitting: bbox normalization, overlap detection, sub-texel fixes |
 | 5 | 2026-07-01 | Tangent UV rotation, PyTorch-matching axes, PCA alignment, BVH overlap detection, visual parity |
 | 6–11 | 2026-07 | Cooperative WebGPU execution: DINO/two-stream/post-processor duty decomposition, scratch-arena + worker offload, bounded-prefix scheduling, `@kaminos/webgpu-inference-kit` conformance, byte-identical output across scheduling paths |
+| 12 | 2026-09-15 | Kit 0.1.48; product route composed by default (every cooperative boundary + five workers); two-stream submit-contract fix; CLIP-prep and marching-tet workers; four-arm liveness witness with same-page contender; kit parity primitives in the parity tooling |
 
 ## License
 
