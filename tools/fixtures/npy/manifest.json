@@ -1,0 +1,166 @@
+{
+  "generator": "numpy",
+  "numpyVersion": "2.4.4",
+  "files": {
+    "f4_3.npy": {
+      "dtype": "<f4",
+      "shape": [
+        3
+      ],
+      "fortran_order": false,
+      "c_order_values": [
+        1.0,
+        -2.5,
+        0.0
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 140
+    },
+    "f2_3.npy": {
+      "dtype": "<f2",
+      "shape": [
+        3
+      ],
+      "fortran_order": false,
+      "c_order_values": [
+        1.0,
+        -2.5,
+        0.0
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 134
+    },
+    "f2_edge_4.npy": {
+      "dtype": "<f2",
+      "shape": [
+        4
+      ],
+      "fortran_order": false,
+      "c_order_values": [
+        0.5,
+        65504.0,
+        5.960464477539063e-08,
+        -0.0
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 136
+    },
+    "i4_2x2.npy": {
+      "dtype": "<i4",
+      "shape": [
+        2,
+        2
+      ],
+      "fortran_order": false,
+      "c_order_values": [
+        1,
+        -2,
+        3,
+        -4
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 144
+    },
+    "u4_2.npy": {
+      "dtype": "<u4",
+      "shape": [
+        2
+      ],
+      "fortran_order": false,
+      "c_order_values": [
+        7,
+        4294967295
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 136
+    },
+    "u1_4.npy": {
+      "dtype": "|u1",
+      "shape": [
+        4
+      ],
+      "fortran_order": false,
+      "c_order_values": [
+        0,
+        1,
+        254,
+        255
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 132
+    },
+    "i8_3.npy": {
+      "dtype": "<i8",
+      "shape": [
+        3
+      ],
+      "fortran_order": false,
+      "c_order_values": [
+        0,
+        535881,
+        -7
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 152
+    },
+    "f4_1x3x1.npy": {
+      "dtype": "<f4",
+      "shape": [
+        1,
+        3,
+        1
+      ],
+      "fortran_order": false,
+      "c_order_values": [
+        0.25,
+        -0.5,
+        8.0
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 140
+    },
+    "f4_fortran_2x2.npy": {
+      "dtype": "<f4",
+      "shape": [
+        2,
+        2
+      ],
+      "fortran_order": true,
+      "c_order_values": [
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "npy_version": [
+        1,
+        0
+      ],
+      "size_bytes": 144
+    }
+  }
+}
