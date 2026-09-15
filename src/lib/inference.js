@@ -743,6 +743,12 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     // Expose for parity verification (sdf = density - threshold; add threshold back for raw)
     _sdf: sdf,
     _isosurfaceThreshold: CONFIG.isosurfaceThreshold,
+    // Raw decoder vertex offsets (pre tanh/scale, [N*3]), scaled grid positions
+    // ([N*3]), and the camera-embedding GPU buffer ([768] f32) for element-wise
+    // comparison against tools/dump_parity_reference.py (tools/smoke_parity.mjs).
+    _vertexOffsets: vertexOffsets,
+    _gridPositions: gridPositions,
+    _cameraEmbedBuf: cameraEmbedBuf,
   };
 }
 

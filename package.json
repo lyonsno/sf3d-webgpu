@@ -35,7 +35,8 @@
     "test:clip-pipeline-cache": "node tools/test_clip_pipeline_cache_contract.mjs",
     "test:marching-tet-worker": "node tools/test_marching_tet_worker_contract.mjs",
     "test:product-route-witness-report": "node tools/test_product_route_witness_report.mjs",
-    "smoke:product-route": "node tools/smoke_product_route.mjs"
+    "smoke:product-route": "node tools/smoke_product_route.mjs",
+    "test:parity-compare": "node tools/test_parity_compare_contract.mjs"
   },
   "devDependencies": {
     "@kaminos/webgpu-inference-kit": "0.1.48",
