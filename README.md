@@ -73,6 +73,16 @@ but intentionally omit `public/weights.bin` from `dist/`. Deployments must mount
 or stage that model file separately at `/weights.bin`; an ordinary local build
 must not create another multi-gigabyte copy.
 
+### Library build
+
+`npx vite build -c vite.lib.config.js` builds the producer as a library for a
+host that mounts SF3D into its own page: `dist-lib/sf3d-producer.js` (the
+producer with the inference kit bundled, no other dependencies), the five
+worker chunks under `dist-lib/assets/`, and the tet grid under
+`dist-lib/tets/`. URLs are relative to the module, so the host serves the
+directory wherever it likes and points `weightsUrl` at its own copy of
+`weights.bin` (never bundled).
+
 ## Smoke Test
 
 ```bash
@@ -229,6 +239,29 @@ submitted 3,644 frames across the witness interval of a 41.9 s run and all
 producer's idle drain, 1 at run finish) and 25 before or after it; the page's
 largest frame gap was 92.4 ms and the GLB byte-identical. Receipt:
 [`smoke-receipts/product-route-witness-product-default-contend-same-device_ba2b157.json`](smoke-receipts/).
+
+### In the live Kaminos flame
+
+The first real host is the [Kaminos](https://github.com/lyonsno/kaminos)
+volume renderer: branch `cc/slow-sf3d-live-flame-0916` loads the library
+build above through the app's composition-module seam
+(`#composition_module_url=./sf3d-live-flame-inject.mjs`) and runs SF3D beside
+a live basin flame in one page. That app route does not lend out its
+`GPUDevice`, so this composition is the second-device shape: SF3D on its own
+device, the flame on the app's, one GPU underneath, both labeled so in the
+page's HUD. The HUD carries the page's own frame-cadence witness, the duty
+counts, and the GLB hash against the canonical demo-chair hash, and
+[`tools/smoke_live_flame_composition.mjs`](tools/smoke_live_flame_composition.mjs)
+drives the same page in Chrome and records a flame-only baseline before the
+run.
+
+What the first run measured, honestly: the page kept animating throughout,
+but the flame's own per-frame GPU work and SF3D's per-duty fences serialize on
+one GPU with neither side aware of the other, so the two-stream stage advanced
+about ten times slower than standalone (roughly 200 ms per duty against 12 ms)
+and the page's worst frame gap reached 316 ms. That is the measurement that
+decides the next step: the same-device interlock above once the host lends its
+device, or a coarser composition profile of the product route.
 
 ## Numerical Match to PyTorch
 
