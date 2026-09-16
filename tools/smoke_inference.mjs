@@ -93,21 +93,21 @@ const errors = [];
 const pageErrors = [];
 let lastStatus = '';
 
+// Console capture is count-only for ordinary messages. The app emits ~38k
+// console messages per run (per-duty progress); serializing each one through
+// CDP and printing it inflated the measured wall from ~43s to ~120s (measured
+// 2026-09-15: 43.3s count-only vs 119.7s full capture, same machine, same
+// route). A smoke that perturbs the thing it measures is not evidence, so only
+// errors and warnings are materialized; status transitions are still polled.
 page.on('console', (msg) => {
   const type = msg.type();
-  const text = msg.text();
-  consoleMessages.push({ type, text, ts: Date.now() });
-
-  if (type === 'error') {
-    errors.push(text);
-    console.log(`[ERR] ${text.slice(0, 300)}`);
-  } else if (type === 'warning') {
-    console.log(`[WRN] ${text.slice(0, 200)}`);
+  if (type === 'error' || type === 'warning') {
+    const text = msg.text();
+    consoleMessages.push({ type, text, ts: Date.now() });
+    if (type === 'error') { errors.push(text); console.log(`[ERR] ${text.slice(0, 300)}`); }
+    else console.log(`[WRN] ${text.slice(0, 200)}`);
   } else {
-    // Only log non-spammy messages
-    if (!text.startsWith('Loading weights...')) {
-      console.log(`[LOG] ${text.slice(0, 200)}`);
-    }
+    consoleMessages.push({ type, text: null, ts: Date.now() });
   }
 });
 
