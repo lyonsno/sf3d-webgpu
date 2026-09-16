@@ -285,13 +285,16 @@ def _model_identity(model):
         from huggingface_hub import hf_hub_download
         weights = hf_hub_download(repo_id, "model.safetensors", local_files_only=True)
         config = hf_hub_download(repo_id, "config.yaml", local_files_only=True)
+        # The hub cache hands back .../snapshots/<commit>/<file> as a symlink into
+        # blobs/; parse the snapshot commit from the returned path, not its realpath.
         snapshot = None
-        parts = os.path.realpath(weights).split(os.sep)
+        parts = os.path.abspath(weights).split(os.sep)
         if "snapshots" in parts:
             snapshot = parts[parts.index("snapshots") + 1]
         out.update({
             "snapshot_commit": snapshot,
             "weights_path": weights,
+            "weights_blob_path": os.path.realpath(weights),
             "weights_sha256": _sha256_file(weights),
             "weights_bytes": os.path.getsize(weights),
             "config_sha256": _sha256_file(config),
