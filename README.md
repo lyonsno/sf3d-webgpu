@@ -187,6 +187,40 @@ npm run smoke:product-route -- --contend         # with a same-page WebGPU conte
 npm run smoke:product-route -- --arm monolithic  # the single-submit baseline
 ```
 
+### Composing SF3D into a host route
+
+A host that already owns a `GPUDevice` (the Kaminos kiln, for example) runs
+SF3D on that device through [`src/lib/sf3d_producer.js`](src/lib/sf3d_producer.js)
+instead of the app. The producer keeps the product route above and adds the
+kit's foreground-opportunity interlock so the host's own frames are encoded
+between SF3D's GPU duties rather than behind them:
+
+```js
+import { createSf3dProducer } from './src/lib/sf3d_producer.js';
+
+const producer = await createSf3dProducer({ device, adapter, weightsUrl: 'weights.bin' });
+
+// Each host frame: submitted before the next SF3D duty encodes.
+producer.requestForegroundOpportunity({
+  requestId: `frame:${n}`,
+  run(ctx) { const enc = ctx.device.createCommandEncoder(); /* host pass */ ctx.submit([enc.finish()]); },
+});
+
+const { glb, receipt, cooperativeReports, foregroundOpportunityReport } = await producer.run(image, { runId: 'run-1' });
+producer.dispose();
+```
+
+Host frames are serviced at the next cooperative duty boundary; during
+SF3D's CPU-only stretches (UV unwrap, GLB export) the producer services them
+itself within a frame, and outside a run they execute immediately. Every
+receipt says where it was serviced. `npm run smoke:product-route -- --contend-same-device`
+witnesses this shape: a host contender on SF3D's own device, one frame per
+`requestAnimationFrame`. On the same machine as the table above, 3,588 host
+frames were submitted during a 40.7 s run and all 3,588 completed (3,205 at
+duty boundaries, 355 by the producer's idle drain, 1 at run finish, 27 outside
+the run), GLB byte-identical. Receipt:
+[`smoke-receipts/product-route-witness-product-default-contend-same-device_b18db82.json`](smoke-receipts/).
+
 ## Numerical Match to PyTorch
 
 Measured against the original PyTorch pipeline on the bundled `demo_chair.png`:

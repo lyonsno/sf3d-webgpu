@@ -1,0 +1,295 @@
+{
+  "schema": "sf3d.product-route-witness.v0",
+  "generatedAt": "2026-09-16T01:24:20.975Z",
+  "arm": "product-default",
+  "source": {
+    "commit": "b18db82af8a8d801547deaa06ef81a860336e39e",
+    "dirty": false,
+    "kitVersion": "0.1.48",
+    "hostname": "MacBook-Pro-2.local",
+    "node": "v25.9.0",
+    "label": null,
+    "backend": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "",
+      "description": "",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+    }
+  },
+  "requested": {
+    "cooperativeDino": true,
+    "cooperativeTwoStream": true,
+    "twoStreamDutyGranularity": "attention-tile",
+    "cooperativePostProcessor": true,
+    "postProcessorDutyGranularity": "channel-range",
+    "postProcessorCompletionPolicy": "bounded-prefix",
+    "cooperativeBake": true,
+    "bakeBatchTexels": 4096,
+    "decoderArena": true,
+    "workers": {
+      "preprocessWorker": true,
+      "clipPrepWorker": true,
+      "marchingTetWorker": true,
+      "uvUnwrapWorker": true,
+      "materializeWorker": true
+    }
+  },
+  "effective": {
+    "offloads": {
+      "preprocess": "worker",
+      "clipPrep": "worker",
+      "marchingTet": "worker",
+      "uvUnwrap": "worker",
+      "materialize": "worker"
+    },
+    "cooperative": {
+      "dinov2-tokenizer": {
+        "status": "succeeded",
+        "schedulingMode": "cooperative",
+        "completionPolicy": "strict-prefix",
+        "routeId": "sf3d.image-to-mesh.webgpu-local.v0",
+        "manifestId": "sf3d.dino-encoder-cooperative-boundaries.v0",
+        "invocationId": "sf3d:dino:cooperative",
+        "issuedGpuDutyCount": 0,
+        "retiredGpuDutyCount": 0,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 0,
+        "gpuDutyCount": null,
+        "progress": {
+          "completedItems": 24,
+          "totalItems": 24,
+          "percent": 100
+        }
+      },
+      "two-stream-backbone": {
+        "status": "succeeded",
+        "schedulingMode": "cooperative",
+        "completionPolicy": "strict-prefix",
+        "routeId": "sf3d.image-to-mesh.webgpu-local.v0",
+        "manifestId": "sf3d.two-stream-attention-cooperative-boundaries.v0",
+        "invocationId": "sf3d:two-stream:cooperative",
+        "issuedGpuDutyCount": 0,
+        "retiredGpuDutyCount": 0,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 0,
+        "gpuDutyCount": null,
+        "progress": {
+          "completedItems": 2922,
+          "totalItems": 2922,
+          "percent": 100
+        }
+      },
+      "post-processor": {
+        "status": "succeeded",
+        "schedulingMode": "cooperative",
+        "completionPolicy": "bounded-prefix",
+        "routeId": "sf3d.image-to-mesh.webgpu-local.v0",
+        "manifestId": "sf3d.post-processor-channel-cooperative-boundaries.v0",
+        "invocationId": "sf3d:post-processor:cooperative",
+        "issuedGpuDutyCount": 702,
+        "retiredGpuDutyCount": 702,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 2,
+        "gpuDutyCount": null,
+        "progress": {
+          "completedItems": 702,
+          "totalItems": 702,
+          "percent": 100
+        }
+      },
+      "texture-bake": {
+        "status": "succeeded",
+        "schedulingMode": "cooperative",
+        "completionPolicy": "strict-prefix",
+        "routeId": "sf3d.image-to-mesh.webgpu-local.v0",
+        "manifestId": "sf3d.texture-bake-cooperative-boundaries.v0",
+        "invocationId": "sf3d:texture-bake:cooperative",
+        "issuedGpuDutyCount": 0,
+        "retiredGpuDutyCount": 0,
+        "inFlightGpuDutyCount": 0,
+        "maxObservedInFlightGpuDuties": 0,
+        "gpuDutyCount": null,
+        "progress": {
+          "completedItems": 245837,
+          "totalItems": 245837,
+          "percent": 100
+        }
+      }
+    },
+    "cooperativeValidations": {
+      "post-processor": {
+        "ok": true,
+        "errors": [],
+        "progressHonest": true
+      }
+    },
+    "materializationOffloaded": true,
+    "visibility": "visible"
+  },
+  "contender": {
+    "enabled": false,
+    "mode": null,
+    "submitted": 0,
+    "completed": 0,
+    "errors": [],
+    "receipts": null
+  },
+  "foregroundOpportunities": null,
+  "inferenceWindow": {
+    "startMs": 14519.100000023842,
+    "endMs": 56817.300000071526
+  },
+  "totalMs": 42298,
+  "output": {
+    "glbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7",
+    "glbBytes": 2511516,
+    "numVertices": 9988,
+    "numFaces": 19976,
+    "roughness": 0.48291463586899686,
+    "metallic": 0.0013339843040887272,
+    "expectedGlbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7"
+  },
+  "cadence": {
+    "wholeRoute": {
+      "frameIntervalCount": 5035,
+      "p50Ms": 8.3,
+      "p95Ms": 9.2,
+      "p99Ms": 9.3,
+      "maxMs": 324.2,
+      "over16_7": 2,
+      "over33_3": 1,
+      "over100": 1,
+      "worst": [
+        {
+          "startMs": 14519.1,
+          "endMs": 14843.3,
+          "gapMs": 324.2
+        },
+        {
+          "startMs": 56051.5,
+          "endMs": 56084.7,
+          "gapMs": 33.2
+        },
+        {
+          "startMs": 56484.8,
+          "endMs": 56501.5,
+          "gapMs": 16.7
+        },
+        {
+          "startMs": 43455.7,
+          "endMs": 43466.3,
+          "gapMs": 10.6
+        },
+        {
+          "startMs": 45802.7,
+          "endMs": 45812.6,
+          "gapMs": 9.9
+        }
+      ]
+    },
+    "byStage": {
+      "image-preprocess": {
+        "gapCount": 8,
+        "summedGapMs": 382.1,
+        "maxGapMs": 324.2,
+        "over33_3": 1,
+        "durationMs": 380.8
+      },
+      "dinov2-tokenizer": {
+        "gapCount": 134,
+        "summedGapMs": 1113,
+        "maxGapMs": 9.4,
+        "over33_3": 0,
+        "durationMs": 1114
+      },
+      "two-stream-backbone": {
+        "gapCount": 4082,
+        "summedGapMs": 34012.3,
+        "maxGapMs": 10.6,
+        "over33_3": 0,
+        "durationMs": 34013.3
+      },
+      "post-processor": {
+        "gapCount": 706,
+        "summedGapMs": 5882.7,
+        "maxGapMs": 9.4,
+        "over33_3": 0,
+        "durationMs": 5879.8
+      },
+      "triplane-decode": {
+        "gapCount": 10,
+        "summedGapMs": 84,
+        "maxGapMs": 9.2,
+        "over33_3": 0,
+        "durationMs": 5963
+      },
+      "marching-tet": {
+        "gapCount": 5,
+        "summedGapMs": 41.6,
+        "maxGapMs": 8.4,
+        "over33_3": 0,
+        "durationMs": 42.5
+      },
+      "clip-material-estimate": {
+        "gapCount": 30,
+        "summedGapMs": 274.7,
+        "maxGapMs": 33.2,
+        "over33_3": 0,
+        "durationMs": 277.9
+      },
+      "uv-unwrap": {
+        "gapCount": 21,
+        "summedGapMs": 175.3,
+        "maxGapMs": 8.8,
+        "over33_3": 0,
+        "durationMs": 171.7
+      },
+      "uv-rasterize": {
+        "gapCount": 1,
+        "summedGapMs": 16.7,
+        "maxGapMs": 16.7,
+        "over33_3": 0,
+        "durationMs": 15.6
+      },
+      "texture-bake": {
+        "gapCount": 35,
+        "summedGapMs": 291.7,
+        "maxGapMs": 8.9,
+        "over33_3": 0,
+        "durationMs": 298.6
+      },
+      "glb-export": {
+        "gapCount": 3,
+        "summedGapMs": 24.1,
+        "maxGapMs": 8.3,
+        "over33_3": 0,
+        "durationMs": 19.9
+      }
+    },
+    "rankedByMaxGap": [
+      "image-preprocess",
+      "clip-material-estimate",
+      "uv-rasterize",
+      "two-stream-backbone",
+      "dinov2-tokenizer",
+      "post-processor",
+      "triplane-decode",
+      "texture-bake",
+      "uv-unwrap",
+      "marching-tet",
+      "glb-export"
+    ]
+  },
+  "stageTimingsMs": {
+    "image-preprocess": 380.7999999523163,
+    "dinov2-tokenizer": 1114,
+    "two-stream-backbone": 34013.200000047684,
+    "triplane-decode": 5963,
+    "marching-tet": 42.5
+  },
+  "verdict": {
+    "ok": true,
+    "errors": []
+  }
+}

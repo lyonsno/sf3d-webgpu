@@ -1,0 +1,41 @@
+
+=== SF3D product-route witness: product-default+contend-same-device ===
+source b18db82af8 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 40745.8ms  frames=4863  p50/p95/p99/max = 8.3/9.1/9.3/216.8ms  >16.7:2 >33.3:1 >100:1
+contender (same-device-foreground-opportunity): submitted=3588 completed=3588 errors=0
+host frames serviced at: scheduler duty boundary=3205 idle drain=355 run finish=1 outside run=27  (failed=0 canceled=0)
+foreground opportunities: status=succeeded requests=3561 receipts=3561 no-demand boundaries=0 scheduler services=3205 idle drains=355 finish drain serviced=1
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=worker clipPrep=worker marchingTet=worker uvUnwrap=worker materialize=worker
+cooperative: dinov2-tokenizer=succeeded(24/24 duties) two-stream-backbone=succeeded(2922/2922 duties) post-processor=succeeded(702/702 duties, bounded depth 2) texture-bake=succeeded(245837/245837 duties)
+stages by max gap:
+  image-preprocess         maxGap=  216.8ms  >33.3×1  summed=  282.6ms  dur=279.2ms
+  clip-material-estimate   maxGap=   25.9ms  >33.3×0  summed=    200ms  dur=206.9ms
+  two-stream-backbone      maxGap=    9.4ms  >33.3×0  summed=  33550ms  dur=33556.9ms
+  post-processor           maxGap=    9.4ms  >33.3×0  summed= 5115.7ms  dur=5111ms
+  dinov2-tokenizer         maxGap=    9.3ms  >33.3×0  summed=   1000ms  dur=999.5ms
+  triplane-decode          maxGap=    9.3ms  >33.3×0  summed=   92.6ms  dur=5205.4ms
+  texture-bake             maxGap=    9.1ms  >33.3×0  summed=  266.6ms  dur=266.4ms
+  uv-unwrap                maxGap=    8.8ms  >33.3×0  summed=  158.3ms  dur=155.8ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/clean-witness-same-device.json
+
+WITNESS ACCEPTED
+
+=== SF3D product-route witness: product-default ===
+source b18db82af8 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 42298ms  frames=5035  p50/p95/p99/max = 8.3/9.2/9.3/324.2ms  >16.7:2 >33.3:1 >100:1
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=worker clipPrep=worker marchingTet=worker uvUnwrap=worker materialize=worker
+cooperative: dinov2-tokenizer=succeeded(24/24 duties) two-stream-backbone=succeeded(2922/2922 duties) post-processor=succeeded(702/702 duties, bounded depth 2) texture-bake=succeeded(245837/245837 duties)
+stages by max gap:
+  image-preprocess         maxGap=  324.2ms  >33.3×1  summed=  382.1ms  dur=380.8ms
+  clip-material-estimate   maxGap=   33.2ms  >33.3×0  summed=  274.7ms  dur=277.9ms
+  uv-rasterize             maxGap=   16.7ms  >33.3×0  summed=   16.7ms  dur=15.6ms
+  two-stream-backbone      maxGap=   10.6ms  >33.3×0  summed=34012.3ms  dur=34013.3ms
+  dinov2-tokenizer         maxGap=    9.4ms  >33.3×0  summed=   1113ms  dur=1114ms
+  post-processor           maxGap=    9.4ms  >33.3×0  summed= 5882.7ms  dur=5879.8ms
+  triplane-decode          maxGap=    9.2ms  >33.3×0  summed=     84ms  dur=5963ms
+  texture-bake             maxGap=    8.9ms  >33.3×0  summed=  291.7ms  dur=298.6ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/clean-witness-direct.json
+
+WITNESS ACCEPTED
