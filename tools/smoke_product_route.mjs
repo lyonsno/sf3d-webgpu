@@ -34,6 +34,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { spawn, execSync } from 'node:child_process';
 import {
+  CANONICAL_DEMO_CHAIR_DUTY_COUNTS,
   CANONICAL_DEMO_CHAIR_GLB_SHA256,
   acceptProductRouteWitness,
   assembleProductRouteWitness,
@@ -54,27 +55,45 @@ const ARM_NAME = `${ARM.startsWith('{') ? 'custom' : ARM}${CONTEND ? '+contend' 
 const REPORT_PATH = path.resolve(argVal('--report', `/tmp/sf3d-product-route-witness-${ARM_NAME}.json`));
 const expectedShaArg = argVal('--expected-glb-sha', CANONICAL_DEMO_CHAIR_GLB_SHA256);
 const EXPECTED_GLB_SHA = expectedShaArg === 'none' ? null : expectedShaArg;
+// The product-default arm on the canonical image must also reproduce the
+// measured cooperative duty counts (kit submittedGpuDutyCount), not just the GLB.
+const EXPECTED_DUTY_COUNTS = (ARM === 'product-default' && EXPECTED_GLB_SHA === CANONICAL_DEMO_CHAIR_GLB_SHA256)
+  ? CANONICAL_DEMO_CHAIR_DUTY_COUNTS : null;
 const MAX_GAP_BUDGET_MS = argVal('--max-gap-budget-ms', null) == null ? null : Number(argVal('--max-gap-budget-ms'));
 const ALLOW_DIRTY = hasFlag('--allow-dirty');
 
 const KNOWN_ARMS = ['product-default', 'no-workers', 'workers-only', 'monolithic'];
-if (!KNOWN_ARMS.includes(ARM) && !ARM.startsWith('{')) {
-  console.error(`unknown --arm ${ARM}; expected one of ${KNOWN_ARMS.join(', ')} or a JSON overrides object`);
-  process.exit(2);
-}
-if (!fs.existsSync(IMAGE)) { console.error(`image not found: ${IMAGE}`); process.exit(2); }
-if (CONTEND && CONTEND_SAME) { console.error('--contend and --contend-same-device are separate arms; pick one'); process.exit(2); }
-if (CONTEND_SAME && !(ARM === 'product-default' || ARM.startsWith('{'))) {
-  console.error('--contend-same-device runs through the producer (product route); use --arm product-default or a JSON overrides object');
-  process.exit(2);
+// Deterministic failure injection for the failure-report contract
+// (tools/test_witness_failure_report_contract.mjs): the named phase throws at
+// its start, before doing any real work.
+const INJECT_FAILURE = process.env.SF3D_WITNESS_INJECT_FAILURE || null;
+let phase = 'arguments';
+const enterPhase = (name) => {
+  phase = name;
+  if (INJECT_FAILURE === name) throw new Error(`injected failure at ${name}`);
+};
+function validateInvocation() {
+  enterPhase('arguments');
+  if (!KNOWN_ARMS.includes(ARM) && !ARM.startsWith('{')) {
+    throw new Error(`unknown --arm ${ARM}; expected one of ${KNOWN_ARMS.join(', ')} or a JSON overrides object`);
+  }
+  if (CONTEND && CONTEND_SAME) throw new Error('--contend and --contend-same-device are separate arms; pick one');
+  if (CONTEND_SAME && !(ARM === 'product-default' || ARM.startsWith('{'))) {
+    throw new Error('--contend-same-device runs through the producer (product route); use --arm product-default or a JSON overrides object');
+  }
+  enterPhase('input');
+  if (!fs.existsSync(IMAGE)) throw new Error(`image not found: ${IMAGE}`);
 }
 
-function writeFailure(phase, error, partial = {}) {
+function writeFailure(failurePhase, error, partial = {}) {
   const failure = {
     schema: 'sf3d.product-route-witness-failure.v0',
     ok: false,
     arm: ARM_NAME,
-    failurePhase: phase,
+    failurePhase,
+    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, expectedGlbSha: EXPECTED_GLB_SHA, report: REPORT_PATH },
+    // Effective identity as far as it was established when the run died.
+    source: source ?? null,
     error: { message: error?.message || String(error), stack: error?.stack || null },
     partial,
     generatedAt: new Date().toISOString(),
@@ -91,22 +110,29 @@ function allocatePort() {
   });
 }
 
-// --- Source identity (effective, not requested) ---
-const commit = execSync('git rev-parse HEAD', { cwd: REPO }).toString().trim();
-const dirty = execSync('git status --porcelain', { cwd: REPO }).toString().trim().length > 0;
-if (dirty && !ALLOW_DIRTY) {
-  writeFailure('source-identity', new Error('worktree is dirty; commit first or pass --allow-dirty (the report will still record dirty=true)'));
-  process.exit(1);
-}
-const kitVersion = JSON.parse(fs.readFileSync(path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit/package.json'), 'utf8')).version;
-const source = { commit, dirty, kitVersion, hostname: os.hostname(), node: process.version, label: LABEL || null };
-
+let source = null;
+let commit = null, dirty = null, kitVersion = null;
 const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch { /* gone */ } } };
 let browser = null;
 
 try {
+  validateInvocation();
+
+  // --- Source identity (effective, not requested) ---
+  enterPhase('source-identity');
+  commit = execSync('git rev-parse HEAD', { cwd: REPO }).toString().trim();
+  dirty = execSync('git status --porcelain', { cwd: REPO }).toString().trim().length > 0;
+  source = { commit, dirty, kitVersion: null, hostname: os.hostname(), node: process.version, label: LABEL || null };
+  if (dirty && !ALLOW_DIRTY) {
+    throw new Error('worktree is dirty; commit first or pass --allow-dirty (the report will still record dirty=true)');
+  }
+  enterPhase('kit-identity');
+  kitVersion = JSON.parse(fs.readFileSync(path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit/package.json'), 'utf8')).version;
+  source = { ...source, kitVersion };
+
   // --- Serve the checkout ---
+  enterPhase('vite-start');
   const port = await allocatePort();
   const vite = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
   procs.push(vite);
@@ -116,6 +142,7 @@ try {
     vite.on('error', e => { clearTimeout(to); rej(e); });
   });
 
+  enterPhase('browser-launch');
   browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     headless: false,
@@ -130,6 +157,7 @@ try {
   page.on('pageerror', e => { pageErrors.push(e.message); console.error('[pageerror]', e.message); });
   page.on('console', m => { if (m.type() === 'error') console.error('[console.error]', m.text().slice(0, 300)); });
 
+  enterPhase('page-load');
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   const start = Date.now();
   let ready = false;
@@ -147,13 +175,15 @@ try {
   }, imageB64);
 
   // --- The witnessed run ---
-  const raw = await page.evaluate(async ({ armSpec, contend, contendSame }) => {
+  enterPhase('witness');
+  const raw = await page.evaluate(async ({ armSpec, contend, contendSame, expectedDutyCounts }) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const {
       createProductRouteOptions, createProductRouteWorkers, describeProductRouteOptions, terminateProductRouteWorkers,
     } = await import('/src/lib/product_route.js');
     const { projectCooperativeReport } = await import('/tools/product_route_witness_report.mjs');
     const { acceptBoundedPrefixArm, expectedChannelDutyCount } = await import('/tools/bounded_prefix_acceptance.mjs');
+    const { acceptCooperativeMechanismReport } = await import('/tools/cooperative_identity_acceptance.mjs');
 
     const device = window._sf3d_device, weights = window._sf3d_weights, pipelines = window._sf3d_pipelines;
     const producer = window._sf3d_producer;
@@ -297,7 +327,14 @@ try {
 
     const cooperative = {};
     for (const [k, r] of Object.entries(out.cooperativeReports || {})) cooperative[k] = projectCooperativeReport(r);
+    // Kit-backed validation of EVERY requested cooperative mechanism's complete
+    // report (the acceptor treats a missing record as a rejection). The
+    // bounded-prefix post-processor keeps its validator-backed arm acceptance
+    // (plus the progress-string check); the strict-prefix mechanisms go through
+    // the same kit validator with their exact identity and, when pinned, the
+    // measured duty count.
     const cooperativeValidations = {};
+    const requestedDescription = describeProductRouteOptions(options);
     const ppReport = out.cooperativeReports?.['post-processor'];
     if (ppReport && options.cooperativePostProcessor && options.postProcessorDutyGranularity === 'channel-range'
         && options.postProcessorCompletionPolicy === 'bounded-prefix') {
@@ -307,6 +344,15 @@ try {
         maxInFlightGpuDuties: options.postProcessorMaxInFlightGpuDuties,
       });
       cooperativeValidations['post-processor'] = { ok: v.ok, errors: [...v.errors], progressHonest: v.progressHonest };
+    } else if (ppReport && options.cooperativePostProcessor) {
+      const v = acceptCooperativeMechanismReport('post-processor', ppReport, requestedDescription, { expectedGpuDutyCount: expectedDutyCounts?.['post-processor'] ?? null });
+      cooperativeValidations['post-processor'] = { ok: v.ok, errors: [...v.errors] };
+    }
+    for (const key of ['dinov2-tokenizer', 'two-stream-backbone', 'texture-bake']) {
+      const r = out.cooperativeReports?.[key];
+      if (!r) continue;
+      const v = acceptCooperativeMechanismReport(key, r, requestedDescription, { expectedGpuDutyCount: expectedDutyCounts?.[key] ?? null });
+      cooperativeValidations[key] = { ok: v.ok, errors: [...v.errors], expectations: v.expectations };
     }
     const bakeTel = out.cooperativeReports?.['texture-bake']?.textureBakeTelemetry;
     const materializationOffloaded = bakeTel?.materializationOffloaded ?? bakeTel?.phases?.materializationOffloaded ?? null;
@@ -324,11 +370,12 @@ try {
       routeReceiptValidation: out.receiptValidation ?? null,
       backend: { vendor: info.vendor ?? null, architecture: info.architecture ?? null, device: info.device ?? null, description: info.description ?? null, userAgent: navigator.userAgent },
     };
-  }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME });
+  }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME, expectedDutyCounts: EXPECTED_DUTY_COUNTS });
 
   if (pageErrors.length) throw new Error(`page errors during run: ${pageErrors.join(' | ')}`);
 
   // --- Assemble + judge ---
+  enterPhase('assemble');
   const report = assembleProductRouteWitness({
     arm: ARM_NAME,
     source: { ...source, backend: raw.backend },
@@ -344,6 +391,7 @@ try {
   });
   const verdict = acceptProductRouteWitness(report, {
     expectedGlbSha: EXPECTED_GLB_SHA, requireContender: CONTEND || CONTEND_SAME, maxGapBudgetMs: MAX_GAP_BUDGET_MS,
+    expectedDutyCounts: EXPECTED_DUTY_COUNTS,
   });
   if (raw.routeReceiptValidation && raw.routeReceiptValidation.ok !== true) {
     throw new Error(`producer route receipt failed validation: ${(raw.routeReceiptValidation.errors || []).join('; ')}`);
@@ -368,7 +416,7 @@ try {
   }
   console.log(`GLB sha ${report.output.glbSha256.slice(0, 12)}… (${report.output.glbBytes} B, ${report.output.numVertices}v/${report.output.numFaces}f) expected ${EXPECTED_GLB_SHA ? EXPECTED_GLB_SHA.slice(0, 12) + '…' : 'none'}`);
   console.log(`offloads: ${Object.entries(report.effective.offloads).map(([k, v]) => `${k}=${v}`).join(' ')}`);
-  console.log(`cooperative: ${Object.entries(report.effective.cooperative).map(([k, c]) => `${k}=${c.status}(${c.progress?.completedItems ?? '?'}/${c.progress?.totalItems ?? '?'} duties${c.completionPolicy === 'bounded-prefix' ? `, bounded depth ${c.maxObservedInFlightGpuDuties}` : ''})`).join(' ') || 'none'}`);
+  console.log(`cooperative: ${Object.entries(report.effective.cooperative).map(([k, c]) => `${k}=${c.status}(${c.submittedGpuDutyCount ?? '?'} duties submitted, ${c.progress?.completedItems ?? '?'}/${c.progress?.totalItems ?? '?'} items${c.completionPolicy === 'bounded-prefix' ? `, bounded depth ${c.maxObservedInFlightGpuDuties}` : ''})`).join(' ') || 'none'}`);
   console.log('stages by max gap:');
   for (const name of report.cadence.rankedByMaxGap.slice(0, 8)) {
     const b = report.cadence.byStage[name];
@@ -382,7 +430,7 @@ try {
     console.log('\nWITNESS ACCEPTED');
   }
 } catch (err) {
-  writeFailure('witness', err);
+  writeFailure(phase, err);
   process.exitCode = 1;
 } finally {
   if (browser) await browser.close().catch(() => {});

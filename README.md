@@ -13,7 +13,7 @@ WebGPU application — the same runtime spine used by the
 
 ![Input photo of a chair transformed into a generated 3D mesh](docs/assets/hero-before-after.png)
 
-*A single photo becomes a textured, UV-unwrapped GLB in ~33s on an M4 Max — generated entirely by WebGPU compute shaders in the browser. Output above is the bundled `demo_chair.png` example.*
+*A single photo becomes a textured, UV-unwrapped GLB in about 40 s on an M4 Max (the default product route; about 22 s single-submit) — generated entirely by WebGPU compute shaders in the browser. Output above is the bundled `demo_chair.png` example.*
 
 ## Quick Start
 
@@ -28,7 +28,7 @@ hf download BasinShapers/sf3d-webgpu-weights weights.bin --local-dir public/
 npm run dev            # or: npx vite --port 5177
 # Open http://localhost:5177/
 # Click "Try Demo (Chair)" or drop any image
-# Click "Generate 3D Mesh" (~25-35s on M4 Max)
+# Click "Generate 3D Mesh" (about 40 s on M4 Max)
 # Click "Download GLB"
 ```
 
@@ -174,7 +174,7 @@ continuously, so "smooth" means smooth while sharing the GPU:
 | **Product route + contender** | 39.8 s | 4,768 | 9.9 / 10.3 ms | **49.4 ms** | **1** | **72,097** |
 
 The whole-route tail drops from hundreds of milliseconds (image preprocess,
-CLIP, UV unwrap, texture bake) to under two frames, and a co-tenant sharing the
+CLIP, UV unwrap, texture bake) to 26.4 ms idle and 49.4 ms with a contender, and a co-tenant sharing the
 GPU gets six times more work through, because the two-stream stage no longer
 monopolizes the device between submissions. The cost is wall time: the fine
 two-stream duties make the route about 1.8× longer than the single-submit
@@ -215,10 +215,11 @@ SF3D's CPU-only stretches (UV unwrap, GLB export) the producer services them
 itself within a frame, and outside a run they execute immediately. Every
 receipt says where it was serviced. `npm run smoke:product-route -- --contend-same-device`
 witnesses this shape: a host contender on SF3D's own device, one frame per
-`requestAnimationFrame`. On the same machine as the table above, 3,588 host
-frames were submitted during a 40.7 s run and all 3,588 completed (3,205 at
-duty boundaries, 355 by the producer's idle drain, 1 at run finish, 27 outside
-the run), GLB byte-identical. Receipt:
+`requestAnimationFrame`. On the same machine as the table above, the host loop
+submitted 3,588 frames across the witness interval of a 40.7 s run and all
+3,588 completed: 3,561 during the run (3,205 at duty boundaries, 355 by the
+producer's idle drain, 1 at run finish) and 27 before or after it, GLB
+byte-identical. Receipt:
 [`smoke-receipts/product-route-witness-product-default-contend-same-device_b18db82.json`](smoke-receipts/).
 
 ## Numerical Match to PyTorch
@@ -238,7 +239,7 @@ weights → run produces, for `demo_chair.png`:
 
 ```
 SHA-256(demo_chair GLB) = e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7
-9988 vertices · 19976 faces · ~33s end-to-end (M4 Max)
+9988 vertices · 19976 faces · about 40 s end-to-end (M4 Max, product route)
 ```
 
 The same hash is emitted by both scheduling paths (monolithic and

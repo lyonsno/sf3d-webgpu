@@ -88,6 +88,12 @@ export function createForegroundOpportunityBridge({
     const abortController = new AbortController();
     const submissions = [];
     const requestedAtMs = now();
+    // Reserve the id before the callback is invoked (the async body below runs
+    // synchronously up to its first await, so a re-entrant duplicate must
+    // already be visible), exactly as the kit reserves before service.
+    let settledReceipt = null;
+    let resolveReserved;
+    state.outsideRun.inFlight.set(requestId, new Promise(resolve => { resolveReserved = resolve; }));
     const completion = (async () => {
       let result = null;
       let failure = null;
@@ -169,17 +175,19 @@ export function createForegroundOpportunityBridge({
         metadata,
         authority: 'immediate-queue-submit-outside-sf3d-run-no-gpu-completion-or-presentation-claim',
       });
+      settledReceipt = receipt;
       state.outsideRun.inFlight.delete(requestId);
+      resolveReserved(receipt);
       state.outsideRun.receiptCount += 1;
       if (receipt.status === 'completed') state.outsideRun.completedCount += 1; else state.outsideRun.failedCount += 1;
       state.outsideRun.lastReceipt = receipt;
       return receipt;
     })();
-    state.outsideRun.inFlight.set(requestId, completion);
     return Object.freeze({
       requestId,
       completion,
       cancel(reason = 'foreground-opportunity-canceled') {
+        if (settledReceipt) return settledReceipt;   // kit handle shape: settled → the receipt
         abortController.abort(String(reason));
         return Object.freeze({ status: 'cancellation-requested', requestId, reason: String(reason) });
       },
@@ -187,12 +195,16 @@ export function createForegroundOpportunityBridge({
   }
 
   function request(input) {
-    if (state.activeRun) {
+    const run = state.activeRun;
+    if (run && !run.finishing) {
       validateRequest(input);
-      const handle = state.activeRun.interlock.request(input);
-      state.activeRun.requestCount += 1;
+      const handle = run.interlock.request(input);
+      run.requestCount += 1;
       return handle;
     }
+    // No run, or the run is finishing (its GPU work is over; only the final
+    // drain of already-queued demand remains): execute immediately rather than
+    // enter an interlock that will never see another boundary.
     return executeOutsideRun(input);
   }
 
@@ -207,6 +219,7 @@ export function createForegroundOpportunityBridge({
       runId,
       interlock,
       active: true,
+      finishing: false,
       requestCount: 0,
       lastServiceAtMs: now(),
       schedulerBoundaryServiceCount: 0,
@@ -270,14 +283,22 @@ export function createForegroundOpportunityBridge({
 
     async function finish() {
       if (!run.active) throw new Error(`sf3d foreground run ${runId} already finished`);
+      // Atomic closing state: from here no request enters this interlock
+      // (request() reroutes to immediate execution) while state.activeRun stays
+      // set so a second run is still refused until the interlock has finished.
+      run.finishing = true;
       run.active = false;
       if (run.drainTimer != null) { clearTimeout(run.drainTimer); run.drainTimer = null; }
       if (run.drainInFlight) await run.drainInFlight;
       let finishService = null;
-      if (interlock.pressureSnapshot().pendingRequestCount > 0) {
+      let finishBoundarySequence = 0;
+      // Nothing new can enter after `finishing`, so this loop only re-services
+      // demand a concurrent scheduler service turn had not yet captured.
+      while (interlock.pressureSnapshot().pendingRequestCount > 0) {
+        finishBoundarySequence += 1;
         finishService = await interlock.serviceAtBoundary(
-          producerBoundary(SF3D_FOREGROUND_RUN_FINISH_PHASE, 1, 'run-finished-with-pending-foreground-demand'));
-        run.finishDrainServicedCount = finishService.servicedRequestCount ?? 0;
+          producerBoundary(SF3D_FOREGROUND_RUN_FINISH_PHASE, finishBoundarySequence, 'run-finished-with-pending-foreground-demand'));
+        run.finishDrainServicedCount += finishService.servicedRequestCount ?? 0;
       }
       const report = interlock.finish();
       state.activeRun = null;
@@ -311,6 +332,7 @@ export function createForegroundOpportunityBridge({
       runCount: state.runCount,
       activeRun: run ? Object.freeze({
         runId: run.runId,
+        finishing: run.finishing,
         requestCount: run.requestCount,
         pressure: run.interlock.pressureSnapshot(),
         schedulerBoundaryServiceCount: run.schedulerBoundaryServiceCount,

@@ -5,9 +5,18 @@
  * falsifier is rejected with a specific error.
  */
 import assert from 'node:assert/strict';
+import { SF3D_ROUTE_ID as SRC_ROUTE_ID, DINO_COOPERATIVE_MANIFEST_ID } from '../src/lib/cooperative_dino.js';
+import { TWO_STREAM_MANIFEST_ID, TWO_STREAM_ATTENTION_MANIFEST_ID } from '../src/lib/cooperative_two_stream.js';
+import { POST_PROCESSOR_MANIFEST_ID, POST_PROCESSOR_LAYER_MANIFEST_ID, POST_PROCESSOR_CHANNEL_MANIFEST_ID } from '../src/lib/cooperative_post_processor.js';
+import { TEXTURE_BAKE_MANIFEST_ID } from '../src/lib/cooperative_texture_bake.js';
 import {
+  CANONICAL_DEMO_CHAIR_DUTY_COUNTS,
   CANONICAL_DEMO_CHAIR_GLB_SHA256,
+  COOPERATIVE_MECHANISM_IDENTITY,
   PRODUCT_ROUTE_WITNESS_SCHEMA,
+  SF3D_ROUTE_ID,
+  expectedCooperativeIdentity,
+  projectCooperativeReport,
   acceptProductRouteWitness,
   assembleProductRouteWitness,
   attributeGapsToStages,
@@ -63,17 +72,20 @@ function validInput(over = {}) {
     source: { commit: 'abc123', dirty: false, kitVersion: '0.1.48' },
     requestedOptions: {
       cooperativeDino: true, cooperativeTwoStream: true, cooperativePostProcessor: true, cooperativeBake: true,
-      decoderArena: true, postProcessorCompletionPolicy: 'bounded-prefix',
+      decoderArena: true, twoStreamDutyGranularity: 'attention-tile', postProcessorDutyGranularity: 'channel-range', postProcessorCompletionPolicy: 'bounded-prefix',
       workers: { preprocessWorker: true, clipPrepWorker: true, marchingTetWorker: true, uvUnwrapWorker: true, materializeWorker: true },
     },
     offloads: { preprocess: 'worker', clipPrep: 'worker', marchingTet: 'worker', uvUnwrap: 'worker', materialize: 'worker' },
     cooperativeReports: {
-      'dinov2-tokenizer': { status: 'succeeded', schedulingMode: 'cooperative', inFlightGpuDutyCount: 0, progress: { completedItems: 24, totalItems: 24, percent: 100 } },
-      'two-stream-backbone': { status: 'succeeded', schedulingMode: 'cooperative', inFlightGpuDutyCount: 0, progress: { completedItems: 2922, totalItems: 2922, percent: 100 } },
-      'post-processor': { status: 'succeeded', schedulingMode: 'cooperative', completionPolicy: 'bounded-prefix', issuedGpuDutyCount: 702, retiredGpuDutyCount: 702, inFlightGpuDutyCount: 0, maxObservedInFlightGpuDuties: 2, progress: { completedItems: 702, totalItems: 702, percent: 100 } },
-      'texture-bake': { status: 'succeeded', schedulingMode: 'cooperative', inFlightGpuDutyCount: 0, progress: { completedItems: 61, totalItems: 61, percent: 100 } },
+      'dinov2-tokenizer': { status: 'succeeded', schedulingMode: 'cooperative', completionPolicy: 'strict-prefix', routeId: SF3D_ROUTE_ID, manifestId: 'sf3d.dino-encoder-cooperative-boundaries.v0', invocationId: 'sf3d:dino:cooperative', submittedGpuDutyCount: 24, inFlightGpuDutyCount: 0, progress: { completedItems: 24, totalItems: 24, percent: 100 } },
+      'two-stream-backbone': { status: 'succeeded', schedulingMode: 'cooperative', completionPolicy: 'strict-prefix', routeId: SF3D_ROUTE_ID, manifestId: 'sf3d.two-stream-attention-cooperative-boundaries.v0', invocationId: 'sf3d:two-stream:cooperative', submittedGpuDutyCount: 2922, inFlightGpuDutyCount: 0, progress: { completedItems: 2922, totalItems: 2922, percent: 100 } },
+      'post-processor': { status: 'succeeded', schedulingMode: 'cooperative', completionPolicy: 'bounded-prefix', routeId: SF3D_ROUTE_ID, manifestId: 'sf3d.post-processor-channel-cooperative-boundaries.v0', invocationId: 'sf3d:post-processor:cooperative', submittedGpuDutyCount: 702, issuedGpuDutyCount: 702, retiredGpuDutyCount: 702, inFlightGpuDutyCount: 0, maxObservedInFlightGpuDuties: 2, progress: { completedItems: 702, totalItems: 702, percent: 100 } },
+      'texture-bake': { status: 'succeeded', schedulingMode: 'cooperative', completionPolicy: 'strict-prefix', routeId: SF3D_ROUTE_ID, manifestId: 'sf3d.texture-bake-cooperative-boundaries.v0', invocationId: 'sf3d:texture-bake:cooperative', submittedGpuDutyCount: 61, inFlightGpuDutyCount: 0, progress: { completedItems: 245837, totalItems: 245837, percent: 100 } },
     },
-    cooperativeValidations: { 'post-processor': { ok: true, errors: [] } },
+    cooperativeValidations: {
+      'dinov2-tokenizer': { ok: true, errors: [] }, 'two-stream-backbone': { ok: true, errors: [] },
+      'post-processor': { ok: true, errors: [] }, 'texture-bake': { ok: true, errors: [] },
+    },
     materializationOffloaded: true,
     frames, stageSpans: spans, inferenceWindow: window, visibility: 'visible',
     output: { glbSha256: CANONICAL_DEMO_CHAIR_GLB_SHA256, glbBytes: 2511516, numVertices: 9988, numFaces: 19976 },
@@ -123,6 +135,56 @@ assert.throws(() => assembleProductRouteWitness(validInput({ inferenceWindow: { 
 assert.equal(acceptProductRouteWitness(assembleProductRouteWitness(validInput({ contender: { enabled: false } }))).ok, true);
 console.log('ok  window-never-closed refused at assembly; baseline arm without contender accepted');
 
+// --- Review 2026-09-16 HIGH: cooperative identity binding + mandatory kit validation ---
+// The identity table must be the source modules' own constants, not copies that drift.
+assert.equal(SF3D_ROUTE_ID, SRC_ROUTE_ID);
+assert.equal(COOPERATIVE_MECHANISM_IDENTITY['dinov2-tokenizer'].manifestIds.default, DINO_COOPERATIVE_MANIFEST_ID);
+assert.equal(COOPERATIVE_MECHANISM_IDENTITY['two-stream-backbone'].manifestIds['attention-tile'], TWO_STREAM_ATTENTION_MANIFEST_ID);
+assert.equal(COOPERATIVE_MECHANISM_IDENTITY['two-stream-backbone'].manifestIds.stage, TWO_STREAM_MANIFEST_ID);
+assert.equal(COOPERATIVE_MECHANISM_IDENTITY['post-processor'].manifestIds.plane, POST_PROCESSOR_MANIFEST_ID);
+assert.equal(COOPERATIVE_MECHANISM_IDENTITY['post-processor'].manifestIds.layer, POST_PROCESSOR_LAYER_MANIFEST_ID);
+assert.equal(COOPERATIVE_MECHANISM_IDENTITY['post-processor'].manifestIds['channel-range'], POST_PROCESSOR_CHANNEL_MANIFEST_ID);
+assert.equal(COOPERATIVE_MECHANISM_IDENTITY['texture-bake'].manifestIds.default, TEXTURE_BAKE_MANIFEST_ID);
+{
+  const exp = expectedCooperativeIdentity(validInput().requestedOptions);
+  assert.deepEqual(exp['two-stream-backbone'], { routeId: SF3D_ROUTE_ID, manifestId: TWO_STREAM_ATTENTION_MANIFEST_ID, invocationId: 'sf3d:two-stream:cooperative', schedulingMode: 'cooperative', completionPolicy: 'strict-prefix' });
+  assert.deepEqual(exp['post-processor'], { routeId: SF3D_ROUTE_ID, manifestId: POST_PROCESSOR_CHANNEL_MANIFEST_ID, invocationId: 'sf3d:post-processor:cooperative', schedulingMode: 'cooperative', completionPolicy: 'bounded-prefix' });
+  const stage = expectedCooperativeIdentity({ ...validInput().requestedOptions, twoStreamDutyGranularity: 'stage', postProcessorDutyGranularity: 'plane', postProcessorCompletionPolicy: 'strict-prefix' });
+  assert.equal(stage['two-stream-backbone'].manifestId, TWO_STREAM_MANIFEST_ID);
+  assert.equal(stage['post-processor'].manifestId, POST_PROCESSOR_MANIFEST_ID);
+  assert.equal(stage['post-processor'].completionPolicy, 'strict-prefix');
+  assert.equal(expectedCooperativeIdentity({ cooperativeDino: false, cooperativeTwoStream: false, cooperativePostProcessor: false, cooperativeBake: false })['dinov2-tokenizer'], undefined);
+  console.log('ok  expected cooperative identity derives from requested granularity/policy');
+}
+const withReport = (key, patch) => validInput({ cooperativeReports: { ...validInput().cooperativeReports, [key]: { ...validInput().cooperativeReports[key], ...patch } } });
+const identityFalsifiers = [
+  ['wrong two-stream manifest', withReport('two-stream-backbone', { manifestId: 'wrong.manifest' }), /two-stream-backbone manifestId wrong.manifest != expected sf3d.two-stream-attention-cooperative-boundaries.v0/],
+  ['wrong route id', withReport('dinov2-tokenizer', { routeId: 'other.route.v9' }), /dinov2-tokenizer routeId other.route.v9 != expected sf3d.image-to-mesh.webgpu-local.v0/],
+  ['wrong invocation id', withReport('texture-bake', { invocationId: 'sf3d:texture-bake:disabled' }), /texture-bake invocationId sf3d:texture-bake:disabled != expected sf3d:texture-bake:cooperative/],
+  ['missing manifest id', withReport('post-processor', { manifestId: undefined }), /post-processor manifestId missing != expected sf3d.post-processor-channel-cooperative-boundaries.v0/],
+  ['wrong completion policy', withReport('post-processor', { completionPolicy: 'strict-prefix' }), /post-processor completionPolicy strict-prefix != expected bounded-prefix/],
+  ['granularity mismatch', validInput({ requestedOptions: { ...validInput().requestedOptions, twoStreamDutyGranularity: 'stage' } }), /two-stream-backbone manifestId sf3d.two-stream-attention-cooperative-boundaries.v0 != expected sf3d.two-stream-cooperative-boundaries.v0/],
+  ['all validations removed', validInput({ cooperativeValidations: {} }), /dinov2-tokenizer requested but no kit validation record/],
+  ['two-stream validation missing', validInput({ cooperativeValidations: (() => { const v = { ...validInput().cooperativeValidations }; delete v['two-stream-backbone']; return v; })() }), /two-stream-backbone requested but no kit validation record/],
+  ['texture-bake validation missing', validInput({ cooperativeValidations: (() => { const v = { ...validInput().cooperativeValidations }; delete v['texture-bake']; return v; })() }), /texture-bake requested but no kit validation record/],
+  ['validation ok not boolean true', validInput({ cooperativeValidations: { ...validInput().cooperativeValidations, 'dinov2-tokenizer': { ok: 'true', errors: [] } } }), /dinov2-tokenizer kit validation failed/],
+];
+for (const [name, input, re] of identityFalsifiers) {
+  const verdict = acceptProductRouteWitness(assembleProductRouteWitness(input), { requireContender: true });
+  assert.equal(verdict.ok, false, `${name} must be rejected`);
+  assert.match(verdict.errors.join('\n'), re, `${name} must name its reason`);
+  console.log(`ok  rejects: ${name}`);
+}
+{
+  // The reviewer's exact falsifier over a preserved receipt shape: wrong manifest + validations emptied.
+  const tampered = validInput({ cooperativeValidations: {} });
+  tampered.cooperativeReports = { ...tampered.cooperativeReports, 'two-stream-backbone': { ...tampered.cooperativeReports['two-stream-backbone'], manifestId: 'wrong.manifest' } };
+  const verdict = acceptProductRouteWitness(assembleProductRouteWitness(tampered));
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.errors.length >= 5, 'names the manifest mismatch and every missing validation');
+  console.log('ok  rejects: reviewer tamper (wrong manifest + no validations)');
+}
+
 // --- Same-device contender through the producer's foreground-opportunity bridge ---
 // The witness must carry the producer's foreground report and the contender's
 // receipt breakdown, and refuse a run whose foreground demand was left
@@ -156,6 +218,64 @@ for (const [name, input, re] of fgFalsifiers) {
   assert.equal(verdict.ok, false, `${name} must be rejected`);
   assert.match(verdict.errors.join('\n'), re, `${name} must name its reason`);
   console.log(`ok  rejects: ${name}`);
+}
+
+// --- Review 2026-09-16 P1: same-device accounting equalities ---
+// The witness must refuse a same-device arm whose counts do not add up: every
+// submission accounted for, every completion located, in-run receipts equal to
+// the producer's foreground request/receipt counts, and at least one host frame
+// actually serviced inside the run.
+{
+  const adversarial = validInput({
+    foregroundOpportunities: { ...fgReport, requestCount: 0, receiptCount: 0, producer: { ...fgReport.producer, schedulerBoundaryServiceCount: 0, idleDrainBoundaryCount: 0, idleDrainServicedCount: 0, finishDrainServicedCount: 0 } },
+    contender: { ...sameDeviceContender, submitted: 100, completed: 1, receipts: { completed: 1, failed: 0, canceled: 0, outsideRun: 1, schedulerBoundary: 0, idleDrain: 0, runFinish: 0 } },
+  });
+  const verdict = acceptProductRouteWitness(assembleProductRouteWitness(adversarial), { requireContender: true });
+  assert.equal(verdict.ok, false, 'malformed same-device accounting must be rejected');
+  assert.match(verdict.errors.join('\n'), /contender completed 1 != submitted 100/);
+  assert.match(verdict.errors.join('\n'), /serviced zero host frames inside the run/);
+  console.log('ok  rejects: same-device arm with 99 vanished submissions and only outside-run service');
+}
+const accountingFalsifiers = [
+  ['completed != submitted', { ...sameDeviceContender, completed: 119 }, /contender completed 119 != submitted 120/],
+  ['receipt statuses do not sum to submitted', { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, completed: 119 } }, /contender receipts 119\+0\+0 != submitted 120/],
+  ['service locations do not sum to completed', { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, idleDrain: 17 } }, /service locations 119 != completed 120/],
+];
+for (const [name, contender, re] of accountingFalsifiers) {
+  const verdict = acceptProductRouteWitness(assembleProductRouteWitness(validInput({ foregroundOpportunities: fgReport, contender })), { requireContender: true });
+  assert.equal(verdict.ok, false, `${name} must be rejected`);
+  assert.match(verdict.errors.join('\n'), re, `${name} must name its reason`);
+  console.log(`ok  rejects: ${name}`);
+}
+{
+  // In-run receipts (100+18+2 = 120) must equal the producer's request/receipt counts.
+  const fg = { ...fgReport, requestCount: 119, receiptCount: 119 };
+  const verdict = acceptProductRouteWitness(assembleProductRouteWitness(validInput({ foregroundOpportunities: fg, contender: sameDeviceContender })), { requireContender: true });
+  assert.match(verdict.errors.join('\n'), /foreground requestCount 119 != in-run contender receipts 120/);
+  const fg2 = { ...fgReport, producer: { ...fgReport.producer, idleDrainServicedCount: 17 } };
+  const verdict2 = acceptProductRouteWitness(assembleProductRouteWitness(validInput({ foregroundOpportunities: fg2, contender: sameDeviceContender })), { requireContender: true });
+  assert.match(verdict2.errors.join('\n'), /idle drain serviced 17 != idle-drain receipts 18/);
+  console.log('ok  rejects: in-run receipts disagree with the producer foreground report');
+}
+
+// --- Review 2026-09-16 P2: measured duty counts preserved and pinned ---
+{
+  const raw = { status: 'succeeded', schedulingMode: 'cooperative', submittedGpuDutyCount: 61, gpuDuties: new Array(61).fill({}), inFlightGpuDutyCount: 0, progress: { completedItems: 245837, totalItems: 245837 } };
+  const once = projectCooperativeReport(raw);
+  const twice = projectCooperativeReport(once);
+  assert.equal(once.submittedGpuDutyCount, 61, 'kit submitted duty count preserved');
+  assert.equal(once.gpuDutyCount, 61);
+  assert.deepEqual(twice, once, 'projection is idempotent (the browser projects once, assembly projects again)');
+  console.log('ok  projection preserves submittedGpuDutyCount and is idempotent');
+
+  assert.deepEqual(CANONICAL_DEMO_CHAIR_DUTY_COUNTS, { 'dinov2-tokenizer': 24, 'two-stream-backbone': 2922, 'post-processor': 702, 'texture-bake': 61 });
+  const pinned = acceptProductRouteWitness(good, { expectedDutyCounts: CANONICAL_DEMO_CHAIR_DUTY_COUNTS });
+  assert.deepEqual([...pinned.errors], [], 'canonical duty counts accepted');
+  const drifted = assembleProductRouteWitness(validInput({ cooperativeReports: { ...validInput().cooperativeReports, 'texture-bake': { ...validInput().cooperativeReports['texture-bake'], submittedGpuDutyCount: 60 } } }));
+  assert.match(acceptProductRouteWitness(drifted, { expectedDutyCounts: CANONICAL_DEMO_CHAIR_DUTY_COUNTS }).errors.join('\n'), /texture-bake submitted 60 GPU duties, expected 61/);
+  const missing = assembleProductRouteWitness(validInput({ cooperativeReports: { ...validInput().cooperativeReports, 'texture-bake': { status: 'succeeded', schedulingMode: 'cooperative', inFlightGpuDutyCount: 0, progress: { completedItems: 245837, totalItems: 245837 } } } }));
+  assert.match(acceptProductRouteWitness(missing, { expectedDutyCounts: CANONICAL_DEMO_CHAIR_DUTY_COUNTS }).errors.join('\n'), /texture-bake preserves no submitted GPU duty count/);
+  console.log('ok  pinned duty counts: canonical accepted, drift and missing count rejected');
 }
 
 console.log('\nPRODUCT ROUTE WITNESS REPORT CONTRACT PASSED');

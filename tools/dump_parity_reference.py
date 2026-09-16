@@ -247,6 +247,92 @@ def main():
     print(f"\nSummary written to {summary_path}")
     print(f"Reference tensors written to {out_dir}/")
 
+    # Provenance manifest: binds every artifact to the input, the PyTorch/SF3D
+    # source, the model snapshot and weights, and this generator, so a stale,
+    # synthetic or unrelated directory can never pass as parity evidence
+    # (review 2026-09-16, MEDIUM). smoke_parity.mjs refuses a reference
+    # directory without a matching manifest.
+    manifest_path = write_reference_manifest(out_dir, img_path, model)
+    print(f"Manifest written to {manifest_path}")
+
+
+MANIFEST_SCHEMA = "sf3d.parity-reference-manifest.v0"
+
+
+def _sha256_file(path, chunk=1 << 20):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _git_identity(repo):
+    import subprocess
+    try:
+        commit = subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip()
+        dirty = subprocess.check_output(["git", "-C", repo, "status", "--porcelain"], text=True).strip() != ""
+        return {"repo": os.path.abspath(repo), "commit": commit, "dirty": dirty}
+    except Exception as exc:  # noqa: BLE001 - provenance must be honest, not fatal
+        return {"repo": os.path.abspath(repo), "commit": None, "dirty": None, "error": str(exc)}
+
+
+def _model_identity(model):
+    repo_id = "stabilityai/stable-fast-3d"
+    out = {"repo_id": repo_id, "config_name": "config.yaml", "weight_name": "model.safetensors"}
+    try:
+        from huggingface_hub import hf_hub_download
+        weights = hf_hub_download(repo_id, "model.safetensors", local_files_only=True)
+        config = hf_hub_download(repo_id, "config.yaml", local_files_only=True)
+        snapshot = None
+        parts = os.path.realpath(weights).split(os.sep)
+        if "snapshots" in parts:
+            snapshot = parts[parts.index("snapshots") + 1]
+        out.update({
+            "snapshot_commit": snapshot,
+            "weights_path": weights,
+            "weights_sha256": _sha256_file(weights),
+            "weights_bytes": os.path.getsize(weights),
+            "config_sha256": _sha256_file(config),
+        })
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+    out["config"] = {k: getattr(model.cfg, k, None) for k in ("cond_image_size", "default_distance", "default_fovy_deg", "isosurface_resolution")}
+    return out
+
+
+def write_reference_manifest(out_dir, img_path, model):
+    import datetime
+    artifacts = {}
+    for name in sorted(os.listdir(out_dir)):
+        if name == "manifest.json":
+            continue
+        full = os.path.join(out_dir, name)
+        if os.path.isfile(full) and (name.endswith(".npy") or name == "summary.json"):
+            artifacts[name] = {"sha256": _sha256_file(full), "bytes": os.path.getsize(full)}
+    script = os.path.abspath(__file__)
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "input": {"path": os.path.abspath(img_path), "sha256": _sha256_file(img_path), "bytes": os.path.getsize(img_path)},
+        "generator": {
+            "script": os.path.relpath(script, os.getcwd()),
+            "script_sha256": _sha256_file(script),
+            "argv": sys.argv,
+            "cwd": os.getcwd(),
+            "sf3d_webgpu": _git_identity(os.getcwd()),
+        },
+        "sf3d": _git_identity(SF3D_REPO),
+        "model": _model_identity(model),
+        "torch": {"version": torch.__version__, "mps_available": bool(torch.backends.mps.is_available()), "device": "mps" if torch.backends.mps.is_available() else "cpu"},
+        "artifacts": artifacts,
+    }
+    manifest_path = os.path.join(out_dir, "manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest_path
+
 
 if __name__ == "__main__":
     main()

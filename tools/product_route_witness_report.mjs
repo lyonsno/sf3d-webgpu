@@ -19,6 +19,59 @@
 export const PRODUCT_ROUTE_WITNESS_SCHEMA = 'sf3d.product-route-witness.v0';
 export const CANONICAL_DEMO_CHAIR_GLB_SHA256 =
   'e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7';
+/** Measured cooperative duty counts for the product route on demo_chair.png (kit submittedGpuDutyCount). */
+export const CANONICAL_DEMO_CHAIR_DUTY_COUNTS = Object.freeze({
+  'dinov2-tokenizer': 24,
+  'two-stream-backbone': 2922,
+  'post-processor': 702,
+  'texture-bake': 61,
+});
+
+/**
+ * Exact cooperative identity every requested mechanism must carry. Values are
+ * the source modules' constants (asserted equal by the contract test): a report
+ * with any other route/manifest/invocation is not this route's evidence.
+ */
+export const SF3D_ROUTE_ID = 'sf3d.image-to-mesh.webgpu-local.v0';
+export const COOPERATIVE_MECHANISM_IDENTITY = Object.freeze({
+  'dinov2-tokenizer': Object.freeze({
+    flag: 'cooperativeDino', invocationId: 'sf3d:dino:cooperative', completionPolicy: 'strict-prefix',
+    manifestIds: Object.freeze({ default: 'sf3d.dino-encoder-cooperative-boundaries.v0' }),
+  }),
+  'two-stream-backbone': Object.freeze({
+    flag: 'cooperativeTwoStream', invocationId: 'sf3d:two-stream:cooperative', completionPolicy: 'strict-prefix',
+    granularityOption: 'twoStreamDutyGranularity', defaultGranularity: 'stage',
+    manifestIds: Object.freeze({ stage: 'sf3d.two-stream-cooperative-boundaries.v0', 'attention-tile': 'sf3d.two-stream-attention-cooperative-boundaries.v0' }),
+  }),
+  'post-processor': Object.freeze({
+    flag: 'cooperativePostProcessor', invocationId: 'sf3d:post-processor:cooperative',
+    completionPolicyOption: 'postProcessorCompletionPolicy', defaultCompletionPolicy: 'strict-prefix',
+    granularityOption: 'postProcessorDutyGranularity', defaultGranularity: 'plane',
+    manifestIds: Object.freeze({
+      plane: 'sf3d.post-processor-cooperative-boundaries.v0',
+      layer: 'sf3d.post-processor-layer-cooperative-boundaries.v0',
+      'channel-range': 'sf3d.post-processor-channel-cooperative-boundaries.v0',
+    }),
+  }),
+  'texture-bake': Object.freeze({
+    flag: 'cooperativeBake', invocationId: 'sf3d:texture-bake:cooperative', completionPolicy: 'strict-prefix',
+    manifestIds: Object.freeze({ default: 'sf3d.texture-bake-cooperative-boundaries.v0' }),
+  }),
+});
+
+/** Expected {routeId, manifestId, invocationId, schedulingMode, completionPolicy} per requested mechanism. */
+export function expectedCooperativeIdentity(requested = {}) {
+  const out = {};
+  for (const [key, id] of Object.entries(COOPERATIVE_MECHANISM_IDENTITY)) {
+    if (!requested?.[id.flag]) continue;
+    const granularity = id.granularityOption ? (requested[id.granularityOption] ?? id.defaultGranularity) : 'default';
+    const manifestId = id.manifestIds[granularity];
+    if (!manifestId) throw new Error(`${key}: unknown duty granularity ${granularity}`);
+    const completionPolicy = id.completionPolicyOption ? (requested[id.completionPolicyOption] ?? id.defaultCompletionPolicy) : id.completionPolicy;
+    out[key] = Object.freeze({ routeId: SF3D_ROUTE_ID, manifestId, invocationId: id.invocationId, schedulingMode: 'cooperative', completionPolicy });
+  }
+  return Object.freeze(out);
+}
 
 /** Worker option role → key in the full-pipeline `offloads` record. */
 export const WORKER_ROLE_TO_OFFLOAD = Object.freeze({
@@ -134,7 +187,11 @@ export function projectCooperativeReport(report) {
     retiredGpuDutyCount: report.retiredGpuDutyCount ?? null,
     inFlightGpuDutyCount: report.inFlightGpuDutyCount ?? null,
     maxObservedInFlightGpuDuties: report.maxObservedInFlightGpuDuties ?? null,
-    gpuDutyCount: Array.isArray(report.gpuDuties) ? report.gpuDuties.length : null,
+    // The kit's measured submission count; the duty array length is a second
+    // witness of the same fact. Both survive re-projection (the browser projects
+    // once to shrink the payload, assembly projects again).
+    submittedGpuDutyCount: report.submittedGpuDutyCount ?? null,
+    gpuDutyCount: Array.isArray(report.gpuDuties) ? report.gpuDuties.length : (report.gpuDutyCount ?? null),
     progress: report.progress
       ? { completedItems: report.progress.completedItems ?? null, totalItems: report.progress.totalItems ?? null, percent: report.progress.percent ?? null }
       : null,
@@ -215,6 +272,7 @@ export function acceptProductRouteWitness(report, expectations = {}) {
     maxGapBudgetMs = null,
     requireContender = false,
     requireVisible = true,
+    expectedDutyCounts = null,
   } = expectations;
   const errors = [];
   if (report?.schema !== PRODUCT_ROUTE_WITNESS_SCHEMA) errors.push(`schema must be ${PRODUCT_ROUTE_WITNESS_SCHEMA}`);
@@ -250,12 +308,22 @@ export function acceptProductRouteWitness(report, expectations = {}) {
   }
 
   // Requested cooperative mechanisms must have a settled report.
+  let expectedIdentity = {};
+  try { expectedIdentity = expectedCooperativeIdentity(report.requested || {}); } catch (e) { errors.push(e.message); }
   for (const [flag, key] of Object.entries(COOPERATIVE_MECHANISM_TO_REPORT)) {
     if (!report.requested?.[flag]) continue;
     const c = report.effective?.cooperative?.[key];
     if (!c) { errors.push(`${flag} requested but no cooperative report for ${key}`); continue; }
     if (c.status !== 'succeeded') errors.push(`${key} cooperative report status ${c.status ?? 'missing'} != succeeded`);
     if (c.schedulingMode !== 'cooperative') errors.push(`${key} scheduling mode ${c.schedulingMode ?? 'missing'} != cooperative`);
+    // Identity binding: the report must be THIS mechanism's evidence (exact
+    // route / manifest for the requested granularity / invocation / policy).
+    const exp = expectedIdentity[key];
+    if (exp) {
+      for (const field of ['routeId', 'manifestId', 'invocationId', 'completionPolicy']) {
+        if (c[field] !== exp[field]) errors.push(`${key} ${field} ${c[field] ?? 'missing'} != expected ${exp[field]}`);
+      }
+    }
     if (finite(c.inFlightGpuDutyCount) && c.inFlightGpuDutyCount !== 0) errors.push(`${key} left ${c.inFlightGpuDutyCount} GPU duties in flight`);
     if (finite(c.issuedGpuDutyCount) && finite(c.retiredGpuDutyCount) && c.issuedGpuDutyCount !== c.retiredGpuDutyCount) {
       errors.push(`${key} issued ${c.issuedGpuDutyCount} != retired ${c.retiredGpuDutyCount}`);
@@ -269,8 +337,11 @@ export function acceptProductRouteWitness(report, expectations = {}) {
     } else {
       errors.push(`${key} cooperative report carries no denominator-bearing progress`);
     }
+    // Kit validation is mandatory for every requested mechanism: absence is a
+    // rejection, not a silently lower authority.
     const v = report.effective?.cooperativeValidations?.[key];
-    if (v && v.ok !== true) errors.push(`${key} kit validation failed: ${(v.errors || []).join('; ')}`);
+    if (!v) errors.push(`${key} requested but no kit validation record (validateWebGpuCooperativeExecutionReport) was preserved`);
+    else if (v.ok !== true) errors.push(`${key} kit validation failed: ${(v.errors || []).join('; ')}`);
   }
 
   // Contender.
@@ -280,11 +351,42 @@ export function acceptProductRouteWitness(report, expectations = {}) {
     if (report.contender.errors?.length) errors.push(`contender errors: ${report.contender.errors.join('; ')}`);
     const receipts = report.contender.receipts;
     if (receipts) {
+      const c = report.contender;
       if (receipts.failed > 0) errors.push(`contender receipts: ${receipts.failed} failed`);
       if (receipts.canceled > 0) errors.push(`contender receipts: ${receipts.canceled} canceled`);
+      // Accounting: every submission settled, every completion located, and the
+      // in-run receipts equal the producer's own foreground report.
+      if (c.completed !== c.submitted) errors.push(`contender completed ${c.completed} != submitted ${c.submitted}`);
+      const settled = receipts.completed + receipts.failed + receipts.canceled;
+      if (settled !== c.submitted) errors.push(`contender receipts ${receipts.completed}+${receipts.failed}+${receipts.canceled} != submitted ${c.submitted}`);
+      if (receipts.completed !== c.completed) errors.push(`contender receipts.completed ${receipts.completed} != completed ${c.completed}`);
+      const located = receipts.outsideRun + receipts.schedulerBoundary + receipts.idleDrain + receipts.runFinish;
+      if (located !== receipts.completed) errors.push(`contender service locations ${located} != completed ${receipts.completed}`);
+      const inRun = receipts.schedulerBoundary + receipts.idleDrain + receipts.runFinish;
+      if (!(inRun > 0)) errors.push('same-device contender serviced zero host frames inside the run');
+      const fg = report.foregroundOpportunities;
+      if (fg) {
+        if (fg.requestCount !== inRun) errors.push(`foreground requestCount ${fg.requestCount} != in-run contender receipts ${inRun}`);
+        if (fg.receiptCount !== fg.requestCount) errors.push(`foreground receiptCount ${fg.receiptCount} != requestCount ${fg.requestCount}`);
+        const p = fg.producer || {};
+        if (p.idleDrainServicedCount !== receipts.idleDrain) errors.push(`producer idle drain serviced ${p.idleDrainServicedCount} != idle-drain receipts ${receipts.idleDrain}`);
+        if (p.finishDrainServicedCount !== receipts.runFinish) errors.push(`producer finish drain serviced ${p.finishDrainServicedCount} != run-finish receipts ${receipts.runFinish}`);
+      }
     }
     if (report.contender.mode === 'same-device-foreground-opportunity' && !report.foregroundOpportunities) {
       errors.push('same-device contender requires a foreground opportunity report from the producer');
+    }
+  }
+
+  // Measured duty counts (product route on the canonical image): the kit's
+  // submittedGpuDutyCount must be preserved and must equal the pinned counts.
+  if (expectedDutyCounts) {
+    for (const [key, expected] of Object.entries(expectedDutyCounts)) {
+      const c = report.effective?.cooperative?.[key];
+      if (!c) { errors.push(`${key} has no cooperative report to pin ${expected} GPU duties against`); continue; }
+      const submitted = c.submittedGpuDutyCount ?? c.gpuDutyCount;
+      if (!finite(submitted)) { errors.push(`${key} preserves no submitted GPU duty count (expected ${expected})`); continue; }
+      if (submitted !== expected) errors.push(`${key} submitted ${submitted} GPU duties, expected ${expected}`);
     }
   }
 

@@ -355,3 +355,85 @@ export function compareStages(webgpuStages, referenceStages, { runId } = {}) {
     },
   };
 }
+
+
+// ---------------------------------------------------------------------------
+// Reference provenance (review 2026-09-16, MEDIUM). A reference directory is
+// parity evidence only with a manifest written by dump_parity_reference.py
+// that binds every artifact hash, the input image, and the source/model
+// identities. Any mismatch is named; a missing manifest is refused.
+// ---------------------------------------------------------------------------
+import { createHash } from 'node:crypto';
+import { existsSync as _existsSync, readFileSync as _readFileSync, openSync as _openSync, readSync as _readSync, closeSync as _closeSync } from 'node:fs';
+import { join as _join } from 'node:path';
+
+export const PARITY_REFERENCE_MANIFEST_SCHEMA = 'sf3d.parity-reference-manifest.v0';
+
+/** Streaming (chunked, synchronous) SHA-256 — weights.bin is larger than Node's 2 GiB readFileSync limit. */
+export function sha256File(filePath, chunkBytes = 8 * 1024 * 1024) {
+  const hash = createHash('sha256');
+  const fd = _openSync(filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(chunkBytes);
+    let n;
+    while ((n = _readSync(fd, buf, 0, chunkBytes, null)) > 0) hash.update(buf.subarray(0, n));
+  } finally {
+    _closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+/** Load and structurally validate <dir>/manifest.json; throws when absent or wrong. */
+export function loadReferenceManifest(referenceDir) {
+  const manifestPath = _join(referenceDir, 'manifest.json');
+  if (!_existsSync(manifestPath)) {
+    throw new Error(`no manifest.json in ${referenceDir}: the reference is not provenance-bound (regenerate with tools/dump_parity_reference.py)`);
+  }
+  const manifest = JSON.parse(_readFileSync(manifestPath, 'utf8'));
+  if (manifest?.schema !== PARITY_REFERENCE_MANIFEST_SCHEMA) {
+    throw new Error(`manifest schema ${manifest?.schema ?? 'missing'} != ${PARITY_REFERENCE_MANIFEST_SCHEMA}`);
+  }
+  if (!manifest.artifacts || typeof manifest.artifacts !== 'object' || Object.keys(manifest.artifacts).length === 0) {
+    throw new Error('manifest lists no artifacts');
+  }
+  return manifest;
+}
+
+/**
+ * Verify every manifest artifact hash against the files on disk, the input
+ * image hash against the manifest, and the presence of source/model identity.
+ * Returns { ok, errors, identities } — never throws on a mismatch.
+ */
+export function verifyReferenceProvenance(referenceDir, manifest, { inputSha256 = null } = {}) {
+  const errors = [];
+  const artifacts = manifest?.artifacts || {};
+  for (const [name, expected] of Object.entries(artifacts)) {
+    const full = _join(referenceDir, name);
+    if (!_existsSync(full)) { errors.push(`${name} missing from ${referenceDir}`); continue; }
+    const actual = sha256File(full);
+    if (actual !== expected?.sha256) errors.push(`${name} sha256 ${actual.slice(0, 12)}… != manifest ${String(expected?.sha256 ?? 'missing').slice(0, 12)}…`);
+  }
+  if (inputSha256 != null) {
+    if (manifest?.input?.sha256 !== inputSha256) {
+      errors.push(`input image sha256 ${inputSha256.slice(0, 12)}… != manifest ${String(manifest?.input?.sha256 ?? 'missing').slice(0, 12)}…`);
+    }
+  } else {
+    errors.push('input image sha256 not supplied for provenance check');
+  }
+  if (!manifest?.sf3d?.commit) errors.push('sf3d source commit missing from manifest');
+  if (!manifest?.model?.repo_id) errors.push('model identity missing from manifest');
+  const identities = Object.freeze({
+    generatedAt: manifest?.generated_at ?? null,
+    inputSha256: manifest?.input?.sha256 ?? null,
+    sf3dCommit: manifest?.sf3d?.commit ?? null,
+    sf3dDirty: manifest?.sf3d?.dirty ?? null,
+    generatorCommit: manifest?.generator?.sf3d_webgpu?.commit ?? null,
+    generatorScriptSha256: manifest?.generator?.script_sha256 ?? null,
+    modelRepoId: manifest?.model?.repo_id ?? null,
+    modelSnapshotCommit: manifest?.model?.snapshot_commit ?? null,
+    modelWeightsSha256: manifest?.model?.weights_sha256 ?? null,
+    torchVersion: manifest?.torch?.version ?? null,
+    artifactCount: Object.keys(artifacts).length,
+  });
+  return Object.freeze({ ok: errors.length === 0, errors: Object.freeze(errors), identities });
+}

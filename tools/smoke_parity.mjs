@@ -20,7 +20,11 @@ import puppeteer from 'puppeteer-core';
 import { spawn } from 'child_process';
 import { readFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
-import { compareStages, decodeBase64Float32, loadReferenceStages } from './parity_compare_core.mjs';
+import { execSync } from 'child_process';
+import {
+  compareStages, decodeBase64Float32, loadReferenceStages,
+  loadReferenceManifest, sha256File, verifyReferenceProvenance,
+} from './parity_compare_core.mjs';
 import { writeJsonReportAtomic } from './json_report_atomic.mjs';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -30,8 +34,13 @@ const IMAGE = process.env.IMAGE ||
 const REF_DIR = process.argv.includes('--reference')
   ? process.argv[process.argv.indexOf('--reference') + 1]
   : '/tmp/sf3d-parity-ref';
-const OUT_DIR = '/tmp/sf3d-parity-webgpu';
-const REPORT_PATH = path.join(OUT_DIR, 'parity_report.json');
+const REPORT_PATH = process.argv.includes('--report')
+  ? path.resolve(process.argv[process.argv.indexOf('--report') + 1])
+  : '/tmp/sf3d-parity-webgpu/parity_report.json';
+const OUT_DIR = path.dirname(REPORT_PATH);
+const REPO = path.resolve(new URL('..', import.meta.url).pathname);
+// Deterministic failure injection for tools/test_witness_failure_report_contract.mjs.
+const INJECT_FAILURE = process.env.SF3D_PARITY_INJECT_FAILURE || null;
 const RUN_ID = `sf3d-parity-webgpu-${new Date().toISOString().replace(/[:.]/g, '-')}`;
 
 // Stages transferred element-wise from the page:
@@ -48,6 +57,26 @@ const SCENE_CODES_LAYOUT_NOTE =
 const REFERENCE_STAGE_IDS = [...ELEMENT_STAGES.map(([stageId]) => stageId), 'scene_codes'];
 
 mkdirSync(OUT_DIR, { recursive: true });
+
+let phase = 'startup';
+let reportWritten = false;
+const enterPhase = (name) => {
+  phase = name;
+  if (INJECT_FAILURE === name) throw new Error(`injected failure at ${name}`);
+};
+function writeFailureReport(err) {
+  writeJsonReportAtomic(REPORT_PATH, {
+    runId: RUN_ID,
+    generatedAt: new Date().toISOString(),
+    evidentiary: false,
+    reference: { dir: REF_DIR },
+    requested: { image: IMAGE, reference: REF_DIR, report: REPORT_PATH },
+    failure: { phase, message: err.message },
+    parity: null,
+  });
+  reportWritten = true;
+  console.error(`Failure report written to ${REPORT_PATH} (phase ${phase})`);
+}
 
 const fmt4 = v => (v == null ? 'n/a' : v.toFixed(4));
 const fmt6 = v => (v == null ? 'n/a' : v.toFixed(6));
@@ -93,41 +122,64 @@ async function fetchStageBase64(page, stageKey) {
   }, stageKey);
 }
 
-// Start vite
-const vite = spawn('npx', ['vite', '--port', String(PORT)], {
-  stdio: ['pipe', 'pipe', 'pipe'],
-  cwd: process.cwd(),
-});
-await new Promise(r => setTimeout(r, 3000));
-
-const browser = await puppeteer.launch({
-  executablePath: CHROME_PATH,
-  headless: false,
-  protocolTimeout: 900000,
-  args: [
-    '--enable-features=Vulkan,UseSkiaRenderer',
-    '--enable-unsafe-webgpu',
-    '--disable-dawn-features=disallow_unsafe_apis',
-    '--no-first-run',
-    '--no-default-browser-check',
-  ],
-});
-
-const page = await browser.newPage();
+let vite = null;
+let browser = null;
+let page = null;
 const logs = [];
-page.on('console', msg => {
-  const text = msg.text();
-  logs.push(text);
-  if (text.startsWith('PARITY:')) console.log(text);
-});
-
-let phase = 'startup';
-let reportWritten = false;
 
 try {
   console.log('=== SF3D Parity Verification ===');
   console.log(`Image: ${IMAGE}`);
   console.log(`Reference: ${REF_DIR}`);
+
+  // --- Provenance first: an unbound reference directory is not evidence ---
+  enterPhase('reference-provenance');
+  if (!existsSync(IMAGE)) throw new Error(`input image not found: ${IMAGE}`);
+  const inputSha256 = sha256File(IMAGE);
+  const manifest = loadReferenceManifest(REF_DIR);
+  const provenance = verifyReferenceProvenance(REF_DIR, manifest, { inputSha256 });
+  if (!provenance.ok) {
+    throw new Error(`reference provenance rejected: ${provenance.errors.join('; ')}`);
+  }
+  // Effective WebGPU-side identity (source, kit, image, weights).
+  enterPhase('source-identity');
+  const commit = execSync('git rev-parse HEAD', { cwd: REPO }).toString().trim();
+  const dirty = execSync('git status --porcelain', { cwd: REPO }).toString().trim().length > 0;
+  const kitVersion = JSON.parse(readFileSync(path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit/package.json'), 'utf8')).version;
+  const weightsPath = path.join(REPO, 'public/weights.bin');
+  const weightsSha256 = existsSync(weightsPath) ? sha256File(weightsPath) : null;
+  if (!weightsSha256) throw new Error(`public/weights.bin not present; the WebGPU weight identity cannot be recorded`);
+  const webgpuIdentity = { commit, dirty, kitVersion, imageSha256: inputSha256, weightsSha256 };
+  console.log(`Provenance: reference generated ${provenance.identities.generatedAt} from sf3d ${String(provenance.identities.sf3dCommit).slice(0, 10)} model ${provenance.identities.modelRepoId}@${provenance.identities.modelSnapshotCommit}; webgpu ${commit.slice(0, 10)}${dirty ? ' (dirty)' : ''} kit ${kitVersion}`);
+
+  // Start vite
+  enterPhase('vite-start');
+  vite = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(PORT)], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: REPO,
+  });
+  await new Promise(r => setTimeout(r, 3000));
+
+  enterPhase('browser-launch');
+  browser = await puppeteer.launch({
+    executablePath: CHROME_PATH,
+    headless: false,
+    protocolTimeout: 900000,
+    args: [
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--disable-dawn-features=disallow_unsafe_apis',
+      '--no-first-run',
+      '--no-default-browser-check',
+    ],
+  });
+
+  page = await browser.newPage();
+  page.on('console', msg => {
+    const text = msg.text();
+    logs.push(text);
+    if (text.startsWith('PARITY:')) console.log(text);
+  });
   console.log(`Run: ${RUN_ID}`);
 
   phase = 'page-load';
@@ -377,6 +429,9 @@ try {
   const report = {
     runId: RUN_ID,
     generatedAt: new Date().toISOString(),
+    evidentiary: true,
+    provenance: { ok: provenance.ok, identities: provenance.identities, manifestArtifacts: Object.keys(manifest.artifacts) },
+    webgpuIdentity,
     reference: {
       dir: REF_DIR,
       summaryJson: ref != null,
@@ -414,20 +469,11 @@ try {
   console.error(`Parity smoke failed during ${phase}:`, err.message);
   process.exitCode = 1;
   if (!reportWritten) {
-    try {
-      writeJsonReportAtomic(REPORT_PATH, {
-        runId: RUN_ID,
-        generatedAt: new Date().toISOString(),
-        reference: { dir: REF_DIR },
-        failure: { phase, message: err.message },
-        parity: null,
-      });
-      console.error(`Failure report written to ${REPORT_PATH}`);
-    } catch (reportErr) {
+    try { writeFailureReport(err); } catch (reportErr) {
       console.error('Failure report could not be written:', reportErr.message);
     }
   }
 } finally {
-  await browser.close();
-  vite.kill();
+  if (browser) await browser.close().catch(() => {});
+  if (vite) vite.kill();
 }

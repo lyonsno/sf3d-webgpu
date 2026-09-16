@@ -14,6 +14,7 @@
  */
 
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import { validatePreprocessReply } from './worker_reply_validation.js';
 import { resizeBlendNormalize } from './preprocess_core.js';
 import { callWorker } from './worker_call.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
@@ -103,13 +104,9 @@ export async function preprocessImage(imageData, width, height, options = {}) {
       [srcFloat.buffer],
       {
         timeoutMs: options.workerTimeoutMs || 30000,
-        onResult: (data) => {
-          const chw = new Float32Array(data.chwBuffer);
-          if (chw.length !== expectedLen) {
-            throw new Error(`CHW length ${chw.length} != expected ${expectedLen}`);
-          }
-          return chw;
-        },
+        // Shape + finiteness (worker_reply_validation.js): a length-correct
+        // reply carrying NaN/Inf must not reach the GPU as a successful offload.
+        onResult: (data) => validatePreprocessReply(data, expectedLen),
       },
     );
   }

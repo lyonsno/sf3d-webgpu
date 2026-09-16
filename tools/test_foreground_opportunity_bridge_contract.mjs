@@ -150,4 +150,56 @@ const frameRequest = (id, submits = 1) => ({
   console.log('ok  failing callback → failed receipt; bridge still services; duplicates refused');
 }
 
+// 7. A request arriving during finish() (here: enqueued by a callback while the
+//    finish drain services it) must settle — through the labeled outside-run
+//    path, since the run's GPU work is over — and finish must still refuse a
+//    second concurrent run while it is finishing. (Review P1, 2026-09-16.)
+{
+  const gpu = makeFakeGpu();
+  const bridge = createForegroundOpportunityBridge({ routeId: 'sf3d.test', device: gpu.device, queue: gpu.queue, drainIntervalMs: 1000, drainAfterMs: 1000 });
+  const run = bridge.beginRun('run-G');
+  let lateHandle = null;
+  let beginRunDuringFinishThrew = false;
+  const first = bridge.request({ requestId: 'first', run(ctx) {
+    ctx.submit([{ fake: 'cb-first' }], { submissionId: 'first:s0' });
+    try { bridge.beginRun('run-H'); } catch (e) { beginRunDuringFinishThrew = /already has an active run/.test(e.message); }
+    lateHandle = bridge.request(frameRequest('late'));
+    return 1;
+  } });
+  const report = await run.finish();
+  const firstReceipt = await first.completion;
+  assert.equal(firstReceipt.status, 'completed');
+  assert.ok(lateHandle, 'late request was issued during the finish service turn');
+  const late = await Promise.race([lateHandle.completion, tick(300).then(() => { throw new Error('late request never settled'); })]);
+  assert.equal(late.status, 'completed');
+  assert.equal(late.servicedOutsideRun, true, 'late request routed to immediate execution, not orphaned in the dying interlock');
+  assert.equal(report.status, 'succeeded');
+  assert.equal(report.pendingRequestCount, 0);
+  assert.equal(beginRunDuringFinishThrew, true, 'concurrent-run exclusion holds while finishing');
+  assert.equal(bridge.snapshot().activeRun, null);
+  console.log('ok  request during finish settles via outside-run path; second run still refused while finishing');
+}
+
+// 8. Outside a run, the request id is reserved before the callback runs, so a
+//    synchronously re-entrant duplicate is refused; cancel() after settlement
+//    returns the settled receipt like the kit handle. (Review P2, 2026-09-16.)
+{
+  const gpu = makeFakeGpu();
+  const bridge = createForegroundOpportunityBridge({ routeId: 'sf3d.test', device: gpu.device, queue: gpu.queue });
+  let nestedError = null;
+  const outer = bridge.request({ requestId: 'dup2', run(ctx) {
+    try { bridge.request(frameRequest('dup2')); } catch (e) { nestedError = e; }
+    ctx.submit([{ fake: 'cb' }]);
+    return 'outer';
+  } });
+  const receipt = await outer.completion;
+  assert.ok(nestedError, 'synchronous re-entrant duplicate must be refused');
+  assert.match(nestedError.message, /duplicate/);
+  assert.equal(bridge.snapshot().outsideRunReceiptCount, 1);
+  assert.equal(receipt.status, 'completed');
+  const afterSettle = outer.cancel('too-late');
+  assert.equal(afterSettle, receipt, 'cancel after settlement returns the settled receipt');
+  console.log('ok  outside-run id reserved before callback; settled cancel returns the receipt');
+}
+
 console.log('\nFOREGROUND OPPORTUNITY BRIDGE CONTRACT PASSED');

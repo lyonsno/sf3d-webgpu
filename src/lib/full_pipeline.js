@@ -17,6 +17,7 @@
  */
 
 import { runInference } from './inference.js';
+import { validateUvUnwrapReply } from './worker_reply_validation.js';
 import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './texture_baker.js';
 import { estimateMaterials } from './clip_estimator.js';
 import { makeCooperativeTextureBake, withDecoderArenaLease } from './cooperative_texture_bake.js';
@@ -43,27 +44,10 @@ async function runUvUnwrap(vertices, faces, numVertices, numFaces, worker, worke
     [vBuf, fBuf],
     {
       timeoutMs: workerTimeoutMs || 30000,
-      onResult: (d) => {
-        const r = {
-          uvs: new Float32Array(d.uvs),
-          newVertices: new Float32Array(d.newVertices),
-          newNormals: new Float32Array(d.newNormals),
-          newFaces: new Uint32Array(d.newFaces),
-          faceAssignment: new Uint8Array(d.faceAssignment),
-          newNumVertices: d.newNumVertices,
-          newNumFaces: d.newNumFaces,
-        };
-        // Output-shape validation: reject malformed replies rather than pass
-        // corrupt geometry downstream.
-        if (!Number.isSafeInteger(r.newNumVertices) || r.newNumVertices <= 0
-          || !Number.isSafeInteger(r.newNumFaces) || r.newNumFaces <= 0
-          || r.newVertices.length !== r.newNumVertices * 3
-          || r.newFaces.length !== r.newNumFaces * 3
-          || r.uvs.length !== r.newNumVertices * 2) {
-          throw new Error(`uv-unwrap shapes invalid: v=${r.newVertices.length}/${r.newNumVertices} f=${r.newFaces.length}/${r.newNumFaces} uv=${r.uvs.length}`);
-        }
-        return r;
-      },
+      // Every array at its declared length, finite floats, in-range face
+      // indices and chart ids (worker_reply_validation.js); malformed replies
+      // throw here rather than reach rasterization / the texture baker.
+      onResult: (d) => validateUvUnwrapReply(d),
     },
   );
 }
