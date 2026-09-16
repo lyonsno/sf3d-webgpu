@@ -120,6 +120,10 @@ assert.equal(PARITY_REFERENCE_MANIFEST_SCHEMA, 'sf3d.parity-reference-manifest.v
   assert.match(partial.errors.join('\n'), /required artifacts missing from manifest: vertex_offset.npy, grid_positions.npy, camera_embed.npy, scene_codes.npy/);
   // Missing identities are each named.
   const stripped = { ...manifest, generated_at: null, generator: { ...manifest.generator, script_sha256: null, sf3d_webgpu: { commit: null } }, model: { repo_id: 'stabilityai/stable-fast-3d' }, torch: null };
+  // generator script NAME is required by name, not only its hash (r3).
+  const noScript = verifyReferenceProvenance(dir, { ...manifest, generator: { ...manifest.generator, script: null } }, { inputSha256 });
+  assert.match(noScript.errors.join('\n'), /generator script identity missing from manifest/);
+  assert.equal(verifyReferenceProvenance(dir, manifest, { inputSha256 }).identities.generatorScript, 'tools/dump_parity_reference.py');
   const v = verifyReferenceProvenance(dir, stripped, { inputSha256 });
   for (const re of [/generation timestamp missing/, /generator script hash missing/, /generator source commit missing/, /model snapshot commit missing/, /model weights hash missing/, /torch identity missing/]) {
     assert.match(v.errors.join('\n'), re);

@@ -63,7 +63,7 @@ function writeBoundReference(prefix, { tamper = null } = {}) {
   fs.writeFileSync(path.join(refDir, 'manifest.json'), JSON.stringify({
     schema: 'sf3d.parity-reference-manifest.v0', generated_at: '2026-09-16T00:00:00Z', input: { sha256: sha(fs.readFileSync(demoImage)) },
     sf3d: { commit: 'cafebabe' }, model: { repo_id: 'stabilityai/stable-fast-3d', snapshot_commit: 'snap', weights_sha256: 'w' },
-    generator: { script_sha256: 's', sf3d_webgpu: { commit: 'g' } }, torch: { version: '2.x' }, artifacts,
+    generator: { script: 'tools/dump_parity_reference.py', script_sha256: 's', sf3d_webgpu: { commit: 'g' } }, torch: { version: '2.x' }, artifacts,
   }));
   return refDir;
 }
@@ -122,6 +122,14 @@ function writeBoundReference(prefix, { tamper = null } = {}) {
   assert.equal(d.failure.phase, 'vite-start');
   assert.match(d.failure.message, /ENOENT|spawn/);
   assert.ok(d.webgpuIdentity?.commit, 'established identities travel with the failure report');
+  // r3: the verified reference provenance travels too.
+  assert.equal(d.provenance?.ok, true);
+  assert.equal(d.provenance.identities.generatedAt, '2026-09-16T00:00:00Z');
+  assert.equal(d.provenance.identities.modelSnapshotCommit, 'snap');
+  assert.equal(d.provenance.identities.modelWeightsSha256, 'w');
+  assert.equal(d.provenance.identities.generatorScript, 'tools/dump_parity_reference.py');
+  assert.equal(d.provenance.identities.generatorCommit, 'g');
+  for (const name of REQUIRED) assert.ok(d.provenance.manifestArtifacts.includes(name), `${name} in manifestArtifacts`);
   console.log('ok  parity smoke: real Vite spawn failure → durable report at vite-start with identities');
 }
 

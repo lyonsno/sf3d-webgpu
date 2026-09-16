@@ -23,7 +23,7 @@ import path from 'path';
 import { execSync } from 'child_process';
 import {
   compareStages, decodeBase64Float32, loadReferenceStages,
-  loadReferenceManifest, sha256File, verifyReferenceProvenance,
+  loadReferenceManifest, sha256File, verifyReferenceProvenance, judgeParityEvidence,
 } from './parity_compare_core.mjs';
 import { writeJsonReportAtomic } from './json_report_atomic.mjs';
 
@@ -65,6 +65,7 @@ const enterPhase = (name) => {
   if (INJECT_FAILURE === name) throw new Error(`injected failure at ${name}`);
 };
 let webgpuIdentity = null;     // established at source-identity; travels with any failure report
+let referenceProvenance = null; // verified at reference-provenance; travels with any later failure report (r3)
 function writeFailureReport(err) {
   writeJsonReportAtomic(REPORT_PATH, {
     runId: RUN_ID,
@@ -73,6 +74,7 @@ function writeFailureReport(err) {
     reference: { dir: REF_DIR },
     requested: { image: IMAGE, reference: REF_DIR, report: REPORT_PATH },
     webgpuIdentity,
+    provenance: referenceProvenance,
     failure: { phase, message: err.message },
     parity: null,
   });
@@ -143,6 +145,7 @@ try {
   if (!provenance.ok) {
     throw new Error(`reference provenance rejected: ${provenance.errors.join('; ')}`);
   }
+  referenceProvenance = { ok: provenance.ok, identities: provenance.identities, manifestArtifacts: Object.keys(manifest.artifacts) };
   // Effective WebGPU-side identity (source, kit, image, weights).
   enterPhase('source-identity');
   const commit = execSync('git rev-parse HEAD', { cwd: REPO }).toString().trim();
@@ -444,11 +447,20 @@ try {
 
   // Write comparison report: legacy summary fields plus the kit-schema comparisons.
   phase = 'report';
+  // Evidence admission: verified provenance AND a complete comparison (every
+  // required stage on both sides, four element-wise + one stats-only), else
+  // the report says so and the run fails.
+  const admission = judgeParityEvidence({ provenance, parity });
+  if (!admission.evidentiary) {
+    console.error(`\nPARITY REPORT NOT EVIDENTIARY:\n  - ${admission.reasons.join('\n  - ')}`);
+    process.exitCode = 1;
+  }
   const report = {
     runId: RUN_ID,
     generatedAt: new Date().toISOString(),
-    evidentiary: true,
-    provenance: { ok: provenance.ok, identities: provenance.identities, manifestArtifacts: Object.keys(manifest.artifacts) },
+    evidentiary: admission.evidentiary,
+    evidenceAdmission: admission,
+    provenance: referenceProvenance,
     webgpuIdentity,
     reference: {
       dir: REF_DIR,

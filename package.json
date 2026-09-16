@@ -46,7 +46,8 @@
     "test:witness-failure-report": "node tools/test_witness_failure_report_contract.mjs",
     "test:sf3d-producer-helpers": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_sf3d_producer_helpers_contract.mjs",
     "test:producer-lifecycle": "node tools/test_producer_lifecycle_contract.mjs",
-    "test:weights-compaction": "node tools/test_weights_compaction_contract.mjs"
+    "test:weights-compaction": "node tools/test_weights_compaction_contract.mjs",
+    "test:parity-evidence-admission": "node tools/test_parity_evidence_admission_contract.mjs"
   },
   "devDependencies": {
     "@kaminos/webgpu-inference-kit": "0.1.48",

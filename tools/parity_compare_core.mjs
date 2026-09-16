@@ -429,6 +429,7 @@ export function verifyReferenceProvenance(referenceDir, manifest, { inputSha256 
   if (!manifest?.model?.repo_id) errors.push('model identity missing from manifest');
   if (!manifest?.model?.snapshot_commit) errors.push('model snapshot commit missing from manifest');
   if (!manifest?.model?.weights_sha256) errors.push('model weights hash missing from manifest');
+  if (!manifest?.generator?.script || typeof manifest.generator.script !== 'string') errors.push('generator script identity missing from manifest');
   if (!manifest?.generator?.script_sha256) errors.push('generator script hash missing from manifest');
   if (!manifest?.generator?.sf3d_webgpu?.commit) errors.push('generator source commit missing from manifest');
   if (!manifest?.torch?.version) errors.push('torch identity missing from manifest');
@@ -440,6 +441,7 @@ export function verifyReferenceProvenance(referenceDir, manifest, { inputSha256 
     sf3dCommit: manifest?.sf3d?.commit ?? null,
     sf3dDirty: manifest?.sf3d?.dirty ?? null,
     generatorCommit: manifest?.generator?.sf3d_webgpu?.commit ?? null,
+    generatorScript: manifest?.generator?.script ?? null,
     generatorScriptSha256: manifest?.generator?.script_sha256 ?? null,
     modelRepoId: manifest?.model?.repo_id ?? null,
     modelSnapshotCommit: manifest?.model?.snapshot_commit ?? null,
@@ -448,4 +450,39 @@ export function verifyReferenceProvenance(referenceDir, manifest, { inputSha256 
     artifactCount: Object.keys(artifacts).length,
   });
   return Object.freeze({ ok: errors.length === 0, errors: Object.freeze(errors), identities });
+}
+
+// ---------------------------------------------------------------------------
+// Parity evidence admission (r3 MEDIUM, 2026-09-16). A parity report is
+// evidentiary only when the reference provenance verified, the comparison
+// ran, and every required stage was compared on both sides: the four
+// element-wise stages and the one stats-only stage. A page that stops exposing
+// a stage produces a report that says so instead of an authoritative-looking
+// partial comparison.
+// ---------------------------------------------------------------------------
+export const PARITY_REQUIRED_STAGE_IDS = Object.freeze({
+  elementwise: Object.freeze(['density', 'vertex_offset', 'grid_positions', 'camera_embed']),
+  statsOnly: Object.freeze(['scene_codes']),
+});
+
+export function judgeParityEvidence({ provenance, parity }) {
+  const reasons = [];
+  if (!provenance || provenance.ok !== true) reasons.push('reference provenance not verified');
+  if (!parity || typeof parity !== 'object') {
+    reasons.push('no parity comparison was produced');
+    return Object.freeze({ evidentiary: false, reasons: Object.freeze(reasons) });
+  }
+  const required = [...PARITY_REQUIRED_STAGE_IDS.elementwise, ...PARITY_REQUIRED_STAGE_IDS.statsOnly];
+  const missingWebgpu = (parity.missing?.webgpu || []).filter(id => required.includes(id));
+  const missingReference = (parity.missing?.reference || []).filter(id => required.includes(id));
+  if (missingWebgpu.length) reasons.push(`WebGPU side missing required stage(s): ${missingWebgpu.join(', ')}`);
+  if (missingReference.length) reasons.push(`reference side missing required stage(s): ${missingReference.join(', ')}`);
+  for (const id of required) {
+    if (!parity.stages?.[id] && !missingWebgpu.includes(id) && !missingReference.includes(id)) reasons.push(`required stage ${id} was not compared`);
+  }
+  const compared = parity.summary?.compared ?? 0;
+  const statsOnly = parity.summary?.statsOnly ?? 0;
+  if (compared !== PARITY_REQUIRED_STAGE_IDS.elementwise.length) reasons.push(`${compared} element-wise comparisons completed, expected ${PARITY_REQUIRED_STAGE_IDS.elementwise.length}`);
+  if (statsOnly !== PARITY_REQUIRED_STAGE_IDS.statsOnly.length) reasons.push(`${statsOnly} stats-only comparisons completed, expected ${PARITY_REQUIRED_STAGE_IDS.statsOnly.length}`);
+  return Object.freeze({ evidentiary: reasons.length === 0, reasons: Object.freeze(reasons) });
 }
