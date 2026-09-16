@@ -248,6 +248,10 @@ export function assembleProductRouteWitness(input) {
       receiptCount: foregroundOpportunities.receiptCount ?? null,
       pendingRequestCount: foregroundOpportunities.pendingRequestCount ?? null,
       activeRequestCount: foregroundOpportunities.activeRequestCount ?? null,
+      // Always 0 for SF3D by construction: the cooperative runtime consults the
+      // interlock's pressure before calling serviceAtBoundary, so boundaries
+      // without demand never reach the kit (see createSf3dCooperativeRuntime).
+      // Carried for the kit's own accounting, not asserted on.
       noDemandBoundaryCount: foregroundOpportunities.noDemandBoundaryCount ?? null,
       producer: Object.freeze({ ...(foregroundOpportunities.producer || {}) }),
     }) : null,

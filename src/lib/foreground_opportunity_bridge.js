@@ -292,13 +292,26 @@ export function createForegroundOpportunityBridge({
       if (run.drainInFlight) await run.drainInFlight;
       let finishService = null;
       let finishBoundarySequence = 0;
-      // Nothing new can enter after `finishing`, so this loop only re-services
-      // demand a concurrent scheduler service turn had not yet captured.
-      while (interlock.pressureSnapshot().pendingRequestCount > 0) {
-        finishBoundarySequence += 1;
-        finishService = await interlock.serviceAtBoundary(
-          producerBoundary(SF3D_FOREGROUND_RUN_FINISH_PHASE, finishBoundarySequence, 'run-finished-with-pending-foreground-demand'));
-        run.finishDrainServicedCount += finishService.servicedRequestCount ?? 0;
+      // Nothing new can enter after `finishing`. Drain what is still pending,
+      // and wait for any scheduler service turn that is mid-flight (the kit
+      // moves captured requests from pending to active before awaiting their
+      // callbacks, so pending alone cannot see it): the kit's finish() report
+      // is `succeeded` only when pending, active and service counters are all
+      // zero. In-flight turns always settle, so this loop terminates.
+      for (;;) {
+        const p = interlock.pressureSnapshot();
+        if (p.pendingRequestCount > 0) {
+          finishBoundarySequence += 1;
+          finishService = await interlock.serviceAtBoundary(
+            producerBoundary(SF3D_FOREGROUND_RUN_FINISH_PHASE, finishBoundarySequence, 'run-finished-with-pending-foreground-demand'));
+          run.finishDrainServicedCount += finishService.servicedRequestCount ?? 0;
+          continue;
+        }
+        if (p.activeRequestCount > 0 || p.activeServiceCount > 0 || p.queuedServiceCount > 0) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+          continue;
+        }
+        break;
       }
       const report = interlock.finish();
       state.activeRun = null;

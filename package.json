@@ -44,7 +44,8 @@
     "test:cooperative-identity-acceptance": "node tools/test_cooperative_identity_acceptance_contract.mjs",
     "test:parity-reference-provenance": "node tools/test_parity_reference_provenance_contract.mjs",
     "test:witness-failure-report": "node tools/test_witness_failure_report_contract.mjs",
-    "test:sf3d-producer-helpers": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_sf3d_producer_helpers_contract.mjs"
+    "test:sf3d-producer-helpers": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_sf3d_producer_helpers_contract.mjs",
+    "test:producer-lifecycle": "node tools/test_producer_lifecycle_contract.mjs"
   },
   "devDependencies": {
     "@kaminos/webgpu-inference-kit": "0.1.48",

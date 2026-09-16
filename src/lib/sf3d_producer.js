@@ -19,7 +19,9 @@
  * cancellation of SF3D GPU work); the route receipt's artifact hashes are
  * 'not-computed' as in the app (the witness harness hashes the GLB).
  * `dispose()` terminates producer-created workers and releases producer-loaded
- * weight buffers; it never destroys an injected device or injected weights.
+ * weight buffers; it never destroys an injected device or injected weights;
+ * called during a run it defers the release until the run ends and refuses
+ * new runs and requests meanwhile (returns the status).
  * A failed run throws with `error.sf3dRun` = { runId, lastProgress,
  * foregroundOpportunityReport, identity } so the host keeps the phase and the
  * last trustworthy evidence.
@@ -36,6 +38,7 @@ import {
   terminateProductRouteWorkers,
 } from './product_route.js';
 import { createForegroundOpportunityBridge } from './foreground_opportunity_bridge.js';
+import { createProducerLifecycle } from './producer_lifecycle.js';
 import {
   createSf3dImageToMeshRouteReceipt,
   createStagedSubmitProfile,
@@ -173,9 +176,16 @@ export async function createSf3dProducer({
   const bridge = createForegroundOpportunityBridge({ routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, device: dev, queue: dev.queue });
 
   let runSequence = 0;
-  let activeRunId = null;
-  let disposed = false;
-  const assertLive = () => { if (disposed) throw new Error('sf3d producer is disposed'); };
+  // One run at a time; dispose() during a run defers the release until the
+  // run ends and refuses everything new meanwhile (producer_lifecycle.js).
+  const lifecycle = createProducerLifecycle({
+    release() {
+      if (ownsWorkers) terminateProductRouteWorkers(routeWorkers);
+      // Release what the producer created; never destroy an injected weight set
+      // or the (possibly borrowed) device.
+      if (ownsWeights) releaseLoadedWeights(modelWeights);
+    },
+  });
 
   return Object.freeze({
     schema: SF3D_PRODUCER_SCHEMA,
@@ -192,23 +202,23 @@ export async function createSf3dProducer({
     adapterInfo: backend.info,
     adapterLimits: backend.limits,
     adapterFeatures: Object.freeze([...backend.features]),
-    get activeRunId() { return activeRunId; },
+    get activeRunId() { return lifecycle.activeRunId; },
+    get disposed() { return lifecycle.disposed; },
 
     /** Host (kiln) frames: kit-shaped { requestId, run(ctx), metadata } → { requestId, completion, cancel }. */
     requestForegroundOpportunity(request) {
-      assertLive();
+      lifecycle.assertAcceptingRequests();
       return bridge.request(request);
     },
     foregroundSnapshot() { return bridge.snapshot(); },
 
     async run(image, { runId = null, onProgress = null, routeOverrides = {}, signal = null } = {}) {
-      assertLive();
       if (image == null) throw new Error('sf3d run requires an image (HTMLImageElement/ImageBitmap-like)');
       if (signal?.aborted) throw new Error('sf3d run aborted before start');
       runSequence += 1;
       const id = runId ?? `sf3d-run-${runSequence}`;
-      const foregroundRun = bridge.beginRun(id);   // refuses a second concurrent run
-      activeRunId = id;
+      lifecycle.beginRun(id);                       // refuses when disposed or a run is active
+      const foregroundRun = bridge.beginRun(id);
       const options = Object.freeze({
         ...createProductRouteOptions({ workers: routeWorkers, overrides: routeOverrides }),
         foregroundOpportunities: foregroundRun.foregroundOpportunities,
@@ -224,7 +234,7 @@ export async function createSf3dProducer({
         // Preserve the phase and the last trustworthy evidence on the error
         // (Wake answer 5): the host keeps it with its own episode receipts.
         foregroundOpportunityReport = await foregroundRun.finish();
-        activeRunId = null;
+        lifecycle.endRun(id);                       // runs a deferred dispose if one was requested
         try {
           error.sf3dRun = Object.freeze({
             runId: id,
@@ -236,7 +246,7 @@ export async function createSf3dProducer({
         throw error;
       }
       foregroundOpportunityReport = await foregroundRun.finish();
-      activeRunId = null;
+      lifecycle.endRun(id);                         // runs a deferred dispose if one was requested
       const finishedAtMs = performance.now();
       const receipt = buildRouteReceipt({ backend, image, result, commit });
       const receiptValidation = validateRouteReceipt(receipt);
@@ -268,13 +278,15 @@ export async function createSf3dProducer({
       });
     },
 
+    /**
+     * Safe at any time. With no run active: releases producer-created workers
+     * and weight buffers now. During a run: refuses new runs/requests at once
+     * and releases when the run ends (the run's own finish and receipts still
+     * happen). Never destroys an injected device or injected weights.
+     * Returns { status: 'released' | 'deferred-until-run-ends' | 'already-disposed' }.
+     */
     dispose() {
-      if (disposed) return;
-      disposed = true;
-      if (ownsWorkers) terminateProductRouteWorkers(routeWorkers);
-      // Release what the producer created; never destroy an injected weight set
-      // or the (possibly borrowed) device.
-      if (ownsWeights) releaseLoadedWeights(modelWeights);
+      return lifecycle.dispose();
     },
   });
 }

@@ -202,4 +202,32 @@ const frameRequest = (id, submits = 1) => ({
   console.log('ok  outside-run id reserved before callback; settled cancel returns the receipt');
 }
 
+// 9. finish() while a scheduler service turn is still in flight (issued by the
+//    cooperative runtime, not by the bridge) must wait for that turn to settle
+//    and report succeeded, never snapshot the interlock as incomplete.
+//    (Advisory review A1, 2026-09-16.)
+{
+  const gpu = makeFakeGpu();
+  const bridge = createForegroundOpportunityBridge({ routeId: 'sf3d.test', device: gpu.device, queue: gpu.queue, drainIntervalMs: 1000, drainAfterMs: 1000 });
+  const run = bridge.beginRun('run-I');
+  let releaseCallback;
+  const gate = new Promise(r => { releaseCallback = r; });
+  const handle = bridge.request({ requestId: 'slow-frame', async run(ctx) { await gate; ctx.submit([{ fake: 'cb' }]); return 'done'; } });
+  // Scheduler boundary service starts and is NOT awaited: the request is now
+  // active (pending count 0, active count 1) when finish() is entered.
+  const turn = run.foregroundOpportunities.serviceAtBoundary({ invocationId: 'sched:9', boundaryId: 'sched:9:b1', dutyId: 'duty-9', phase: 'two-stream-backbone', position: 'before-encode' });
+  await tick(0);   // the kit captures pending → active after acquiring its service turn
+  assert.equal(run.foregroundOpportunities.pressureSnapshot().pendingRequestCount, 0);
+  assert.equal(run.foregroundOpportunities.pressureSnapshot().activeRequestCount, 1);
+  const finishing = run.finish();
+  setTimeout(() => releaseCallback(), 20);
+  const report = await finishing;
+  await turn;
+  assert.equal(report.status, 'succeeded', 'finish waited for the in-flight scheduler turn');
+  assert.equal(report.activeRequestCount, 0);
+  assert.equal((await handle.completion).status, 'completed');
+  assert.equal(report.producer.finishDrainServicedCount, 0, 'nothing was left for the finish drain');
+  console.log('ok  finish waits for an in-flight scheduler service turn; report succeeded');
+}
+
 console.log('\nFOREGROUND OPPORTUNITY BRIDGE CONTRACT PASSED');

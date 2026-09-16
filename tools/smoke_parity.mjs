@@ -149,7 +149,13 @@ try {
   const weightsPath = path.join(REPO, 'public/weights.bin');
   const weightsSha256 = existsSync(weightsPath) ? sha256File(weightsPath) : null;
   if (!weightsSha256) throw new Error(`public/weights.bin not present; the WebGPU weight identity cannot be recorded`);
-  const webgpuIdentity = { commit, dirty, kitVersion, imageSha256: inputSha256, weightsSha256 };
+  const webgpuIdentity = {
+    commit, dirty, kitVersion, imageSha256: inputSha256, weightsSha256,
+    // weights.bin is the fp16 flat binary tools/convert_weights.py derives from
+    // the PyTorch checkpoint the reference manifest hashes; this report records
+    // both identities but does not prove the derivation.
+    weightsDerivation: 'converted-by-tools/convert_weights.py-from-the-reference-checkpoint; derivation not proved by this report',
+  };
   console.log(`Provenance: reference generated ${provenance.identities.generatedAt} from sf3d ${String(provenance.identities.sf3dCommit).slice(0, 10)} model ${provenance.identities.modelRepoId}@${provenance.identities.modelSnapshotCommit}; webgpu ${commit.slice(0, 10)}${dirty ? ' (dirty)' : ''} kit ${kitVersion}`);
 
   // Start vite

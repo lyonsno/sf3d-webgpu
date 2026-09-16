@@ -232,11 +232,12 @@ largest frame gap was 92.4 ms and the GLB byte-identical. Receipt:
 
 ## Numerical Match to PyTorch
 
-Measured against the original PyTorch pipeline on the bundled `demo_chair.png`:
+Measured against the original PyTorch pipeline on the bundled `demo_chair.png`
+(figures from the provenance-bound receipt below):
 
-- Vertex count: 9988 vs 10008 (99.8%)
-- Density at known inside vertices: within 4%
+- Raw mesh vertex count: 9988 vs 10014 (99.7%)
 - SDF max: 28.34 vs 28.58
+- Density field cosine similarity 0.99876 (per-stage table below)
 - Textured output matches the PyTorch reference render under side-by-side visual inspection
 - Remaining gap is fp16 precision + Lanczos resize interpolation difference
 
@@ -255,7 +256,11 @@ model snapshot `f0c9a8ff…`:
 | Vertex offsets | 1,607,646 | 0.98243 | 1.9e-1 | 0.57 |
 
 Scene codes are compared by range and mean only (channel/spatial layout
-differs). Receipt: [`smoke-receipts/parity-report_4a5cb9a.json`](smoke-receipts/).
+differs). The reference side is bound to the PyTorch checkpoint
+(`model.safetensors`, SHA-256 `a3416e1c…`); the WebGPU side records the
+converted `weights.bin` it ran (`0e5c23c8…`), which `tools/convert_weights.py`
+derives from that checkpoint, but the report does not itself prove that
+derivation. Receipt: [`smoke-receipts/parity-report_4a5cb9a.json`](smoke-receipts/).
 
 ### Deterministic output receipt
 
