@@ -38,7 +38,7 @@ import {
   terminateProductRouteWorkers,
 } from './product_route.js';
 import { createForegroundOpportunityBridge } from './foreground_opportunity_bridge.js';
-import { createProducerLifecycle } from './producer_lifecycle.js';
+import { createProducerLifecycle, prepareProducerRun } from './producer_lifecycle.js';
 import {
   createSf3dImageToMeshRouteReceipt,
   createStagedSubmitProfile,
@@ -217,12 +217,14 @@ export async function createSf3dProducer({
       if (signal?.aborted) throw new Error('sf3d run aborted before start');
       runSequence += 1;
       const id = runId ?? `sf3d-run-${runSequence}`;
-      lifecycle.beginRun(id);                       // refuses when disposed or a run is active
-      const foregroundRun = bridge.beginRun(id);
-      const options = Object.freeze({
-        ...createProductRouteOptions({ workers: routeWorkers, overrides: routeOverrides }),
-        foregroundOpportunities: foregroundRun.foregroundOpportunities,
+      // Every fallible input is validated before any state is acquired, and
+      // everything after acquisition sits under one exactly-once release
+      // boundary (producer_lifecycle.js prepareProducerRun).
+      const prepared = prepareProducerRun({
+        lifecycle, bridge, runId: id,
+        buildOptions: () => createProductRouteOptions({ workers: routeWorkers, overrides: routeOverrides }),
       });
+      const { options } = prepared;
       let result;
       let foregroundOpportunityReport;
       let lastProgress = null;
@@ -233,8 +235,7 @@ export async function createSf3dProducer({
       } catch (error) {
         // Preserve the phase and the last trustworthy evidence on the error
         // (Wake answer 5): the host keeps it with its own episode receipts.
-        foregroundOpportunityReport = await foregroundRun.finish();
-        lifecycle.endRun(id);                       // runs a deferred dispose if one was requested
+        foregroundOpportunityReport = await prepared.release();   // finishes the bridge run, ends the lifecycle run (deferred dispose if requested)
         try {
           error.sf3dRun = Object.freeze({
             runId: id,
@@ -245,8 +246,7 @@ export async function createSf3dProducer({
         } catch { /* error object not extensible; the throw still carries the message */ }
         throw error;
       }
-      foregroundOpportunityReport = await foregroundRun.finish();
-      lifecycle.endRun(id);                         // runs a deferred dispose if one was requested
+      foregroundOpportunityReport = await prepared.release();       // finishes the bridge run, ends the lifecycle run (deferred dispose if requested)
       const finishedAtMs = performance.now();
       const receipt = buildRouteReceipt({ backend, image, result, commit });
       const receiptValidation = validateRouteReceipt(receipt);

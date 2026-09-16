@@ -6,3 +6,4 @@ public/weights.json
 *.pyc
 __pycache__/
 .venv/
+dist-lib/

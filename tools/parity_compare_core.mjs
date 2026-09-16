@@ -368,6 +368,8 @@ import { existsSync as _existsSync, readFileSync as _readFileSync, openSync as _
 import { join as _join } from 'node:path';
 
 export const PARITY_REFERENCE_MANIFEST_SCHEMA = 'sf3d.parity-reference-manifest.v0';
+/** Every artifact the parity report compares or reads; all must be listed and hashed. */
+export const PARITY_REQUIRED_ARTIFACTS = Object.freeze(['summary.json', 'density.npy', 'vertex_offset.npy', 'grid_positions.npy', 'camera_embed.npy', 'scene_codes.npy']);
 
 /** Streaming (chunked, synchronous) SHA-256 — weights.bin is larger than Node's 2 GiB readFileSync limit. */
 export function sha256File(filePath, chunkBytes = 8 * 1024 * 1024) {
@@ -420,8 +422,18 @@ export function verifyReferenceProvenance(referenceDir, manifest, { inputSha256 
   } else {
     errors.push('input image sha256 not supplied for provenance check');
   }
+  // Complete identity contract (r2 MEDIUM): every identity the report
+  // advertises must be present, and the full artifact set must be listed.
+  if (!manifest?.generated_at) errors.push('generation timestamp missing from manifest');
   if (!manifest?.sf3d?.commit) errors.push('sf3d source commit missing from manifest');
   if (!manifest?.model?.repo_id) errors.push('model identity missing from manifest');
+  if (!manifest?.model?.snapshot_commit) errors.push('model snapshot commit missing from manifest');
+  if (!manifest?.model?.weights_sha256) errors.push('model weights hash missing from manifest');
+  if (!manifest?.generator?.script_sha256) errors.push('generator script hash missing from manifest');
+  if (!manifest?.generator?.sf3d_webgpu?.commit) errors.push('generator source commit missing from manifest');
+  if (!manifest?.torch?.version) errors.push('torch identity missing from manifest');
+  const missingRequired = PARITY_REQUIRED_ARTIFACTS.filter(name => !artifacts[name]?.sha256);
+  if (missingRequired.length) errors.push(`required artifacts missing from manifest: ${missingRequired.join(', ')}`);
   const identities = Object.freeze({
     generatedAt: manifest?.generated_at ?? null,
     inputSha256: manifest?.input?.sha256 ?? null,

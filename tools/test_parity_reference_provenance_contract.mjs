@@ -27,6 +27,10 @@ function makeReference() {
   const inputPath = path.join(dir, 'input.png'); fs.writeFileSync(inputPath, input);
   const density = Buffer.from('density-npy'); fs.writeFileSync(path.join(dir, 'density.npy'), density);
   const summary = Buffer.from('{"density":{}}'); fs.writeFileSync(path.join(dir, 'summary.json'), summary);
+  const extra = {};
+  for (const name of ['vertex_offset.npy', 'grid_positions.npy', 'camera_embed.npy', 'scene_codes.npy']) {
+    const b = Buffer.from(name); fs.writeFileSync(path.join(dir, name), b); extra[name] = { sha256: sha(b), bytes: b.length };
+  }
   const manifest = {
     schema: PARITY_REFERENCE_MANIFEST_SCHEMA,
     generated_at: '2026-09-16T00:00:00Z',
@@ -35,7 +39,7 @@ function makeReference() {
     sf3d: { repo: '/x/sf3d', commit: 'cafebabe', dirty: false },
     model: { repo_id: 'stabilityai/stable-fast-3d', snapshot_commit: 'snap', weights_sha256: 'w'.repeat(64) },
     torch: { version: '2.x', device: 'mps' },
-    artifacts: { 'density.npy': { sha256: sha(density), bytes: density.length }, 'summary.json': { sha256: sha(summary), bytes: summary.length } },
+    artifacts: { 'density.npy': { sha256: sha(density), bytes: density.length }, 'summary.json': { sha256: sha(summary), bytes: summary.length }, ...extra },
   };
   fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   return { dir, inputSha256: sha(input), manifest };
@@ -52,7 +56,7 @@ assert.equal(PARITY_REFERENCE_MANIFEST_SCHEMA, 'sf3d.parity-reference-manifest.v
   assert.equal(v.ok, true);
   assert.equal(v.identities.sf3dCommit, 'cafebabe');
   assert.equal(v.identities.modelSnapshotCommit, 'snap');
-  assert.equal(v.identities.artifactCount, 2);
+  assert.equal(v.identities.artifactCount, 6);
   assert.equal(sha256File(path.join(dir, 'density.npy')), sha(Buffer.from('density-npy')));
   console.log('ok  matching manifest accepted with identities');
 }
@@ -101,6 +105,26 @@ assert.equal(PARITY_REFERENCE_MANIFEST_SCHEMA, 'sf3d.parity-reference-manifest.v
   assert.match(v.errors.join('\n'), /sf3d source commit missing/);
   assert.match(v.errors.join('\n'), /model identity missing/);
   console.log('ok  manifest without source/model identity rejected');
+}
+
+// 8. Completeness (r2 MEDIUM, 2026-09-16): every identity the report advertises
+//    is required, and the full artifact set the comparison needs must be listed
+//    and hashed; a partial manifest is not evidentiary.
+{
+  const { PARITY_REQUIRED_ARTIFACTS } = await import('./parity_compare_core.mjs');
+  assert.deepEqual([...PARITY_REQUIRED_ARTIFACTS], ['summary.json', 'density.npy', 'vertex_offset.npy', 'grid_positions.npy', 'camera_embed.npy', 'scene_codes.npy']);
+  const { dir, inputSha256, manifest } = makeReference();
+  const twoOnly = { ...manifest, artifacts: { 'density.npy': manifest.artifacts['density.npy'], 'summary.json': manifest.artifacts['summary.json'] } };
+  const partial = verifyReferenceProvenance(dir, twoOnly, { inputSha256 });
+  assert.equal(partial.ok, false);
+  assert.match(partial.errors.join('\n'), /required artifacts missing from manifest: vertex_offset.npy, grid_positions.npy, camera_embed.npy, scene_codes.npy/);
+  // Missing identities are each named.
+  const stripped = { ...manifest, generated_at: null, generator: { ...manifest.generator, script_sha256: null, sf3d_webgpu: { commit: null } }, model: { repo_id: 'stabilityai/stable-fast-3d' }, torch: null };
+  const v = verifyReferenceProvenance(dir, stripped, { inputSha256 });
+  for (const re of [/generation timestamp missing/, /generator script hash missing/, /generator source commit missing/, /model snapshot commit missing/, /model weights hash missing/, /torch identity missing/]) {
+    assert.match(v.errors.join('\n'), re);
+  }
+  console.log('ok  incomplete manifests (missing identities / required artifacts) are not evidentiary');
 }
 
 console.log('\nPARITY REFERENCE PROVENANCE CONTRACT PASSED');

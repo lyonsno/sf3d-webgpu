@@ -51,6 +51,22 @@ for (const [name, args, env, phase, re] of cases) {
 
 // --- Parity smoke ---
 const demoImage = path.join(REPO, 'public/demo_chair.png');
+const REQUIRED = ['summary.json', 'density.npy', 'vertex_offset.npy', 'grid_positions.npy', 'camera_embed.npy', 'scene_codes.npy'];
+function writeBoundReference(prefix, { tamper = null } = {}) {
+  const refDir = fs.mkdtempSync(path.join(tmp, prefix));
+  const sha = (b) => createHash('sha256').update(b).digest('hex');
+  const artifacts = {};
+  for (const name of REQUIRED) {
+    const b = Buffer.from(name); fs.writeFileSync(path.join(refDir, name), b); artifacts[name] = { sha256: sha(b), bytes: b.length };
+  }
+  if (tamper) artifacts[tamper] = { sha256: sha(Buffer.from('other')), bytes: 5 };
+  fs.writeFileSync(path.join(refDir, 'manifest.json'), JSON.stringify({
+    schema: 'sf3d.parity-reference-manifest.v0', generated_at: '2026-09-16T00:00:00Z', input: { sha256: sha(fs.readFileSync(demoImage)) },
+    sf3d: { commit: 'cafebabe' }, model: { repo_id: 'stabilityai/stable-fast-3d', snapshot_commit: 'snap', weights_sha256: 'w' },
+    generator: { script_sha256: 's', sf3d_webgpu: { commit: 'g' } }, torch: { version: '2.x' }, artifacts,
+  }));
+  return refDir;
+}
 {
   // Unbound reference directory: no manifest → refused at reference-provenance.
   const refDir = fs.mkdtempSync(path.join(tmp, 'ref-nomanifest-'));
@@ -66,14 +82,7 @@ const demoImage = path.join(REPO, 'public/demo_chair.png');
 }
 {
   // Tampered artifact under a real manifest → refused by name.
-  const refDir = fs.mkdtempSync(path.join(tmp, 'ref-tampered-'));
-  const density = Buffer.from('density'); fs.writeFileSync(path.join(refDir, 'density.npy'), density);
-  const sha = (b) => createHash('sha256').update(b).digest('hex');
-  fs.writeFileSync(path.join(refDir, 'manifest.json'), JSON.stringify({
-    schema: 'sf3d.parity-reference-manifest.v0', input: { sha256: sha(fs.readFileSync(demoImage)) },
-    sf3d: { commit: 'cafebabe' }, model: { repo_id: 'stabilityai/stable-fast-3d' },
-    artifacts: { 'density.npy': { sha256: sha(Buffer.from('other')) } },
-  }));
+  const refDir = writeBoundReference('ref-tampered-', { tamper: 'density.npy' });
   const report = path.join(tmp, 'parity-tampered.json');
   const r = run('smoke_parity.mjs', ['--reference', refDir, '--report', report], { IMAGE: demoImage });
   assert.notEqual(r.status, 0);
@@ -84,14 +93,7 @@ const demoImage = path.join(REPO, 'public/demo_chair.png');
 }
 {
   // Injected failure at vite-start after provenance passed → report names vite-start.
-  const refDir = fs.mkdtempSync(path.join(tmp, 'ref-ok-'));
-  const density = Buffer.from('density'); fs.writeFileSync(path.join(refDir, 'density.npy'), density);
-  const sha = (b) => createHash('sha256').update(b).digest('hex');
-  fs.writeFileSync(path.join(refDir, 'manifest.json'), JSON.stringify({
-    schema: 'sf3d.parity-reference-manifest.v0', input: { sha256: sha(fs.readFileSync(demoImage)) },
-    sf3d: { commit: 'cafebabe' }, model: { repo_id: 'stabilityai/stable-fast-3d' },
-    artifacts: { 'density.npy': { sha256: sha(density) } },
-  }));
+  const refDir = writeBoundReference('ref-ok-');
   for (const phase of ['vite-start', 'browser-launch']) {
     const report = path.join(tmp, `parity-${phase}.json`);
     const r = run('smoke_parity.mjs', ['--reference', refDir, '--report', report], { IMAGE: demoImage, SF3D_PARITY_INJECT_FAILURE: phase });
@@ -101,6 +103,26 @@ const demoImage = path.join(REPO, 'public/demo_chair.png');
     assert.match(d.failure.message, new RegExp(`injected failure at ${phase}`));
     console.log(`ok  parity smoke: injected ${phase} → durable report`);
   }
+}
+
+{
+  // r2 MEDIUM (2026-09-16): a REAL Vite spawn failure (not an injected throw)
+  // must be caught and reported at vite-start. PATH without npx → spawn ENOENT
+  // arrives as an asynchronous child 'error' event; the harness must own it.
+  const refDir = writeBoundReference('ref-spawnfail-');
+  // A PATH that still resolves git (source identity runs first) but has no npx.
+  const binDir = fs.mkdtempSync(path.join(tmp, 'bin-'));
+  const gitPath = spawnSync('/usr/bin/which', ['git'], { encoding: 'utf8' }).stdout.trim() || '/usr/bin/git';
+  fs.symlinkSync(gitPath, path.join(binDir, 'git'));
+  const report = path.join(tmp, 'parity-spawnfail.json');
+  const r = run('smoke_parity.mjs', ['--reference', refDir, '--report', report], { IMAGE: demoImage, PATH: binDir });
+  assert.notEqual(r.status, 0);
+  assert.ok(fs.existsSync(report), `real spawn failure must leave a report (stderr: ${r.stderr.slice(0, 300)})`);
+  const d = readReport(report);
+  assert.equal(d.failure.phase, 'vite-start');
+  assert.match(d.failure.message, /ENOENT|spawn/);
+  assert.ok(d.webgpuIdentity?.commit, 'established identities travel with the failure report');
+  console.log('ok  parity smoke: real Vite spawn failure → durable report at vite-start with identities');
 }
 
 console.log('\nWITNESS FAILURE REPORT CONTRACT PASSED');

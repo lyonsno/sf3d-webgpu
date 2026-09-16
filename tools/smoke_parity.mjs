@@ -64,6 +64,7 @@ const enterPhase = (name) => {
   phase = name;
   if (INJECT_FAILURE === name) throw new Error(`injected failure at ${name}`);
 };
+let webgpuIdentity = null;     // established at source-identity; travels with any failure report
 function writeFailureReport(err) {
   writeJsonReportAtomic(REPORT_PATH, {
     runId: RUN_ID,
@@ -71,6 +72,7 @@ function writeFailureReport(err) {
     evidentiary: false,
     reference: { dir: REF_DIR },
     requested: { image: IMAGE, reference: REF_DIR, report: REPORT_PATH },
+    webgpuIdentity,
     failure: { phase, message: err.message },
     parity: null,
   });
@@ -149,7 +151,7 @@ try {
   const weightsPath = path.join(REPO, 'public/weights.bin');
   const weightsSha256 = existsSync(weightsPath) ? sha256File(weightsPath) : null;
   if (!weightsSha256) throw new Error(`public/weights.bin not present; the WebGPU weight identity cannot be recorded`);
-  const webgpuIdentity = {
+  webgpuIdentity = {
     commit, dirty, kitVersion, imageSha256: inputSha256, weightsSha256,
     // weights.bin is the fp16 flat binary tools/convert_weights.py derives from
     // the PyTorch checkpoint the reference manifest hashes; this report records
@@ -158,13 +160,23 @@ try {
   };
   console.log(`Provenance: reference generated ${provenance.identities.generatedAt} from sf3d ${String(provenance.identities.sf3dCommit).slice(0, 10)} model ${provenance.identities.modelRepoId}@${provenance.identities.modelSnapshotCommit}; webgpu ${commit.slice(0, 10)}${dirty ? ' (dirty)' : ''} kit ${kitVersion}`);
 
-  // Start vite
+  // Start vite as an awaited, phase-tracked operation: a spawn failure (child
+  // 'error' event), an early exit, or a missing ready line are all vite-start
+  // failures with a durable report; --strictPort so a busy port is a failure,
+  // never a silent move to another port (r2 MEDIUM, 2026-09-16).
   enterPhase('vite-start');
-  vite = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(PORT)], {
+  vite = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(PORT), '--strictPort'], {
     stdio: ['pipe', 'pipe', 'pipe'],
     cwd: REPO,
   });
-  await new Promise(r => setTimeout(r, 3000));
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`vite did not report ready on 127.0.0.1:${PORT} within 40s`)), 40000);
+    let stderrTail = '';
+    vite.stdout.on('data', d => { if (/Local:|ready/.test(d.toString())) { clearTimeout(timer); resolve(); } });
+    vite.stderr.on('data', d => { stderrTail = (stderrTail + d.toString()).slice(-400); });
+    vite.on('error', e => { clearTimeout(timer); reject(new Error(`vite spawn failed: ${e.message}`)); });
+    vite.on('exit', (code, signal) => { clearTimeout(timer); reject(new Error(`vite exited before ready (code ${code}, signal ${signal}): ${stderrTail.trim()}`)); });
+  });
 
   enterPhase('browser-launch');
   browser = await puppeteer.launch({

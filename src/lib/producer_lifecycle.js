@@ -41,3 +41,46 @@ export function createProducerLifecycle({ release }) {
     },
   });
 }
+
+/**
+ * Validate every fallible run input BEFORE acquiring lifecycle or bridge
+ * state, then acquire both and hand back one exactly-once release boundary.
+ * A rejected run therefore never leaves an active run behind (r2 HIGH,
+ * 2026-09-16: an empty run id or a bad route override used to wedge the
+ * producer after lifecycle.beginRun had already fired).
+ *
+ * buildOptions() must return the frozen route options WITHOUT the
+ * foreground interlock; it is attached here from the bridge run.
+ */
+export function prepareProducerRun({ lifecycle, bridge, runId, buildOptions }) {
+  if (typeof runId !== 'string' || !runId.trim()) throw new Error('runId must be a non-empty string');
+  if (typeof buildOptions !== 'function') throw new Error('buildOptions must be a function');
+  const baseOptions = buildOptions();            // throws on unknown worker roles / bad overrides
+  lifecycle.beginRun(runId);                       // refuses when disposed or a run is active
+  let foregroundRun;
+  try {
+    foregroundRun = bridge.beginRun(runId);
+  } catch (error) {
+    lifecycle.endRun(runId);
+    throw error;
+  }
+  const options = Object.freeze({ ...baseOptions, foregroundOpportunities: foregroundRun.foregroundOpportunities });
+  let released = null;
+  return Object.freeze({
+    runId,
+    options,
+    foregroundRun,
+    /** Finish the bridge run and end the lifecycle run exactly once; returns the foreground report. */
+    async release() {
+      if (released) return released;
+      released = (async () => {
+        try {
+          return await foregroundRun.finish();
+        } finally {
+          lifecycle.endRun(runId);
+        }
+      })();
+      return released;
+    },
+  });
+}
