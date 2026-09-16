@@ -1,0 +1,776 @@
+{
+  "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z",
+  "generatedAt": "2026-09-16T02:34:18.979Z",
+  "evidentiary": true,
+  "provenance": {
+    "ok": true,
+    "identities": {
+      "generatedAt": "2026-09-16T02:33:36.013377+00:00",
+      "inputSha256": "3220e5ef5d598ae99f303834358d36e89d5a7dc73e6584b62e30de80c22eb624",
+      "sf3dCommit": "ff21fc491b4dc5314bf6734c7c0dabd86b5f5bb2",
+      "sf3dDirty": true,
+      "generatorCommit": "4a5cb9a376dc9e5c976a68bd7cd74c58c6ac0515",
+      "generatorScriptSha256": "8903242e818a46412b94845f0475849b8f32c8ee24d2cbd69f9233eb37b08b77",
+      "modelRepoId": "stabilityai/stable-fast-3d",
+      "modelSnapshotCommit": "f0c9a8ffd62cb1bbc8a7a53c9f87a0be1b6be778",
+      "modelWeightsSha256": "a3416e1cf654e7d4f5e75f116cec2c3f0a14501a77d30c2f6068bbda178de388",
+      "torchVersion": "2.12.1",
+      "artifactCount": 11
+    },
+    "manifestArtifacts": [
+      "backbone_output.npy",
+      "camera_embed.npy",
+      "density.npy",
+      "dinov2_output.npy",
+      "grid_positions.npy",
+      "raw_faces.npy",
+      "raw_vertices.npy",
+      "scene_codes.npy",
+      "summary.json",
+      "triplane_features.npy",
+      "vertex_offset.npy"
+    ]
+  },
+  "webgpuIdentity": {
+    "commit": "4a5cb9a376dc9e5c976a68bd7cd74c58c6ac0515",
+    "dirty": false,
+    "kitVersion": "0.1.48",
+    "imageSha256": "3220e5ef5d598ae99f303834358d36e89d5a7dc73e6584b62e30de80c22eb624",
+    "weightsSha256": "0e5c23c8c502492c0b4432006ac30f2d11b2a4c102a3bf9f21c2fcf094ddbffd"
+  },
+  "reference": {
+    "dir": "/Users/noahlyons/.local/state/gpu-greenroom/outputs/cc34b22f95b5",
+    "summaryJson": true,
+    "npyStages": {
+      "density": {
+        "file": "/Users/noahlyons/.local/state/gpu-greenroom/outputs/cc34b22f95b5/density.npy",
+        "dtype": "<f4",
+        "shape": [
+          1,
+          535882,
+          1
+        ],
+        "fortranOrder": false
+      },
+      "vertex_offset": {
+        "file": "/Users/noahlyons/.local/state/gpu-greenroom/outputs/cc34b22f95b5/vertex_offset.npy",
+        "dtype": "<f4",
+        "shape": [
+          1,
+          535882,
+          3
+        ],
+        "fortranOrder": false
+      },
+      "grid_positions": {
+        "file": "/Users/noahlyons/.local/state/gpu-greenroom/outputs/cc34b22f95b5/grid_positions.npy",
+        "dtype": "<f4",
+        "shape": [
+          535882,
+          3
+        ],
+        "fortranOrder": false
+      },
+      "camera_embed": {
+        "file": "/Users/noahlyons/.local/state/gpu-greenroom/outputs/cc34b22f95b5/camera_embed.npy",
+        "dtype": "<f4",
+        "shape": [
+          1,
+          1,
+          768
+        ],
+        "fortranOrder": false
+      },
+      "scene_codes": {
+        "file": "/Users/noahlyons/.local/state/gpu-greenroom/outputs/cc34b22f95b5/scene_codes.npy",
+        "dtype": "<f4",
+        "shape": [
+          1,
+          3,
+          40,
+          384,
+          384
+        ],
+        "fortranOrder": false
+      }
+    }
+  },
+  "webgpu": {
+    "num_vertices": 9988,
+    "num_faces": 19976,
+    "triplane_range": [
+      -38.052921295166016,
+      41.23419189453125
+    ],
+    "density_range": [
+      0,
+      28.342599868774414
+    ],
+    "density_mean": 0.17866716909933383,
+    "density_inside_count": 4640,
+    "triplane_first_8": [
+      27.221988677978516,
+      27.001617431640625,
+      27.464462280273438,
+      27.65192413330078,
+      26.88160514831543,
+      26.639822006225586,
+      26.873188018798828,
+      27.01491928100586
+    ],
+    "first_5_verts": [
+      [
+        0.15552440285682678,
+        -0.2153051495552063,
+        -0.44065603613853455
+      ],
+      [
+        0.15472185611724854,
+        -0.21690018475055695,
+        -0.43992725014686584
+      ],
+      [
+        0.1563483327627182,
+        -0.21687345206737518,
+        -0.4398910105228424
+      ],
+      [
+        0.15388348698616028,
+        -0.21524865925312042,
+        -0.439873605966568
+      ],
+      [
+        0.15501801669597626,
+        -0.2136652171611786,
+        -0.4396347999572754
+      ]
+    ],
+    "timings": {
+      "image-preprocess": 52.39999997615814,
+      "dinov2-tokenizer": 1.600000023841858,
+      "two-stream-backbone": 12.899999976158142,
+      "triplane-decode": 20684.5,
+      "marching-tet": 29.90000009536743
+    },
+    "isosurface_threshold": 10,
+    "stage_lengths": {
+      "density": 535882,
+      "vertex_offset": 1607646,
+      "grid_positions": 1607646,
+      "camera_embed": 768
+    }
+  },
+  "pytorch": {
+    "camera_embed": {
+      "shape": [
+        1,
+        1,
+        768
+      ],
+      "min": -1.2428873777389526,
+      "max": 0.5010214447975159,
+      "first_8": [
+        0.006675809621810913,
+        0.0007518082857131958,
+        0.13713905215263367,
+        0.019813172519207,
+        0.07721097022294998,
+        -0.025435954332351685,
+        -0.006759053096175194,
+        -0.0015824884176254272
+      ]
+    },
+    "dinov2_output": {
+      "shape": [
+        1,
+        1,
+        1024,
+        1297
+      ],
+      "min": -9.564035415649414,
+      "max": 12.1157808303833,
+      "first_8": [
+        0.2344195544719696,
+        -0.07407276332378387,
+        -0.07510459423065186,
+        -0.03486888110637665,
+        -0.05090881884098053,
+        -0.19754408299922943,
+        -0.48483091592788696,
+        -0.2216135412454605
+      ]
+    },
+    "backbone_output": {
+      "shape": [
+        1,
+        1024,
+        27648
+      ],
+      "min": -5.669229507446289,
+      "max": 5.4549455642700195,
+      "first_8": [
+        -0.07854843139648438,
+        -0.08253489434719086,
+        -0.16476140916347504,
+        -0.09603101015090942,
+        -0.2965123653411865,
+        -0.061931680887937546,
+        -0.156002938747406,
+        -0.07291753590106964
+      ]
+    },
+    "scene_codes": {
+      "shape": [
+        1,
+        3,
+        40,
+        384,
+        384
+      ],
+      "min": -36.326236724853516,
+      "max": 39.10643005371094,
+      "first_8": [
+        5.949366092681885,
+        5.407079219818115,
+        7.0835747718811035,
+        6.938603401184082,
+        8.090415000915527,
+        7.676811218261719,
+        8.748010635375977,
+        8.778080940246582
+      ]
+    },
+    "triplane_features": {
+      "shape": [
+        1,
+        535882,
+        120
+      ],
+      "min": -35.401161193847656,
+      "max": 38.24591064453125,
+      "first_8": [
+        3.8159799575805664,
+        2.5839195251464844,
+        -4.324304580688477,
+        1.3829554319381714,
+        -0.10218223929405212,
+        -3.0706300735473633,
+        -0.051160722970962524,
+        -4.192895889282227
+      ]
+    },
+    "density": {
+      "shape": [
+        1,
+        535882,
+        1
+      ],
+      "min": 0,
+      "max": 28.57625961303711,
+      "mean": 0.17810964584350586,
+      "num_positive": 533005,
+      "first_8": [
+        2.354159185299909e-12,
+        1.540826053821722e-17,
+        2.2993601545056804e-21,
+        4.400712017016417e-10,
+        3.0844686162701564e-18,
+        6.566242420507189e-17,
+        8.313418040427794e-29,
+        1.0801471263276164e-18
+      ]
+    },
+    "vertex_offset": {
+      "shape": [
+        1,
+        535882,
+        3
+      ],
+      "min": -2.1135594844818115,
+      "max": 1.483612060546875,
+      "first_8": [
+        -0.006263298913836479,
+        0.0018267880659550428,
+        -0.0018531621899455786,
+        -0.009583433158695698,
+        0.001348002813756466,
+        0.0028018017765134573,
+        -0.007092430721968412,
+        0.00024440191918984056
+      ]
+    },
+    "raw_mesh": {
+      "num_vertices": 10014,
+      "num_faces": 20028,
+      "vert_bounds_min": [
+        -0.24284517765045166,
+        -0.24771100282669067,
+        -0.44277656078338623
+      ],
+      "vert_bounds_max": [
+        0.2797517776489258,
+        0.25068771839141846,
+        0.5062215328216553
+      ],
+      "first_5_verts": [
+        [
+          0.14906346797943115,
+          -0.2176467776298523,
+          -0.44142165780067444
+        ],
+        [
+          0.15142405033111572,
+          -0.21804887056350708,
+          -0.4417118728160858
+        ],
+        [
+          0.13728594779968262,
+          -0.20676511526107788,
+          -0.43565088510513306
+        ],
+        [
+          0.1376664638519287,
+          -0.20609909296035767,
+          -0.43593090772628784
+        ],
+        [
+          0.14792132377624512,
+          -0.2152753472328186,
+          -0.44125112891197205
+        ]
+      ]
+    },
+    "final_mesh": {
+      "num_vertices": 12085,
+      "num_faces": 20028
+    },
+    "sdf_near_surface_count": 373,
+    "isosurface_threshold": 10,
+    "materials": {
+      "roughness": 0.4834156334400177,
+      "metallic": 0.0013218215899541974
+    }
+  },
+  "comparison": {
+    "vertex_diff": -26,
+    "face_diff": -52,
+    "vertex_pct": "99.7",
+    "density_max_diff": 0.2336597442626953,
+    "density_mean_diff": 0.0005575232558279741
+  },
+  "parity": {
+    "schema": "sf3d.parity-comparison-report.v0",
+    "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z",
+    "kitVersion": "0.1.48",
+    "stages": {
+      "density": {
+        "stageId": "density",
+        "mode": "element-wise",
+        "layoutMismatch": false,
+        "layoutNote": null,
+        "shape": {
+          "webgpu": [
+            535882
+          ],
+          "reference": [
+            1,
+            535882,
+            1
+          ]
+        },
+        "capture": {
+          "schema": "kaminos.webgpu-parity-capture.v0",
+          "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z",
+          "stageId": "density",
+          "typedArrayConstructor": "Float32Array",
+          "elementCount": 535882,
+          "byteLength": 2143528,
+          "shape": [
+            535882
+          ],
+          "layout": null
+        },
+        "comparison": {
+          "schema": "kaminos.webgpu-parity-comparison.v0",
+          "stageId": "density",
+          "comparisonDomain": {
+            "mode": "float32-metrics",
+            "effectiveType": "Float32Array",
+            "normalization": "none"
+          },
+          "actualType": "Float32Array",
+          "referenceType": "Float32Array",
+          "sourceElementCount": 535882,
+          "comparedElementCount": 535882,
+          "sampling": {
+            "mode": "all",
+            "stride": 1,
+            "offset": 0,
+            "firstSourceIndex": 0,
+            "lastSourceIndex": 535881
+          },
+          "nonFinite": {
+            "actual": {
+              "count": 0,
+              "nanCount": 0,
+              "positiveInfinityCount": 0,
+              "negativeInfinityCount": 0
+            },
+            "reference": {
+              "count": 0,
+              "nanCount": 0,
+              "positiveInfinityCount": 0,
+              "negativeInfinityCount": 0
+            }
+          },
+          "actual": {
+            "min": 0,
+            "max": 28.342599868774414,
+            "mean": 0.17866716909933383,
+            "standardDeviation": 1.637712655004201
+          },
+          "reference": {
+            "min": 0,
+            "max": 28.57625961303711,
+            "mean": 0.1781096473117974,
+            "standardDeviation": 1.6361694634178932
+          },
+          "metrics": {
+            "exactMatch": false,
+            "mismatchCount": 533005,
+            "maxAbsoluteError": 3.858747959136963,
+            "worstSourceIndex": 177663,
+            "worstActual": 2.2132043838500977,
+            "worstReference": 6.0719523429870605,
+            "meanAbsoluteError": 0.007596947840302921,
+            "rootMeanSquareError": 0.081852656264577,
+            "l2Error": 59.91938709441274,
+            "relativeL2Error": 0.04973320260120461,
+            "relativeL2Status": "defined",
+            "cosineSimilarity": 0.9987649700941569
+          },
+          "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z"
+        }
+      },
+      "vertex_offset": {
+        "stageId": "vertex_offset",
+        "mode": "element-wise",
+        "layoutMismatch": false,
+        "layoutNote": null,
+        "shape": {
+          "webgpu": [
+            535882,
+            3
+          ],
+          "reference": [
+            1,
+            535882,
+            3
+          ]
+        },
+        "capture": {
+          "schema": "kaminos.webgpu-parity-capture.v0",
+          "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z",
+          "stageId": "vertex_offset",
+          "typedArrayConstructor": "Float32Array",
+          "elementCount": 1607646,
+          "byteLength": 6430584,
+          "shape": [
+            535882,
+            3
+          ],
+          "layout": null
+        },
+        "comparison": {
+          "schema": "kaminos.webgpu-parity-comparison.v0",
+          "stageId": "vertex_offset",
+          "comparisonDomain": {
+            "mode": "float32-metrics",
+            "effectiveType": "Float32Array",
+            "normalization": "none"
+          },
+          "actualType": "Float32Array",
+          "referenceType": "Float32Array",
+          "sourceElementCount": 1607646,
+          "comparedElementCount": 1607646,
+          "sampling": {
+            "mode": "all",
+            "stride": 1,
+            "offset": 0,
+            "firstSourceIndex": 0,
+            "lastSourceIndex": 1607645
+          },
+          "nonFinite": {
+            "actual": {
+              "count": 0,
+              "nanCount": 0,
+              "positiveInfinityCount": 0,
+              "negativeInfinityCount": 0
+            },
+            "reference": {
+              "count": 0,
+              "nanCount": 0,
+              "positiveInfinityCount": 0,
+              "negativeInfinityCount": 0
+            }
+          },
+          "actual": {
+            "min": -2.0684635639190674,
+            "max": 1.4996808767318726,
+            "mean": -0.0021457829842156705,
+            "standardDeviation": 0.037196313681031615
+          },
+          "reference": {
+            "min": -2.1135594844818115,
+            "max": 1.483612060546875,
+            "mean": -0.0021499584915301135,
+            "standardDeviation": 0.037276102494045005
+          },
+          "metrics": {
+            "exactMatch": false,
+            "mismatchCount": 1607643,
+            "maxAbsoluteError": 0.5706222802400589,
+            "worstSourceIndex": 410439,
+            "worstActual": 0.3213670253753662,
+            "worstReference": -0.2492552548646927,
+            "meanAbsoluteError": 0.0010351370781187847,
+            "rootMeanSquareError": 0.006991648708758559,
+            "l2Error": 8.864919810372784,
+            "relativeL2Error": 0.1872526365302623,
+            "relativeL2Status": "defined",
+            "cosineSimilarity": 0.9824329240297389
+          },
+          "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z"
+        }
+      },
+      "grid_positions": {
+        "stageId": "grid_positions",
+        "mode": "element-wise",
+        "layoutMismatch": false,
+        "layoutNote": null,
+        "shape": {
+          "webgpu": [
+            535882,
+            3
+          ],
+          "reference": [
+            535882,
+            3
+          ]
+        },
+        "capture": {
+          "schema": "kaminos.webgpu-parity-capture.v0",
+          "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z",
+          "stageId": "grid_positions",
+          "typedArrayConstructor": "Float32Array",
+          "elementCount": 1607646,
+          "byteLength": 6430584,
+          "shape": [
+            535882,
+            3
+          ],
+          "layout": null
+        },
+        "comparison": {
+          "schema": "kaminos.webgpu-parity-comparison.v0",
+          "stageId": "grid_positions",
+          "comparisonDomain": {
+            "mode": "float32-metrics",
+            "effectiveType": "Float32Array",
+            "normalization": "none"
+          },
+          "actualType": "Float32Array",
+          "referenceType": "Float32Array",
+          "sourceElementCount": 1607646,
+          "comparedElementCount": 1607646,
+          "sampling": {
+            "mode": "all",
+            "stride": 1,
+            "offset": 0,
+            "firstSourceIndex": 0,
+            "lastSourceIndex": 1607645
+          },
+          "nonFinite": {
+            "actual": {
+              "count": 0,
+              "nanCount": 0,
+              "positiveInfinityCount": 0,
+              "negativeInfinityCount": 0
+            },
+            "reference": {
+              "count": 0,
+              "nanCount": 0,
+              "positiveInfinityCount": 0,
+              "negativeInfinityCount": 0
+            }
+          },
+          "actual": {
+            "min": -0.8700001835823059,
+            "max": 0.8700000047683716,
+            "mean": -8.36689097781097e-11,
+            "standardDeviation": 0.509713894431223
+          },
+          "reference": {
+            "min": -0.8700001835823059,
+            "max": 0.8700000047683716,
+            "mean": 3.095823233936524e-10,
+            "standardDeviation": 0.5097138992405735
+          },
+          "metrics": {
+            "exactMatch": false,
+            "mismatchCount": 930742,
+            "maxAbsoluteError": 5.960464477539063e-8,
+            "worstSourceIndex": 5,
+            "worstActual": 0.8591249585151672,
+            "worstReference": 0.859125018119812,
+            "meanAbsoluteError": 2.089693717342551e-8,
+            "rootMeanSquareError": 3.140904417958099e-8,
+            "l2Error": 0.0000398244633806668,
+            "relativeL2Error": 6.162092936130947e-8,
+            "relativeL2Status": "defined",
+            "cosineSimilarity": 0.9999999999999982
+          },
+          "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z"
+        }
+      },
+      "camera_embed": {
+        "stageId": "camera_embed",
+        "mode": "element-wise",
+        "layoutMismatch": false,
+        "layoutNote": null,
+        "shape": {
+          "webgpu": [
+            768
+          ],
+          "reference": [
+            1,
+            1,
+            768
+          ]
+        },
+        "capture": {
+          "schema": "kaminos.webgpu-parity-capture.v0",
+          "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z",
+          "stageId": "camera_embed",
+          "typedArrayConstructor": "Float32Array",
+          "elementCount": 768,
+          "byteLength": 3072,
+          "shape": [
+            768
+          ],
+          "layout": null
+        },
+        "comparison": {
+          "schema": "kaminos.webgpu-parity-comparison.v0",
+          "stageId": "camera_embed",
+          "comparisonDomain": {
+            "mode": "float32-metrics",
+            "effectiveType": "Float32Array",
+            "normalization": "none"
+          },
+          "actualType": "Float32Array",
+          "referenceType": "Float32Array",
+          "sourceElementCount": 768,
+          "comparedElementCount": 768,
+          "sampling": {
+            "mode": "all",
+            "stride": 1,
+            "offset": 0,
+            "firstSourceIndex": 0,
+            "lastSourceIndex": 767
+          },
+          "nonFinite": {
+            "actual": {
+              "count": 0,
+              "nanCount": 0,
+              "positiveInfinityCount": 0,
+              "negativeInfinityCount": 0
+            },
+            "reference": {
+              "count": 0,
+              "nanCount": 0,
+              "positiveInfinityCount": 0,
+              "negativeInfinityCount": 0
+            }
+          },
+          "actual": {
+            "min": -1.2428911924362183,
+            "max": 0.5009194016456604,
+            "mean": 0.0279498322706786,
+            "standardDeviation": 0.1119354872188117
+          },
+          "reference": {
+            "min": -1.2428873777389526,
+            "max": 0.5010214447975159,
+            "mean": 0.027949172239308002,
+            "standardDeviation": 0.11193431000684728
+          },
+          "metrics": {
+            "exactMatch": false,
+            "mismatchCount": 768,
+            "maxAbsoluteError": 0.00014831125736236572,
+            "worstSourceIndex": 241,
+            "worstActual": 0.010491058230400085,
+            "worstReference": 0.010639369487762451,
+            "meanAbsoluteError": 0.00003604797060082395,
+            "rootMeanSquareError": 0.000045026792809520066,
+            "l2Error": 0.0012478190855674518,
+            "relativeL2Error": 0.00039027857466497433,
+            "relativeL2Status": "defined",
+            "cosineSimilarity": 0.9999999239058597
+          },
+          "runId": "sf3d-parity-webgpu-2026-09-16T02-33-42-240Z"
+        }
+      },
+      "scene_codes": {
+        "stageId": "scene_codes",
+        "mode": "stats-only",
+        "layoutMismatch": true,
+        "layoutNote": "WebGPU triplane buffer and PyTorch scene_codes differ in channel/spatial ordering; element-wise comparison is not meaningful without a layout transform, so only range/mean stats are compared",
+        "shape": {
+          "webgpu": null,
+          "reference": [
+            1,
+            3,
+            40,
+            384,
+            384
+          ]
+        },
+        "actual": {
+          "min": -38.052921295166016,
+          "max": 41.23419189453125,
+          "mean": -0.5228106970904187,
+          "count": 17694720
+        },
+        "reference": {
+          "min": -36.326236724853516,
+          "max": 39.10643005371094,
+          "mean": -0.5082402066844482,
+          "count": 17694720
+        },
+        "capture": null,
+        "comparison": null
+      }
+    },
+    "summary": {
+      "compared": 4,
+      "exactMatches": 0,
+      "statsOnly": 1,
+      "worstRelativeL2": {
+        "stageId": "vertex_offset",
+        "value": 0.1872526365302623,
+        "status": "defined"
+      },
+      "worstMaxAbsoluteError": {
+        "stageId": "density",
+        "value": 3.858747959136963,
+        "sourceIndex": 177663
+      }
+    },
+    "missing": {
+      "webgpu": [],
+      "reference": []
+    }
+  }
+}

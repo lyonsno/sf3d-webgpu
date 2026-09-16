@@ -18,6 +18,11 @@
  * arena are not reentrant); `signal` is checked at run start only (no mid-run
  * cancellation of SF3D GPU work); the route receipt's artifact hashes are
  * 'not-computed' as in the app (the witness harness hashes the GLB).
+ * `dispose()` terminates producer-created workers and releases producer-loaded
+ * weight buffers; it never destroys an injected device or injected weights.
+ * A failed run throws with `error.sf3dRun` = { runId, lastProgress,
+ * foregroundOpportunityReport, identity } so the host keeps the phase and the
+ * last trustworthy evidence.
  */
 import { initGPU } from './gpu.js';
 import { loadWeights } from './weights.js';
@@ -27,6 +32,7 @@ import {
   createProductRouteOptions,
   createProductRouteWorkers,
   describeProductRouteOptions,
+  productRouteWorkerModuleUrls,
   terminateProductRouteWorkers,
 } from './product_route.js';
 import { createForegroundOpportunityBridge } from './foreground_opportunity_bridge.js';
@@ -41,6 +47,39 @@ import {
 } from '@kaminos/webgpu-inference-kit';
 
 export const SF3D_PRODUCER_SCHEMA = 'sf3d.producer.v0';
+export const SF3D_PRODUCER_RUN_IDENTITY_SCHEMA = 'sf3d.producer-run-identity.v0';
+
+/** Resolve the weights URL the way loadWeights will fetch it (absolute when a document location exists). */
+export function resolveWeightsUrl(weightsUrl, base = globalThis.location?.href ?? null) {
+  if (typeof weightsUrl !== 'string' || !weightsUrl) throw new Error('weightsUrl must be a non-empty string');
+  try { return new URL(weightsUrl, base ?? undefined).href; } catch { return weightsUrl; }
+}
+
+/** Producer-created GPU weight buffers are released on dispose; injected weights and the borrowed device never are. */
+export function releaseLoadedWeights(weights) {
+  let released = 0;
+  for (const value of Object.values(weights || {})) {
+    if (value && typeof value.destroy === 'function') { value.destroy(); released += 1; }
+  }
+  return released;
+}
+
+/** Run/clock identity bound to a producer run (Wake answer 5: run/clock identity + effective topology). */
+export function buildRunIdentity({ runId, routeId, startedAtMs, finishedAtMs, deviceInjected, commit, kitVersion }) {
+  return Object.freeze({
+    schema: SF3D_PRODUCER_RUN_IDENTITY_SCHEMA,
+    runId,
+    routeId,
+    timeOrigin: globalThis.performance?.timeOrigin ?? null,
+    clock: 'performance.now',
+    startedAtMs,
+    finishedAtMs,
+    durationMs: finishedAtMs - startedAtMs,
+    deviceTopology: deviceInjected ? 'host-injected-device' : 'producer-owned-device',
+    producerCommit: commit,
+    kitVersion,
+  });
+}
 export const SF3D_REQUIRED_RECEIPT_STAGES = Object.freeze([
   'image-preprocess', 'dinov2-tokenizer', 'two-stream-backbone',
   'triplane-decode', 'marching-tet', 'texture-bake', 'glb-export',
@@ -117,7 +156,17 @@ export async function createSf3dProducer({
   const gpu = await initGPU(device ? { device, adapter } : {});
   const dev = gpu.device;
   const backend = await describeBackend(gpu.adapter, dev);
+  const ownsWeights = weights == null;
   const modelWeights = weights ?? await loadWeights(dev, weightsUrl, onWeightsProgress || undefined);
+  // Explicit resource identity for a mounting host: where the weights came
+  // from and which worker module URLs must be reachable from the artifact.
+  const resources = Object.freeze({
+    weightsSource: ownsWeights ? 'loaded-by-producer' : 'injected-by-host',
+    weightsUrl: ownsWeights ? resolveWeightsUrl(weightsUrl) : null,
+    weightsSha256: 'not-computed',
+    workerModuleUrls: productRouteWorkerModuleUrls(),
+    workersSource: workers == null ? 'created-by-producer' : 'injected-by-host',
+  });
   const pipelines = initPipelines(dev);
   const ownsWorkers = workers == null;
   const routeWorkers = workers ?? createProductRouteWorkers();
@@ -139,6 +188,7 @@ export async function createSf3dProducer({
     pipelines,
     workers: routeWorkers,
     backend: backend.identity,
+    resources,
     adapterInfo: backend.info,
     adapterLimits: backend.limits,
     adapterFeatures: Object.freeze([...backend.features]),
@@ -165,17 +215,36 @@ export async function createSf3dProducer({
       });
       let result;
       let foregroundOpportunityReport;
+      let lastProgress = null;
+      const startedAtMs = performance.now();
+      const progress = (message) => { lastProgress = String(message); if (onProgress) onProgress(message); };
       try {
-        result = await runFullPipelineToGlb(dev, pipelines, modelWeights, image, options, onProgress || undefined);
-      } finally {
+        result = await runFullPipelineToGlb(dev, pipelines, modelWeights, image, options, progress);
+      } catch (error) {
+        // Preserve the phase and the last trustworthy evidence on the error
+        // (Wake answer 5): the host keeps it with its own episode receipts.
         foregroundOpportunityReport = await foregroundRun.finish();
         activeRunId = null;
+        try {
+          error.sf3dRun = Object.freeze({
+            runId: id,
+            lastProgress,
+            foregroundOpportunityReport,
+            identity: buildRunIdentity({ runId: id, routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, startedAtMs, finishedAtMs: performance.now(), deviceInjected: gpu.injected, commit, kitVersion: WEBGPU_INFERENCE_KIT_VERSION }),
+          });
+        } catch { /* error object not extensible; the throw still carries the message */ }
+        throw error;
       }
+      foregroundOpportunityReport = await foregroundRun.finish();
+      activeRunId = null;
+      const finishedAtMs = performance.now();
       const receipt = buildRouteReceipt({ backend, image, result, commit });
       const receiptValidation = validateRouteReceipt(receipt);
       return Object.freeze({
         schema: 'sf3d.producer-run-result.v0',
         runId: id,
+        identity: buildRunIdentity({ runId: id, routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, startedAtMs, finishedAtMs, deviceInjected: gpu.injected, commit, kitVersion: WEBGPU_INFERENCE_KIT_VERSION }),
+        resources,
         glb: result.glb,
         receipt,
         receiptValidation,
@@ -203,6 +272,9 @@ export async function createSf3dProducer({
       if (disposed) return;
       disposed = true;
       if (ownsWorkers) terminateProductRouteWorkers(routeWorkers);
+      // Release what the producer created; never destroy an injected weight set
+      // or the (possibly borrowed) device.
+      if (ownsWeights) releaseLoadedWeights(modelWeights);
     },
   });
 }

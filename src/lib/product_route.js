@@ -67,6 +67,22 @@ export const PRODUCT_ROUTE_WORKER_ROLES = Object.freeze({
  * analysis of exactly that shape, so a table-driven loop would work in dev and
  * silently break the production build.
  */
+/**
+ * Resolved module URLs of the five workers, explicit for a host that mounts
+ * the producer (Wake answer 4: worker module URLs must be visible and must
+ * survive the built artifact). Literal `new URL('./x', import.meta.url)`
+ * expressions so every bundler emits the chunks.
+ */
+export function productRouteWorkerModuleUrls() {
+  return Object.freeze({
+    preprocessWorker: new URL('./preprocess_worker.js', import.meta.url).href,
+    clipPrepWorker: new URL('./clip_prep_worker.js', import.meta.url).href,
+    marchingTetWorker: new URL('./marching_tet_worker.js', import.meta.url).href,
+    uvUnwrapWorker: new URL('./uv_unwrap_worker.js', import.meta.url).href,
+    materializeWorker: new URL('./materialize_worker.js', import.meta.url).href,
+  });
+}
+
 export function createProductRouteWorkers() {
   if (typeof Worker !== 'function') {
     throw new Error('createProductRouteWorkers requires a browser Worker constructor');
