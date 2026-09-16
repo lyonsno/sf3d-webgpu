@@ -293,7 +293,10 @@ differs). The reference side is bound to the PyTorch checkpoint
 (`model.safetensors`, SHA-256 `a3416e1c…`); the WebGPU side records the
 converted `weights.bin` it ran (`0e5c23c8…`), which `tools/convert_weights.py`
 derives from that checkpoint, but the report does not itself prove that
-derivation. Receipt: [`smoke-receipts/parity-report_4a5cb9a.json`](smoke-receipts/).
+derivation. A report is evidentiary only when the reference provenance
+verified and every required stage compared on both sides; the receipt
+records that admission. Receipt:
+[`smoke-receipts/parity-report_41af338.json`](smoke-receipts/).
 
 ### Deterministic output receipt
 

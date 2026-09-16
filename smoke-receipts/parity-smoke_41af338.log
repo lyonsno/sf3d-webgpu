@@ -1,0 +1,63 @@
+=== SF3D Parity Verification ===
+Image: /private/tmp/sf3d-webgpu-slow-kit-0148-0915/public/demo_chair.png
+Reference: /Users/noahlyons/.local/state/gpu-greenroom/outputs/cc34b22f95b5
+Provenance: reference generated 2026-09-16T02:33:36.013377+00:00 from sf3d ff21fc491b model stabilityai/stable-fast-3d@f0c9a8ffd62cb1bbc8a7a53c9f87a0be1b6be778; webgpu 41af33835e kit 0.1.48
+Run: sf3d-parity-webgpu-2026-09-16T04-33-04-567Z
+Weights loaded. Uploading image...
+Running inference with parity dumps...
+
+
+=== Parity Comparison ===
+
+Mesh vertices:  WebGPU=9988  PyTorch=10014  diff=-26  (99.7%)
+Mesh faces:     WebGPU=19976  PyTorch=20028  diff=-52  (99.7%)
+  (PyTorch run_image post-processed: 12085 verts, 20028 faces)
+
+First 5 vertices (ordering may differ between implementations):
+  v0: WebGPU=[0.155524, -0.215305, -0.440656]  PyTorch=[0.149063, -0.217647, -0.441422]
+  v1: WebGPU=[0.154722, -0.216900, -0.439927]  PyTorch=[0.151424, -0.218049, -0.441712]
+  v2: WebGPU=[0.156348, -0.216873, -0.439891]  PyTorch=[0.137286, -0.206765, -0.435651]
+  v3: WebGPU=[0.153883, -0.215249, -0.439874]  PyTorch=[0.137666, -0.206099, -0.435931]
+  v4: WebGPU=[0.155018, -0.213665, -0.439635]  PyTorch=[0.147921, -0.215275, -0.441251]
+
+Triplane (scene codes):
+  WebGPU range: [-38.0529, 41.2342]
+  PyTorch range: [-36.3262, 39.1064]
+  WebGPU first 8: 27.221989, 27.001617, 27.464462, 27.651924, 26.881605, 26.639822, 26.873188, 27.014919
+  PyTorch first 8: 5.949366, 5.407079, 7.083575, 6.938603, 8.090415, 7.676811, 8.748011, 8.778081
+
+Density:
+  WebGPU range: [0.0000, 28.3426]
+  PyTorch range: [0.0000, 28.5763]
+  WebGPU positive: 13417  PyTorch positive: 533005  diff: -519588
+  WebGPU inside(>10): 4640
+  WebGPU mean: 0.178667  PyTorch mean: 0.178110
+  Sample comparison (first 8 density values):
+    [0]: WebGPU=0.000000e+0  PyTorch=2.354159e-12  absDiff=2.35e-12  rel=100.0%
+    [1]: WebGPU=0.000000e+0  PyTorch=1.540826e-17  absDiff=1.54e-17  rel=100.0%
+    [100]: WebGPU=0.000000e+0  PyTorch=2.299360e-21  absDiff=2.30e-21  rel=100.0%
+    [1000]: WebGPU=0.000000e+0  PyTorch=4.400712e-10  absDiff=4.40e-10  rel=100.0%
+    [10000]: WebGPU=0.000000e+0  PyTorch=3.084469e-18  absDiff=3.08e-18  rel=100.0%
+    [100000]: WebGPU=0.000000e+0  PyTorch=6.566242e-17  absDiff=6.57e-17  rel=100.0%
+    [200000]: WebGPU=0.000000e+0  PyTorch=8.313418e-29  absDiff=8.31e-29  rel=100.0%
+    [300000]: WebGPU=0.000000e+0  PyTorch=1.080147e-18  absDiff=1.08e-18  rel=100.0%
+
+Raw mesh (pre-post-processing):
+  WebGPU: 9988 vertices, 19976 faces
+  PyTorch: 10014 vertices, 20028 faces
+  Vertex diff: -26
+  Face diff: -52
+
+Materials:
+  PyTorch roughness: 0.483416
+  PyTorch metallic: 0.001322
+
+=== Kit Parity Comparison (kit 0.1.48, run sf3d-parity-webgpu-2026-09-16T04-33-04-567Z) ===
+density: 533005/535882 mismatched  maxAbs=3.859e+0 @177663 (webgpu=2.2132043838500977 ref=6.0719523429870605)  meanAbs=7.597e-3  rmse=8.185e-2  relL2=4.973e-2  cos=0.99876497
+vertex_offset: 1607643/1607646 mismatched  maxAbs=5.706e-1 @410439 (webgpu=0.3213670253753662 ref=-0.2492552548646927)  meanAbs=1.035e-3  rmse=6.992e-3  relL2=1.873e-1  cos=0.98243292
+grid_positions: 930742/1607646 mismatched  maxAbs=5.960e-8 @5 (webgpu=0.8591249585151672 ref=0.859125018119812)  meanAbs=2.090e-8  rmse=3.141e-8  relL2=6.162e-8  cos=1.00000000
+camera_embed: 768/768 mismatched  maxAbs=1.483e-4 @241 (webgpu=0.010491058230400085 ref=0.010639369487762451)  meanAbs=3.605e-5  rmse=4.503e-5  relL2=3.903e-4  cos=0.99999992
+scene_codes: stats-only (layoutMismatch)  WebGPU [-38.0529, 41.2342] mean=-0.522811  PyTorch [-36.3262, 39.1064] mean=-0.508240
+summary: compared=4 exact=0 statsOnly=1  worstRelL2=vertex_offset:1.873e-1  worstMaxAbs=density:3.859e+0
+
+Report written to /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/parity-report_c20cb55.json
