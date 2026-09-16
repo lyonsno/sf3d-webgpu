@@ -144,9 +144,10 @@ inference). The kit itself lives in the
 ## Foreground liveness
 
 The app runs the **product route**: every long GPU stage executes as
-cooperative duties through the kit, and every CPU stage runs on a Web Worker,
-so the page — and any other WebGPU work sharing the device — keeps its frame
-cadence while a mesh generates. This is the default in `src/main.js`, composed
+cooperative duties through the kit, and the five heavy CPU stages run on Web
+Workers (image upload and UV rasterization stay on the main thread), so the
+page — and any other WebGPU work sharing the GPU — keeps its frame cadence
+while a mesh generates. This is the default in `src/main.js`, composed
 in one place by [`src/lib/product_route.js`](src/lib/product_route.js):
 
 | Stage | Mechanism |
@@ -161,25 +162,32 @@ in one place by [`src/lib/product_route.js`](src/lib/product_route.js):
 | Texture bake | 4,096-texel cooperative GPU duties over a scratch arena; albedo/normal materialization on a Web Worker |
 
 Measured with [`tools/smoke_product_route.mjs`](tools/smoke_product_route.mjs)
-on an M4 Max in Chrome (`apple/metal-3`), same commit and `demo_chair.png`,
-requestAnimationFrame intervals scoped to the inference window. `--contend`
-adds a same-page WebGPU contender on a second device that submits compute work
-continuously, so "smooth" means smooth while sharing the GPU:
+on an M4 Max in Chrome (`apple/metal-3`) under a GPU Greenroom lease (no other
+GPU tenant), same commit and `demo_chair.png`, requestAnimationFrame intervals
+scoped to the inference window. `--contend` adds a same-page WebGPU contender
+on a second `GPUDevice` of the same GPU that submits compute work continuously,
+so "smooth" means smooth while sharing the GPU. Every row's cooperative reports
+pass the kit's report validator with the exact route, manifest and invocation
+identity, and the product rows carry the measured duty counts
+(24 / 2,922 / 702 / 61):
 
 | Route | Wall | Frame intervals | p95 / p99 | Max gap | > 33.3 ms | Contender submissions |
 |-------|------|-----------------|-----------|---------|-----------|-----------------------|
-| Single submit, CPU stages on the main thread | 22.3 s | 2,563 | 10.1 / 10.3 ms | 409.9 ms | 4 | — |
-| Single submit + contender | 21.9 s | 2,545 | 10.0 / 10.3 ms | 199.9 ms | 4 | 11,635 |
-| **Product route (default)** | 39.9 s | 4,741 | 9.8 / 10.2 ms | **26.4 ms** | **0** | — |
-| **Product route + contender** | 39.8 s | 4,768 | 9.9 / 10.3 ms | **49.4 ms** | **1** | **72,097** |
+| Single submit, CPU stages on the main thread | 22.6 s | 2,602 | 9.1 / 9.3 ms | 191.6 ms | 5 | — |
+| Single submit + contender | 21.0 s | 2,445 | 9.2 / 9.3 ms | 179.3 ms | 4 | 9,503 |
+| **Product route (default)** | 40.2 s | 4,789 | 9.1 / 9.3 ms | **40.9 ms** | **1** | — |
+| **Product route + contender** | 41.9 s | 4,992 | 9.1 / 9.3 ms | **132.7 ms** | **5** | **83,813** |
 
 The whole-route tail drops from hundreds of milliseconds (image preprocess,
-CLIP, UV unwrap, texture bake) to 26.4 ms idle and 49.4 ms with a contender, and a co-tenant sharing the
-GPU gets six times more work through, because the two-stream stage no longer
-monopolizes the device between submissions. The cost is wall time: the fine
+CLIP, UV unwrap, texture bake) to 40.9 ms idle, and a co-tenant sharing the
+GPU gets about 4.4× more submissions per second (1,999/s vs 452/s), because
+the two-stream stage no longer monopolizes the device between submissions.
+With a contender the largest remaining gap (132.7 ms) sits in the CLIP
+material estimate, the one GPU stage that still runs as a single submission;
+the cooperative stages stay under 60 ms. The cost is wall time: the fine
 two-stream duties make the route about 1.8× longer than the single-submit
 path. The GLB is byte-identical in every row. Receipts:
-[`smoke-receipts/product-route-witness-*_2bebf7d.json`](smoke-receipts/).
+[`smoke-receipts/product-route-witness-*_ba2b157.json`](smoke-receipts/).
 
 ```bash
 npm run smoke:product-route                      # product route, idle page
@@ -216,11 +224,11 @@ itself within a frame, and outside a run they execute immediately. Every
 receipt says where it was serviced. `npm run smoke:product-route -- --contend-same-device`
 witnesses this shape: a host contender on SF3D's own device, one frame per
 `requestAnimationFrame`. On the same machine as the table above, the host loop
-submitted 3,588 frames across the witness interval of a 40.7 s run and all
-3,588 completed: 3,561 during the run (3,205 at duty boundaries, 355 by the
-producer's idle drain, 1 at run finish) and 27 before or after it, GLB
-byte-identical. Receipt:
-[`smoke-receipts/product-route-witness-product-default-contend-same-device_b18db82.json`](smoke-receipts/).
+submitted 3,644 frames across the witness interval of a 41.9 s run and all
+3,644 completed: 3,619 during the run (3,161 at duty boundaries, 457 by the
+producer's idle drain, 1 at run finish) and 25 before or after it; the page's
+largest frame gap was 92.4 ms and the GLB byte-identical. Receipt:
+[`smoke-receipts/product-route-witness-product-default-contend-same-device_ba2b157.json`](smoke-receipts/).
 
 ## Numerical Match to PyTorch
 

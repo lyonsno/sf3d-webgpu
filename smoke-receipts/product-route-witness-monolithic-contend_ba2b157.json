@@ -1,0 +1,214 @@
+{
+  "schema": "sf3d.product-route-witness.v0",
+  "generatedAt": "2026-09-16T02:28:13.884Z",
+  "arm": "monolithic+contend",
+  "source": {
+    "commit": "ba2b157f7038a04a65845b9b5050791c688ef12f",
+    "dirty": false,
+    "kitVersion": "0.1.48",
+    "hostname": "MacBook-Pro-2.local",
+    "node": "v25.9.0",
+    "label": null,
+    "backend": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "",
+      "description": "",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+    }
+  },
+  "requested": {
+    "cooperativeDino": false,
+    "cooperativeTwoStream": false,
+    "twoStreamDutyGranularity": null,
+    "cooperativePostProcessor": false,
+    "postProcessorDutyGranularity": null,
+    "postProcessorCompletionPolicy": null,
+    "cooperativeBake": false,
+    "bakeBatchTexels": null,
+    "decoderArena": false,
+    "workers": {
+      "preprocessWorker": false,
+      "clipPrepWorker": false,
+      "marchingTetWorker": false,
+      "uvUnwrapWorker": false,
+      "materializeWorker": false
+    }
+  },
+  "effective": {
+    "offloads": {
+      "preprocess": "main",
+      "clipPrep": "main",
+      "marchingTet": "main",
+      "uvUnwrap": "main",
+      "materialize": "main"
+    },
+    "cooperative": {},
+    "cooperativeValidations": {},
+    "materializationOffloaded": null,
+    "visibility": "visible"
+  },
+  "contender": {
+    "enabled": true,
+    "mode": "second-device",
+    "submitted": 9503,
+    "completed": 9503,
+    "errors": [],
+    "receipts": null
+  },
+  "foregroundOpportunities": null,
+  "inferenceWindow": {
+    "startMs": 12854.699999928474,
+    "endMs": 33858.59999990463
+  },
+  "totalMs": 21003.8,
+  "output": {
+    "glbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7",
+    "glbBytes": 2511516,
+    "numVertices": 9988,
+    "numFaces": 19976,
+    "roughness": 0.48291463586899686,
+    "metallic": 0.0013339843040887272,
+    "expectedGlbSha256": "e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7"
+  },
+  "cadence": {
+    "wholeRoute": {
+      "frameIntervalCount": 2445,
+      "p50Ms": 8.3,
+      "p95Ms": 9.2,
+      "p99Ms": 9.3,
+      "maxMs": 179.3,
+      "over16_7": 5,
+      "over33_3": 4,
+      "over100": 4,
+      "worst": [
+        {
+          "startMs": 33657.6,
+          "endMs": 33836.9,
+          "gapMs": 179.3
+        },
+        {
+          "startMs": 33224.4,
+          "endMs": 33399.3,
+          "gapMs": 174.9
+        },
+        {
+          "startMs": 33457.6,
+          "endMs": 33616,
+          "gapMs": 158.4
+        },
+        {
+          "startMs": 12861.6,
+          "endMs": 13002.4,
+          "gapMs": 140.8
+        },
+        {
+          "startMs": 33191,
+          "endMs": 33216.1,
+          "gapMs": 25.1
+        }
+      ]
+    },
+    "byStage": {
+      "image-preprocess": {
+        "gapCount": 2,
+        "summedGapMs": 147.7,
+        "maxGapMs": 140.8,
+        "over33_3": 1,
+        "durationMs": 137.2
+      },
+      "two-stream-backbone": {
+        "gapCount": 1,
+        "summedGapMs": 8.3,
+        "maxGapMs": 8.3,
+        "over33_3": 0,
+        "durationMs": 13.7
+      },
+      "post-processor": {
+        "gapCount": 2411,
+        "summedGapMs": 20088.7,
+        "maxGapMs": 9.7,
+        "over33_3": 0,
+        "durationMs": 20088.6
+      },
+      "triplane-decode": {
+        "gapCount": 10,
+        "summedGapMs": 83.2,
+        "maxGapMs": 9.2,
+        "over33_3": 0,
+        "durationMs": 20178.7
+      },
+      "marching-tet": {
+        "gapCount": 2,
+        "summedGapMs": 33.5,
+        "maxGapMs": 25.1,
+        "over33_3": 0,
+        "durationMs": 27.6
+      },
+      "clip-material-estimate": {
+        "gapCount": 9,
+        "summedGapMs": 241.5,
+        "maxGapMs": 174.9,
+        "over33_3": 1,
+        "durationMs": 241.9
+      },
+      "uv-unwrap": {
+        "gapCount": 1,
+        "summedGapMs": 158.4,
+        "maxGapMs": 158.4,
+        "over33_3": 1,
+        "durationMs": 150.6
+      },
+      "texture-bake": {
+        "gapCount": 6,
+        "summedGapMs": 220.9,
+        "maxGapMs": 179.3,
+        "over33_3": 1,
+        "durationMs": 214.8
+      },
+      "glb-export": {
+        "gapCount": 3,
+        "summedGapMs": 21.7,
+        "maxGapMs": 8.4,
+        "over33_3": 0,
+        "durationMs": 23.9
+      },
+      "dinov2-tokenizer": {
+        "gapCount": 0,
+        "summedGapMs": 0,
+        "maxGapMs": 0,
+        "over33_3": 0,
+        "durationMs": 1.9
+      },
+      "uv-rasterize": {
+        "gapCount": 0,
+        "summedGapMs": 0,
+        "maxGapMs": 0,
+        "over33_3": 0,
+        "durationMs": 13
+      }
+    },
+    "rankedByMaxGap": [
+      "texture-bake",
+      "clip-material-estimate",
+      "uv-unwrap",
+      "image-preprocess",
+      "marching-tet",
+      "post-processor",
+      "triplane-decode",
+      "glb-export",
+      "two-stream-backbone"
+    ]
+  },
+  "stageTimingsMs": {
+    "image-preprocess": 137.20000004768372,
+    "dinov2-tokenizer": 1.899999976158142,
+    "two-stream-backbone": 13.600000023841858,
+    "triplane-decode": 20178.699999928474,
+    "marching-tet": 27.5
+  },
+  "verdict": {
+    "ok": true,
+    "errors": []
+  }
+}

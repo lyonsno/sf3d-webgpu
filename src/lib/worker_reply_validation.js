@@ -44,12 +44,16 @@ export function validateUvUnwrapReply(reply) {
   const nf = reply?.newNumFaces;
   if (!Number.isSafeInteger(nv) || nv <= 0) throw new Error(`uv-unwrap newNumVertices invalid: ${nv}`);
   if (!Number.isSafeInteger(nf) || nf <= 0) throw new Error(`uv-unwrap newNumFaces invalid: ${nf}`);
+  const assignmentBuffer = requireBuffer(reply, 'faceAssignment', 'uv-unwrap');
+  if (assignmentBuffer.byteLength % 4 !== 0) {
+    throw new Error(`uv-unwrap faceAssignment byte length ${assignmentBuffer.byteLength} is not a multiple of 4 (expected Int32 atlas slots)`);
+  }
   const r = {
     uvs: new Float32Array(requireBuffer(reply, 'uvs', 'uv-unwrap')),
     newVertices: new Float32Array(requireBuffer(reply, 'newVertices', 'uv-unwrap')),
     newNormals: new Float32Array(requireBuffer(reply, 'newNormals', 'uv-unwrap')),
     newFaces: new Uint32Array(requireBuffer(reply, 'newFaces', 'uv-unwrap')),
-    faceAssignment: new Int32Array(requireBuffer(reply, 'faceAssignment', 'uv-unwrap')),
+    faceAssignment: new Int32Array(assignmentBuffer),
     newNumVertices: nv,
     newNumFaces: nf,
   };

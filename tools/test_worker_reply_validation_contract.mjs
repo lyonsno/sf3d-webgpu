@@ -54,7 +54,7 @@ const uvFalsifiers = [
   ['truncated normals', d => { d.newNormals = new Float32Array(3).buffer; }, /newNormals length 3 != 12/],
   ['empty normals', d => { d.newNormals = new Float32Array(0).buffer; }, /newNormals length 0 != 12/],
   ['truncated face assignment', d => { d.faceAssignment = new Int32Array([0]).buffer; }, /faceAssignment length 1 != 2/],
-  ['byte-typed face assignment (wrong element type)', d => { d.faceAssignment = new Uint8Array([0, 5]).buffer; }, /faceAssignment length 0 != 2/],
+  ['byte-typed face assignment (wrong element type)', d => { d.faceAssignment = new Uint8Array([0, 5]).buffer; }, /faceAssignment byte length 2 is not a multiple of 4/],
   ['non-finite vertex', d => { const v = new Float32Array(d.newVertices); v[4] = NaN; d.newVertices = v.buffer; }, /newVertices value non-finite at 4/],
   ['non-finite normal', d => { const v = new Float32Array(d.newNormals); v[0] = -Infinity; d.newNormals = v.buffer; }, /newNormals value non-finite at 0/],
   ['non-finite uv', d => { const v = new Float32Array(d.uvs); v[5] = NaN; d.uvs = v.buffer; }, /uvs value non-finite at 5/],

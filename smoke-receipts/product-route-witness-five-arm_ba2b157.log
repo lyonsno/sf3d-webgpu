@@ -1,0 +1,100 @@
+
+=== SF3D product-route witness: product-default ===
+source ba2b157f70 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 40223.6ms  frames=4789  p50/p95/p99/max = 8.3/9.1/9.3/40.9ms  >16.7:1 >33.3:1 >100:0
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=worker clipPrep=worker marchingTet=worker uvUnwrap=worker materialize=worker
+cooperative: dinov2-tokenizer=succeeded(24 duties submitted, 24/24 items) two-stream-backbone=succeeded(2922 duties submitted, 2922/2922 items) post-processor=succeeded(702 duties submitted, 702/702 items, bounded depth 2) texture-bake=succeeded(61 duties submitted, 245837/245837 items)
+stages by max gap:
+  clip-material-estimate   maxGap=   40.9ms  >33.3×1  summed=  249.9ms  dur=246.6ms
+  two-stream-backbone      maxGap=   10.6ms  >33.3×0  summed=33091.8ms  dur=33089.9ms
+  post-processor           maxGap=    9.3ms  >33.3×0  summed= 5016.2ms  dur=5015ms
+  dinov2-tokenizer         maxGap=    9.2ms  >33.3×0  summed=  949.9ms  dur=951.3ms
+  uv-unwrap                maxGap=    9.2ms  >33.3×0  summed=    150ms  dur=148.5ms
+  triplane-decode          maxGap=    9.1ms  >33.3×0  summed=   75.8ms  dur=5094.4ms
+  image-preprocess         maxGap=      9ms  >33.3×0  summed=   58.6ms  dur=350ms
+  texture-bake             maxGap=    8.9ms  >33.3×0  summed=  275.4ms  dur=272.2ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/reentry-product-default_ba2b157.json
+
+WITNESS ACCEPTED
+
+=== SF3D product-route witness: product-default+contend ===
+source ba2b157f70 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 41936.4ms  frames=4992  p50/p95/p99/max = 8.3/9.1/9.3/132.7ms  >16.7:7 >33.3:5 >100:1
+contender (second-device): submitted=83813 completed=83813 errors=0
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=worker clipPrep=worker marchingTet=worker uvUnwrap=worker materialize=worker
+cooperative: dinov2-tokenizer=succeeded(24 duties submitted, 24/24 items) two-stream-backbone=succeeded(2922 duties submitted, 2922/2922 items) post-processor=succeeded(702 duties submitted, 702/702 items, bounded depth 2) texture-bake=succeeded(61 duties submitted, 245837/245837 items)
+stages by max gap:
+  clip-material-estimate   maxGap=  132.7ms  >33.3×1  summed=  316.2ms  dur=316.8ms
+  two-stream-backbone      maxGap=   58.4ms  >33.3×3  summed=34458.7ms  dur=34466.3ms
+  image-preprocess         maxGap=   58.2ms  >33.3×1  summed=  116.5ms  dur=114.7ms
+  post-processor           maxGap=   10.4ms  >33.3×0  summed= 5495.3ms  dur=5489.7ms
+  dinov2-tokenizer         maxGap=    9.4ms  >33.3×0  summed=  950.3ms  dur=948.7ms
+  triplane-decode          maxGap=    9.3ms  >33.3×0  summed=   83.8ms  dur=5575.8ms
+  texture-bake             maxGap=    9.3ms  >33.3×0  summed=    267ms  dur=266ms
+  uv-unwrap                maxGap=      9ms  >33.3×0  summed=  166.7ms  dur=166.8ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/reentry-product-default-contend_ba2b157.json
+
+WITNESS ACCEPTED
+
+=== SF3D product-route witness: product-default+contend-same-device ===
+source ba2b157f70 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 41931.9ms  frames=5010  p50/p95/p99/max = 8.3/9.2/9.7/92.4ms  >16.7:8 >33.3:3 >100:0
+contender (same-device-foreground-opportunity): submitted=3644 completed=3644 errors=0
+host frames serviced at: scheduler duty boundary=3161 idle drain=457 run finish=1 outside run=25  (failed=0 canceled=0)
+foreground opportunities: status=succeeded requests=3619 receipts=3619 no-demand boundaries=0 scheduler services=3161 idle drains=457 finish drain serviced=1
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=worker clipPrep=worker marchingTet=worker uvUnwrap=worker materialize=worker
+cooperative: dinov2-tokenizer=succeeded(24 duties submitted, 24/24 items) two-stream-backbone=succeeded(2922 duties submitted, 2922/2922 items) post-processor=succeeded(702 duties submitted, 702/702 items, bounded depth 2) texture-bake=succeeded(61 duties submitted, 245837/245837 items)
+stages by max gap:
+  image-preprocess         maxGap=   92.4ms  >33.3×1  summed=  147.4ms  dur=148.7ms
+  clip-material-estimate   maxGap=   82.9ms  >33.3×1  summed=  274.5ms  dur=273.9ms
+  two-stream-backbone      maxGap=   33.3ms  >33.3×1  summed=34962.2ms  dur=34968.6ms
+  post-processor           maxGap=   19.8ms  >33.3×0  summed= 4953.2ms  dur=4947.6ms
+  uv-rasterize             maxGap=   18.4ms  >33.3×0  summed=   18.4ms  dur=14.8ms
+  texture-bake             maxGap=    9.3ms  >33.3×0  summed=  317.6ms  dur=319.8ms
+  dinov2-tokenizer         maxGap=    9.2ms  >33.3×0  summed=  950.4ms  dur=945.2ms
+  uv-unwrap                maxGap=      9ms  >33.3×0  summed=  155.4ms  dur=153.1ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/reentry-product-default-contend-same-device_ba2b157.json
+
+WITNESS ACCEPTED
+
+=== SF3D product-route witness: monolithic ===
+source ba2b157f70 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 22592ms  frames=2602  p50/p95/p99/max = 8.3/9.1/9.3/191.6ms  >16.7:6 >33.3:5 >100:3
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=main clipPrep=main marchingTet=main uvUnwrap=main materialize=main
+cooperative: none
+stages by max gap:
+  clip-material-estimate   maxGap=  191.6ms  >33.3×1  summed=  266.7ms  dur=271.2ms
+  texture-bake             maxGap=  166.7ms  >33.3×1  summed=  208.3ms  dur=213.4ms
+  uv-unwrap                maxGap=  166.6ms  >33.3×1  summed=  166.6ms  dur=151.2ms
+  image-preprocess         maxGap=   66.4ms  >33.3×1  summed=   66.4ms  dur=374.8ms
+  marching-tet             maxGap=   33.3ms  >33.3×1  summed=   33.3ms  dur=30.8ms
+  post-processor           maxGap=   17.3ms  >33.3×0  summed=20863.5ms  dur=20858.3ms
+  triplane-decode          maxGap=    9.2ms  >33.3×0  summed=  641.6ms  dur=21499.4ms
+  glb-export               maxGap=    8.4ms  >33.3×0  summed=   23.5ms  dur=21.7ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/reentry-monolithic_ba2b157.json
+
+WITNESS ACCEPTED
+
+=== SF3D product-route witness: monolithic+contend ===
+source ba2b157f70 dirty=false kit=0.1.48 backend=apple/metal-3
+route wall 21003.8ms  frames=2445  p50/p95/p99/max = 8.3/9.2/9.3/179.3ms  >16.7:5 >33.3:4 >100:4
+contender (second-device): submitted=9503 completed=9503 errors=0
+GLB sha e1f70de3407d… (2511516 B, 9988v/19976f) expected e1f70de3407d…
+offloads: preprocess=main clipPrep=main marchingTet=main uvUnwrap=main materialize=main
+cooperative: none
+stages by max gap:
+  texture-bake             maxGap=  179.3ms  >33.3×1  summed=  220.9ms  dur=214.8ms
+  clip-material-estimate   maxGap=  174.9ms  >33.3×1  summed=  241.5ms  dur=241.9ms
+  uv-unwrap                maxGap=  158.4ms  >33.3×1  summed=  158.4ms  dur=150.6ms
+  image-preprocess         maxGap=  140.8ms  >33.3×1  summed=  147.7ms  dur=137.2ms
+  marching-tet             maxGap=   25.1ms  >33.3×0  summed=   33.5ms  dur=27.6ms
+  post-processor           maxGap=    9.7ms  >33.3×0  summed=20088.7ms  dur=20088.6ms
+  triplane-decode          maxGap=    9.2ms  >33.3×0  summed=   83.2ms  dur=20178.7ms
+  glb-export               maxGap=    8.4ms  >33.3×0  summed=   21.7ms  dur=23.9ms
+report: /private/tmp/claude-501/-Users-noahlyons-dev-kaminos/f6ea818a-edac-45d0-a9d2-e2fa839fc343/scratchpad/reentry-monolithic-contend_ba2b157.json
+
+WITNESS ACCEPTED
