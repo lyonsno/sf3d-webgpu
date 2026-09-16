@@ -144,9 +144,12 @@ inference). The kit itself lives in the
 ## Foreground liveness
 
 The app runs the **product route**: every long GPU stage executes as
-cooperative duties through the kit, and every CPU stage runs on a Web Worker,
-so the page — and any other WebGPU work sharing the device — keeps its frame
-cadence while a mesh generates. This is the default in `src/main.js`, composed
+cooperative duties through the kit, and the five heavy CPU stages (image
+preprocessing, CLIP prep, marching tetrahedra, UV unwrap, texture
+materialization) run on Web Workers, so the page — and any other WebGPU work
+sharing the GPU — keeps its frame cadence while a mesh generates. The image
+buffer upload and UV rasterization stay on the main thread; each stays under a
+frame. This is the default in `src/main.js`, composed
 in one place by [`src/lib/product_route.js`](src/lib/product_route.js):
 
 | Stage | Mechanism |
@@ -163,8 +166,9 @@ in one place by [`src/lib/product_route.js`](src/lib/product_route.js):
 Measured with [`tools/smoke_product_route.mjs`](tools/smoke_product_route.mjs)
 on an M4 Max in Chrome (`apple/metal-3`), same commit and `demo_chair.png`,
 requestAnimationFrame intervals scoped to the inference window. `--contend`
-adds a same-page WebGPU contender on a second device that submits compute work
-continuously, so "smooth" means smooth while sharing the GPU:
+adds a same-page WebGPU contender on a second `GPUDevice` of the same GPU that
+submits compute work continuously, so "smooth" means smooth while sharing the
+GPU:
 
 | Route | Wall | Frame intervals | p95 / p99 | Max gap | > 33.3 ms | Contender submissions |
 |-------|------|-----------------|-----------|---------|-----------|-----------------------|
@@ -174,11 +178,13 @@ continuously, so "smooth" means smooth while sharing the GPU:
 | **Product route + contender** | 39.8 s | 4,768 | 9.9 / 10.3 ms | **49.4 ms** | **1** | **72,097** |
 
 The whole-route tail drops from hundreds of milliseconds (image preprocess,
-CLIP, UV unwrap, texture bake) to under two frames, and a co-tenant sharing the
-GPU gets six times more work through, because the two-stream stage no longer
-monopolizes the device between submissions. The cost is wall time: the fine
-two-stream duties make the route about 1.8× longer than the single-submit
-path. The GLB is byte-identical in every row. Receipts:
+CLIP, UV unwrap, texture bake) to under two frames, and the co-tenant on the
+same GPU completes about 3.4× more submissions per second beside the product
+route (1,811/s vs 531/s), because the two-stream stage no longer monopolizes
+the GPU between submissions. The cost is wall time: the fine two-stream duties
+make the route about 1.8× longer than the single-submit path. The GLB is
+byte-identical in every row. This is a scheduling and output-identity witness,
+not a new PyTorch parity measurement (see the next section). Receipts:
 [`smoke-receipts/product-route-witness-*_2bebf7d.json`](smoke-receipts/).
 
 ```bash
