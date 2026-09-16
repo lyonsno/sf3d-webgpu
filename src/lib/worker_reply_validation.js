@@ -8,8 +8,12 @@
  * truncated / non-finite / out-of-range UV geometry were previously accepted.
  */
 
-/** The six axis-aligned box-projection charts unwrapUV assigns faces to. */
-export const UV_ATLAS_CHART_COUNT = 6;
+/**
+ * unwrapUV returns faceAssignment as an Int32Array of atlas slots per face:
+ * 0-5 primary box-projection charts, 6-11 first overlap tier, 12 remaining
+ * (sub-cell grid). Valid values are 0..12 inclusive.
+ */
+export const UV_ATLAS_SLOT_COUNT = 13;
 
 function requireBuffer(reply, key, label) {
   if (!(reply?.[key] instanceof ArrayBuffer)) throw new Error(`${label} reply must carry ${key} ArrayBuffer`);
@@ -45,7 +49,7 @@ export function validateUvUnwrapReply(reply) {
     newVertices: new Float32Array(requireBuffer(reply, 'newVertices', 'uv-unwrap')),
     newNormals: new Float32Array(requireBuffer(reply, 'newNormals', 'uv-unwrap')),
     newFaces: new Uint32Array(requireBuffer(reply, 'newFaces', 'uv-unwrap')),
-    faceAssignment: new Uint8Array(requireBuffer(reply, 'faceAssignment', 'uv-unwrap')),
+    faceAssignment: new Int32Array(requireBuffer(reply, 'faceAssignment', 'uv-unwrap')),
     newNumVertices: nv,
     newNumFaces: nf,
   };
@@ -64,8 +68,9 @@ export function validateUvUnwrapReply(reply) {
     if (r.newFaces[i] >= nv) throw new Error(`uv-unwrap face index ${r.newFaces[i]} out of range (${nv} vertices) at ${i}`);
   }
   for (let i = 0; i < r.faceAssignment.length; i++) {
-    if (r.faceAssignment[i] >= UV_ATLAS_CHART_COUNT) {
-      throw new Error(`uv-unwrap faceAssignment value ${r.faceAssignment[i]} out of range (${UV_ATLAS_CHART_COUNT} charts) at ${i}`);
+    const v = r.faceAssignment[i];
+    if (v < 0 || v >= UV_ATLAS_SLOT_COUNT) {
+      throw new Error(`uv-unwrap faceAssignment value ${v} out of range (${UV_ATLAS_SLOT_COUNT} atlas slots) at ${i}`);
     }
   }
   return r;
