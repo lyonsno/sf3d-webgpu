@@ -119,6 +119,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   if (options.cooperativeBake) {
     const bakeTelemetry = {};
     const cooperativeBatch = makeCooperativeTextureBake(device, {
+      foregroundOpportunities: options.foregroundOpportunities ?? null,
       batchTexels: options.bakeBatchTexels || 16384,
       schedulingMode: options.bakeSchedulingMode === 'disabled' ? 'disabled' : 'cooperative',
       onProgress: (p) => { if (p.percent != null) report(`Texture bake ${p.completedItems}/${p.totalItems} (${p.percent.toFixed(0)}%)`); },

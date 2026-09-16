@@ -450,6 +450,7 @@ export async function runCooperativePostProcessor(options) {
   const queueFences = [];
   const browserYields = [];
   const runtime = createSf3dCooperativeRuntime(device, {
+    foregroundOpportunities: options.foregroundOpportunities ?? null,
     onQueueFenceResolved: event => queueFences.push(Object.freeze({ ...event })),
     onBrowserYield: event => browserYields.push(Object.freeze({ ...event })),
   });

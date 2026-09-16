@@ -150,6 +150,7 @@ export function assembleProductRouteWitness(input) {
     arm, source, requestedOptions, offloads, cooperativeReports = {}, cooperativeValidations = {},
     materializationOffloaded = null, frames, stageSpans, inferenceWindow, visibility,
     output, contender, stageTimings = {}, totalMs, generatedAt = new Date().toISOString(),
+    foregroundOpportunities = null,
   } = input;
   if (typeof arm !== 'string' || !arm) throw new TypeError('arm must be a non-empty string');
   if (!Array.isArray(frames)) throw new TypeError('frames must be an array');
@@ -173,10 +174,26 @@ export function assembleProductRouteWitness(input) {
     }),
     contender: Object.freeze({
       enabled: Boolean(contender?.enabled),
+      // 'second-device' (default): a second GPUDevice on the same GPU, submits
+      // through its own queue. 'same-device-foreground-opportunity': host frames
+      // on SF3D's own device through the producer's foreground-opportunity bridge.
+      mode: contender?.mode ?? (contender?.enabled ? 'second-device' : null),
       submitted: contender?.submitted ?? 0,
       completed: contender?.completed ?? 0,
       errors: Object.freeze([...(contender?.errors || [])]),
+      receipts: contender?.receipts ? Object.freeze({ ...contender.receipts }) : null,
     }),
+    // The producer's foreground-opportunity report (kit finish() report plus
+    // producer drain counters), present only for the same-device arm.
+    foregroundOpportunities: foregroundOpportunities ? Object.freeze({
+      status: foregroundOpportunities.status ?? null,
+      requestCount: foregroundOpportunities.requestCount ?? null,
+      receiptCount: foregroundOpportunities.receiptCount ?? null,
+      pendingRequestCount: foregroundOpportunities.pendingRequestCount ?? null,
+      activeRequestCount: foregroundOpportunities.activeRequestCount ?? null,
+      noDemandBoundaryCount: foregroundOpportunities.noDemandBoundaryCount ?? null,
+      producer: Object.freeze({ ...(foregroundOpportunities.producer || {}) }),
+    }) : null,
     inferenceWindow: Object.freeze({ startMs: inferenceWindow?.startMs ?? null, endMs: inferenceWindow?.endMs ?? null }),
     totalMs: finite(totalMs) ? +totalMs.toFixed(1) : null,
     output: Object.freeze({ ...output }),
@@ -261,6 +278,24 @@ export function acceptProductRouteWitness(report, expectations = {}) {
   if (report.contender?.enabled) {
     if (!(report.contender.completed > 0)) errors.push('contender enabled but completed zero submissions during the run');
     if (report.contender.errors?.length) errors.push(`contender errors: ${report.contender.errors.join('; ')}`);
+    const receipts = report.contender.receipts;
+    if (receipts) {
+      if (receipts.failed > 0) errors.push(`contender receipts: ${receipts.failed} failed`);
+      if (receipts.canceled > 0) errors.push(`contender receipts: ${receipts.canceled} canceled`);
+    }
+    if (report.contender.mode === 'same-device-foreground-opportunity' && !report.foregroundOpportunities) {
+      errors.push('same-device contender requires a foreground opportunity report from the producer');
+    }
+  }
+
+  // Foreground-opportunity report (same-device host frames): every host
+  // request must have been serviced (none pending/active at finish) and the
+  // producer's idle drain must not have failed.
+  const fg = report.foregroundOpportunities;
+  if (fg) {
+    if (fg.status !== 'succeeded') errors.push(`foreground opportunity report status ${fg.status} (demand left unsettled at run finish)`);
+    const drainFailures = fg.producer?.drainFailures || [];
+    if (drainFailures.length) errors.push(`foreground idle drain failures: ${drainFailures.map(f => f.message).join('; ')}`);
   }
 
   // Budget.

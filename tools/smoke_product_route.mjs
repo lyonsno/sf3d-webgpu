@@ -10,6 +10,11 @@
  *   - optionally (--contend) a same-page WebGPU contender on a second device
  *     that submits compute work continuously, the way the kit's SHARP proof
  *     was measured, so "smooth" means smooth while sharing the GPU;
+ *   - optionally (--contend-same-device) a host-frame contender on SF3D's OWN
+ *     device, one frame per requestAnimationFrame, submitted through the
+ *     producer's foreground-opportunity bridge (the kiln composition shape);
+ *     the run then goes through createSf3dProducer().run and the report
+ *     carries the producer's foreground-opportunity report;
  *   - effective-route receipts: which CPU phases ran on workers, which
  *     cooperative mechanisms settled (kit reports), bounded-prefix validation
  *     for the post-processor, and the canonical GLB hash.
@@ -19,7 +24,7 @@
  *
  * Usage:
  *   node tools/smoke_product_route.mjs [--arm product-default|no-workers|workers-only|monolithic|'{json overrides}']
- *     [--contend] [--image P] [--report P] [--expected-glb-sha SHA|none]
+ *     [--contend | --contend-same-device] [--image P] [--report P] [--expected-glb-sha SHA|none]
  *     [--max-gap-budget-ms N] [--allow-dirty] [--label TEXT]
  */
 import puppeteer from 'puppeteer-core';
@@ -42,9 +47,10 @@ const hasFlag = (flag) => argv.includes(flag);
 
 const ARM = argVal('--arm', 'product-default');
 const CONTEND = hasFlag('--contend');
+const CONTEND_SAME = hasFlag('--contend-same-device');
 const IMAGE = path.resolve(argVal('--image', path.join(REPO, 'public/demo_chair.png')));
 const LABEL = argVal('--label', '');
-const ARM_NAME = `${ARM.startsWith('{') ? 'custom' : ARM}${CONTEND ? '+contend' : ''}`;
+const ARM_NAME = `${ARM.startsWith('{') ? 'custom' : ARM}${CONTEND ? '+contend' : ''}${CONTEND_SAME ? '+contend-same-device' : ''}`;
 const REPORT_PATH = path.resolve(argVal('--report', `/tmp/sf3d-product-route-witness-${ARM_NAME}.json`));
 const expectedShaArg = argVal('--expected-glb-sha', CANONICAL_DEMO_CHAIR_GLB_SHA256);
 const EXPECTED_GLB_SHA = expectedShaArg === 'none' ? null : expectedShaArg;
@@ -57,6 +63,11 @@ if (!KNOWN_ARMS.includes(ARM) && !ARM.startsWith('{')) {
   process.exit(2);
 }
 if (!fs.existsSync(IMAGE)) { console.error(`image not found: ${IMAGE}`); process.exit(2); }
+if (CONTEND && CONTEND_SAME) { console.error('--contend and --contend-same-device are separate arms; pick one'); process.exit(2); }
+if (CONTEND_SAME && !(ARM === 'product-default' || ARM.startsWith('{'))) {
+  console.error('--contend-same-device runs through the producer (product route); use --arm product-default or a JSON overrides object');
+  process.exit(2);
+}
 
 function writeFailure(phase, error, partial = {}) {
   const failure = {
@@ -136,7 +147,7 @@ try {
   }, imageB64);
 
   // --- The witnessed run ---
-  const raw = await page.evaluate(async ({ armSpec, contend }) => {
+  const raw = await page.evaluate(async ({ armSpec, contend, contendSame }) => {
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const {
       createProductRouteOptions, createProductRouteWorkers, describeProductRouteOptions, terminateProductRouteWorkers,
@@ -145,13 +156,16 @@ try {
     const { acceptBoundedPrefixArm, expectedChannelDutyCount } = await import('/tools/bounded_prefix_acceptance.mjs');
 
     const device = window._sf3d_device, weights = window._sf3d_weights, pipelines = window._sf3d_pipelines;
+    const producer = window._sf3d_producer;
     const img = window._witnessImage;
     if (!device || !weights || !pipelines || !img) throw new Error('page state missing (device/weights/pipelines/image)');
+    if (contendSame && !producer) throw new Error('page state missing (_sf3d_producer) for the same-device arm');
     if (document.visibilityState !== 'visible') throw new Error(`page visibility ${document.visibilityState} at start`);
 
     // Arm → options.
     let workers = null;
     let options;
+    let overrides = {};
     if (armSpec === 'monolithic') {
       options = Object.freeze({ cooperativeDino: false });
     } else if (armSpec === 'no-workers') {
@@ -161,6 +175,11 @@ try {
       options = createProductRouteOptions({ workers, overrides: {
         cooperativeDino: false, cooperativeTwoStream: false, cooperativePostProcessor: false, cooperativeBake: false, decoderArena: false,
       } });
+    } else if (contendSame) {
+      // The producer builds the same options for its run; this copy is for
+      // validation/description only (workers are the producer's long-lived ones).
+      overrides = armSpec.startsWith('{') ? JSON.parse(armSpec) : {};
+      options = createProductRouteOptions({ workers: producer.workers, overrides });
     } else {
       workers = createProductRouteWorkers();
       const overrides = armSpec.startsWith('{') ? JSON.parse(armSpec) : {};
@@ -173,23 +192,71 @@ try {
     const tick = (t) => { if (lastT != null) frames.push({ start: lastT, end: t }); lastT = t; if (on) requestAnimationFrame(tick); };
     requestAnimationFrame(tick);
 
-    // Same-page WebGPU contender on a second device (SHARP contention-witness shape).
-    const contender = { enabled: contend, submitted: 0, completed: 0, errors: [] };
+    const CONTENDER_WGSL = `
+      @group(0) @binding(0) var<storage, read_write> data: array<f32>;
+      @compute @workgroup_size(64)
+      fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+        var x = data[id.x];
+        for (var i: u32 = 0u; i < 64u; i = i + 1u) { x = (x * 1.0001221) + f32((i & 7u) + 1u) * 0.00003125; }
+        data[id.x] = x;
+      }`;
+    const contender = {
+      enabled: contend || contendSame,
+      mode: contendSame ? 'same-device-foreground-opportunity' : (contend ? 'second-device' : null),
+      submitted: 0, completed: 0, errors: [],
+      receipts: contendSame ? { completed: 0, failed: 0, canceled: 0, outsideRun: 0, schedulerBoundary: 0, idleDrain: 0, runFinish: 0 } : null,
+    };
     let contenderDone = Promise.resolve();
-    if (contend) {
+    if (contendSame) {
+      // Host-frame contender on SF3D's own device through the producer's
+      // foreground-opportunity bridge: one frame per requestAnimationFrame, the
+      // way a kiln frame loop would submit. Each receipt says where it was
+      // serviced (scheduler duty boundary / idle drain / run finish / outside run).
+      contenderDone = (async () => {
+        try {
+          const cdev = producer.device;
+          const module = cdev.createShaderModule({ code: CONTENDER_WGSL });
+          const pipeline = cdev.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+          const buffer = cdev.createBuffer({ size: 65536 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+          const bindGroup = cdev.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer } }] });
+          let n = 0;
+          while (on) {
+            n += 1;
+            const requestId = `witness-host-frame:${n}`;
+            const handle = producer.requestForegroundOpportunity({
+              requestId,
+              metadata: { kind: 'witness-host-frame', frame: n },
+              run(ctx) {
+                const enc = ctx.device.createCommandEncoder();
+                const pass = enc.beginComputePass();
+                pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(1024); pass.end();
+                ctx.submit([enc.finish()], { submissionId: `${requestId}:1` });
+                return { frame: n };
+              },
+            });
+            contender.submitted += 1;
+            const r = await handle.completion;
+            if (r.status === 'completed') { contender.completed += 1; contender.receipts.completed += 1; }
+            else if (String(r.status).startsWith('canceled')) contender.receipts.canceled += 1;
+            else { contender.receipts.failed += 1; contender.errors.push(`${requestId}: ${r.failure?.error?.message || r.status}`); }
+            if (r.servicedOutsideRun) contender.receipts.outsideRun += 1;
+            else if (r.boundary?.phase === 'sf3d-producer-idle-drain') contender.receipts.idleDrain += 1;
+            else if (r.boundary?.phase === 'sf3d-producer-run-finish') contender.receipts.runFinish += 1;
+            else contender.receipts.schedulerBoundary += 1;
+            await new Promise(r => requestAnimationFrame(r));
+          }
+          buffer.destroy();
+        } catch (e) { contender.errors.push(e?.message || String(e)); }
+      })();
+      await new Promise(r => setTimeout(r, 200));
+    } else if (contend) {
+      // Same-page WebGPU contender on a second device (SHARP contention-witness shape).
       contenderDone = (async () => {
         try {
           const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
           if (!adapter) throw new Error('no contender adapter');
           const cdev = await adapter.requestDevice();
-          const module = cdev.createShaderModule({ code: `
-            @group(0) @binding(0) var<storage, read_write> data: array<f32>;
-            @compute @workgroup_size(64)
-            fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-              var x = data[id.x];
-              for (var i: u32 = 0u; i < 64u; i = i + 1u) { x = (x * 1.0001221) + f32((i & 7u) + 1u) * 0.00003125; }
-              data[id.x] = x;
-            }` });
+          const module = cdev.createShaderModule({ code: CONTENDER_WGSL });
           const pipeline = cdev.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
           const buffer = cdev.createBuffer({ size: 65536 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
           const bindGroup = cdev.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer } }] });
@@ -213,7 +280,9 @@ try {
     const startMs = performance.now();
     let out, runError = null;
     try {
-      out = await runFullPipelineToGlb(device, pipelines, weights, img, options, (m) => progress.push(String(m)));
+      out = contendSame
+        ? await producer.run(img, { runId: `witness:${armSpec.startsWith('{') ? 'custom' : armSpec}`, onProgress: (m) => progress.push(String(m)), routeOverrides: overrides })
+        : await runFullPipelineToGlb(device, pipelines, weights, img, options, (m) => progress.push(String(m)));
     } catch (e) { runError = e; }
     const endMs = performance.now();
     on = false;
@@ -251,9 +320,11 @@ try {
       cooperative, cooperativeValidations, materializationOffloaded,
       output: { glbSha256, glbBytes: out.glb.byteLength, numVertices: out.numVertices, numFaces: out.numFaces, roughness: out.roughness, metallic: out.metallic },
       contender, progressCount: progress.length,
+      foregroundOpportunities: out.foregroundOpportunityReport ?? null,
+      routeReceiptValidation: out.receiptValidation ?? null,
       backend: { vendor: info.vendor ?? null, architecture: info.architecture ?? null, device: info.device ?? null, description: info.description ?? null, userAgent: navigator.userAgent },
     };
-  }, { armSpec: ARM, contend: CONTEND });
+  }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME });
 
   if (pageErrors.length) throw new Error(`page errors during run: ${pageErrors.join(' | ')}`);
 
@@ -269,10 +340,14 @@ try {
     frames: raw.frames, stageSpans: raw.stageSpans, inferenceWindow: raw.inferenceWindow, visibility: raw.visibility,
     output: { ...raw.output, expectedGlbSha256: EXPECTED_GLB_SHA },
     contender: raw.contender, stageTimings: raw.stageTimings, totalMs: raw.totalMs,
+    foregroundOpportunities: raw.foregroundOpportunities,
   });
   const verdict = acceptProductRouteWitness(report, {
-    expectedGlbSha: EXPECTED_GLB_SHA, requireContender: CONTEND, maxGapBudgetMs: MAX_GAP_BUDGET_MS,
+    expectedGlbSha: EXPECTED_GLB_SHA, requireContender: CONTEND || CONTEND_SAME, maxGapBudgetMs: MAX_GAP_BUDGET_MS,
   });
+  if (raw.routeReceiptValidation && raw.routeReceiptValidation.ok !== true) {
+    throw new Error(`producer route receipt failed validation: ${(raw.routeReceiptValidation.errors || []).join('; ')}`);
+  }
   const durable = { ...report, verdict: { ok: verdict.ok, errors: [...verdict.errors] } };
   fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
   fs.writeFileSync(REPORT_PATH, JSON.stringify(durable, null, 2));
@@ -282,7 +357,15 @@ try {
   console.log(`\n=== SF3D product-route witness: ${ARM_NAME} ===`);
   console.log(`source ${commit.slice(0, 10)} dirty=${dirty} kit=${kitVersion} backend=${raw.backend.vendor}/${raw.backend.architecture}`);
   console.log(`route wall ${report.totalMs}ms  frames=${wr.frameIntervalCount}  p50/p95/p99/max = ${wr.p50Ms}/${wr.p95Ms}/${wr.p99Ms}/${wr.maxMs}ms  >16.7:${wr.over16_7} >33.3:${wr.over33_3} >100:${wr.over100}`);
-  if (raw.contender.enabled) console.log(`contender: submitted=${raw.contender.submitted} completed=${raw.contender.completed} errors=${raw.contender.errors.length}`);
+  if (raw.contender.enabled) console.log(`contender (${raw.contender.mode}): submitted=${raw.contender.submitted} completed=${raw.contender.completed} errors=${raw.contender.errors.length}`);
+  if (raw.contender.receipts) {
+    const r = raw.contender.receipts;
+    console.log(`host frames serviced at: scheduler duty boundary=${r.schedulerBoundary} idle drain=${r.idleDrain} run finish=${r.runFinish} outside run=${r.outsideRun}  (failed=${r.failed} canceled=${r.canceled})`);
+  }
+  if (report.foregroundOpportunities) {
+    const f = report.foregroundOpportunities;
+    console.log(`foreground opportunities: status=${f.status} requests=${f.requestCount} receipts=${f.receiptCount} no-demand boundaries=${f.noDemandBoundaryCount} scheduler services=${f.producer.schedulerBoundaryServiceCount} idle drains=${f.producer.idleDrainBoundaryCount} finish drain serviced=${f.producer.finishDrainServicedCount}`);
+  }
   console.log(`GLB sha ${report.output.glbSha256.slice(0, 12)}… (${report.output.glbBytes} B, ${report.output.numVertices}v/${report.output.numFaces}f) expected ${EXPECTED_GLB_SHA ? EXPECTED_GLB_SHA.slice(0, 12) + '…' : 'none'}`);
   console.log(`offloads: ${Object.entries(report.effective.offloads).map(([k, v]) => `${k}=${v}`).join(' ')}`);
   console.log(`cooperative: ${Object.entries(report.effective.cooperative).map(([k, c]) => `${k}=${c.status}(${c.progress?.completedItems ?? '?'}/${c.progress?.totalItems ?? '?'} duties${c.completionPolicy === 'bounded-prefix' ? `, bounded depth ${c.maxObservedInFlightGpuDuties}` : ''})`).join(' ') || 'none'}`);

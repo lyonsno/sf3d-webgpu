@@ -90,6 +90,24 @@ export function defineDinoEncoderManifest(numBlocks, chunkBlocks = 1) {
  */
 export function createSf3dCooperativeRuntime(device, hooks = {}) {
   const now = () => globalThis.performance?.now?.() ?? Date.now();
+  // Optional kit foreground-opportunity interlock (the shape returned by
+  // createWebGpuForegroundOpportunityInterlock). When present, pending host
+  // demand — e.g. the kiln's flame frame — is serviced at every cooperative
+  // pre-encode boundary exactly as the kit's own runtime does, so the host's
+  // command buffers reach the shared queue ahead of the next inference duty.
+  const foregroundOpportunities = hooks.foregroundOpportunities ?? null;
+  if (foregroundOpportunities != null) {
+    for (const method of ['serviceAtBoundary', 'snapshot']) {
+      if (typeof foregroundOpportunities[method] !== 'function') {
+        throw new Error(`foregroundOpportunities must expose ${method}()`);
+      }
+    }
+  }
+  let foregroundBoundarySequence = 0;
+  const hasForegroundPressure = (snapshot) => snapshot.pendingRequestCount > 0
+    || snapshot.activeRequestCount > 0
+    || snapshot.activeServiceCount > 0
+    || snapshot.queuedServiceCount > 0;
   const queue = {
     submit(commandBuffers) {
       device.queue.submit(commandBuffers);
@@ -129,14 +147,45 @@ export function createSf3dCooperativeRuntime(device, hooks = {}) {
         return submit();
       },
     },
-    // The facade requires this hook before each cooperative GPU encode. In this
-    // first facade-only slice there is no separate foreground governor to
-    // consult at the boundary — cooperation is expressed by the post-duty
-    // browser yield and per-duty queue fence — so preparation is an honest
-    // pass-through that returns the descriptor unchanged. When SF3D later adopts
-    // the foreground-opportunity interlock, this is where that service goes.
-    async prepareCommandDutyAtBoundary(descriptor) {
-      return descriptor;
+    foregroundOpportunities,
+    // The facade awaits this hook before each cooperative GPU encode. Without
+    // an interlock it is an honest pass-through (cooperation is the post-duty
+    // browser yield + per-duty queue fence). With an interlock, pending host
+    // demand is serviced here, before the next inference duty is encoded,
+    // mirroring the kit runtime: no demand → no synthetic service turn; a
+    // failed service refuses the encode; demand without an invocation
+    // identity refuses.
+    async prepareCommandDutyAtBoundary(descriptor, schedulerInvocation = null) {
+      if (!foregroundOpportunities) return descriptor;
+      const pressure = typeof foregroundOpportunities.pressureSnapshot === 'function'
+        ? foregroundOpportunities.pressureSnapshot()
+        : foregroundOpportunities.snapshot();
+      if (!hasForegroundPressure(pressure)) return descriptor;
+      const invocationId = schedulerInvocation?.invocationId;
+      if (typeof invocationId !== 'string' || !invocationId.trim()) {
+        throw new Error('foreground opportunity service requires an active invocation identity');
+      }
+      foregroundBoundarySequence += 1;
+      const service = await foregroundOpportunities.serviceAtBoundary({
+        invocationId,
+        boundaryId: `${invocationId}:foreground-boundary:${foregroundBoundarySequence}`,
+        dutyId: descriptor?.dutyId || `${invocationId}:command-duty:${foregroundBoundarySequence}`,
+        phase: descriptor?.phase || 'sf3d-cooperative-duty',
+        position: 'before-encode',
+        metadata: {
+          runtimeLabel: 'sf3d-webgpu-cooperative',
+          schedulerRevision: schedulerInvocation.schedulerRevision ?? null,
+        },
+      });
+      const prepared = {
+        ...descriptor,
+        metadata: { ...(descriptor?.metadata || {}), foregroundOpportunityService: service },
+      };
+      if (service.status === 'failed') {
+        const first = service.failures?.[0];
+        throw new Error(first?.failure?.error?.message || 'foreground opportunity failed');
+      }
+      return prepared;
     },
     settleCommandDuty() {
       // No scheduler-owned duty ledger in this slice; settlement is a no-op.
@@ -224,7 +273,9 @@ export async function runCooperativeDino(opts) {
   } = opts;
 
   const manifest = defineDinoEncoderManifest(numBlocks, chunkBlocks);
-  const runtime = createSf3dCooperativeRuntime(device);
+  const runtime = createSf3dCooperativeRuntime(device, {
+    foregroundOpportunities: opts.foregroundOpportunities ?? null,
+  });
   const execution = createWebGpuCooperativeExecution({
     runtime,
     manifest,

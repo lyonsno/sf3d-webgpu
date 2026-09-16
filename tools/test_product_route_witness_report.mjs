@@ -123,4 +123,39 @@ assert.throws(() => assembleProductRouteWitness(validInput({ inferenceWindow: { 
 assert.equal(acceptProductRouteWitness(assembleProductRouteWitness(validInput({ contender: { enabled: false } }))).ok, true);
 console.log('ok  window-never-closed refused at assembly; baseline arm without contender accepted');
 
+// --- Same-device contender through the producer's foreground-opportunity bridge ---
+// The witness must carry the producer's foreground report and the contender's
+// receipt breakdown, and refuse a run whose foreground demand was left
+// pending/active, whose idle drain failed, or whose host frames failed/canceled.
+const fgReport = {
+  status: 'succeeded', requestCount: 120, receiptCount: 120, pendingRequestCount: 0, activeRequestCount: 0,
+  noDemandBoundaryCount: 3000,
+  producer: { schedulerBoundaryServiceCount: 100, idleDrainBoundaryCount: 15, idleDrainServicedCount: 18, finishDrainServicedCount: 2, drainFailures: [], drainAfterMs: 16.7, drainIntervalMs: 8 },
+};
+const sameDeviceContender = {
+  enabled: true, mode: 'same-device-foreground-opportunity', submitted: 120, completed: 120, errors: [],
+  receipts: { completed: 120, failed: 0, canceled: 0, outsideRun: 0, schedulerBoundary: 100, idleDrain: 18, runFinish: 2 },
+};
+const withFg = assembleProductRouteWitness(validInput({ foregroundOpportunities: fgReport, contender: sameDeviceContender }));
+assert.equal(withFg.foregroundOpportunities.status, 'succeeded');
+assert.equal(withFg.foregroundOpportunities.producer.idleDrainBoundaryCount, 15);
+assert.equal(withFg.contender.mode, 'same-device-foreground-opportunity');
+assert.equal(withFg.contender.receipts.schedulerBoundary, 100);
+assert.deepEqual([...acceptProductRouteWitness(withFg, { requireContender: true }).errors], []);
+// Without a foreground report the field is absent and a second-device contender still passes.
+assert.equal(good.foregroundOpportunities, null);
+const fgFalsifiers = [
+  ['foreground demand left unsettled', validInput({ foregroundOpportunities: { ...fgReport, status: 'incomplete', pendingRequestCount: 2 }, contender: sameDeviceContender }), /foreground opportunity report status incomplete/],
+  ['idle drain failures', validInput({ foregroundOpportunities: { ...fgReport, producer: { ...fgReport.producer, drainFailures: [{ name: 'Error', message: 'boom' }] } }, contender: sameDeviceContender }), /foreground idle drain failures: boom/],
+  ['same-device contender without foreground report', validInput({ contender: sameDeviceContender }), /same-device contender requires a foreground opportunity report/],
+  ['host frames failed', validInput({ foregroundOpportunities: fgReport, contender: { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, failed: 3 } } }), /contender receipts: 3 failed/],
+  ['host frames canceled', validInput({ foregroundOpportunities: fgReport, contender: { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, canceled: 1 } } }), /contender receipts: 1 canceled/],
+];
+for (const [name, input, re] of fgFalsifiers) {
+  const verdict = acceptProductRouteWitness(assembleProductRouteWitness(input), { requireContender: true });
+  assert.equal(verdict.ok, false, `${name} must be rejected`);
+  assert.match(verdict.errors.join('\n'), re, `${name} must name its reason`);
+  console.log(`ok  rejects: ${name}`);
+}
+
 console.log('\nPRODUCT ROUTE WITNESS REPORT CONTRACT PASSED');

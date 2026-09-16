@@ -183,6 +183,7 @@ export function makeCooperativeTextureBake(device, opts = {}) {
     };
 
     const runtime = createSf3dCooperativeRuntime(device, {
+      foregroundOpportunities: opts.foregroundOpportunities ?? null,
       async onQueueFenceResolved(fence) {
         const retirement = retireScratch(submittedScratch, 'queue-prefix-resolved');
         queueFences.push({

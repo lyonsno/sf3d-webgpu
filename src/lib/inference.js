@@ -286,6 +286,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     report(`Running DINOv2 backbone (cooperative, ${dinoSchedulingMode}, chunk=${dinoChunkBlocks})...`);
     const { result, report: coopReport } = await runCooperativeDino({
       device,
+      foregroundOpportunities: options.foregroundOpportunities ?? null,
       tokenizer: pipelines.imageTokenizer,
       imageBuf,
       cameraEmbedBuf,
@@ -446,6 +447,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     );
     const { result, report: twoStreamReport } = await runCooperativeTwoStream({
       device,
+      foregroundOpportunities: options.foregroundOpportunities ?? null,
       backbone: pipelines.twoStream,
       imageTokensBuf: dinov2Result.tokensBuf,
       N_img: dinov2Result.N,
@@ -532,6 +534,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     );
     const { result, report: postProcessorReport } = await runCooperativePostProcessor({
       device,
+      foregroundOpportunities: options.foregroundOpportunities ?? null,
       triplanesBuf: backboneResult.buffer,
       weights: weights.postProcessor,
       schedulingMode: postProcessorSchedulingMode,

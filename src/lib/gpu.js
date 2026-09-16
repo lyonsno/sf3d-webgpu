@@ -56,8 +56,24 @@ export function captureGpuBufferAllocations(fn) {
   }
 }
 
-export async function initGPU() {
-  if (!navigator.gpu) {
+/**
+ * Acquire the GPU for SF3D.
+ *
+ * A host that already owns a live GPUDevice (the Kaminos kiln, whose renderer
+ * must share one device and queue with inference) injects it:
+ *   initGPU({ device, adapter })  → { device, adapter, injected: true }
+ * SF3D then never requests its own device, so its cooperative duties and the
+ * host's frames interleave on the same queue. Without injection SF3D requests
+ * a high-performance adapter/device as before.
+ */
+export async function initGPU({ device: injectedDevice, adapter: injectedAdapter = null } = {}) {
+  if (injectedDevice != null) {
+    if (typeof injectedDevice !== 'object' || typeof injectedDevice.queue?.submit !== 'function') {
+      throw new Error('injected device must expose queue.submit (a live GPUDevice)');
+    }
+    return { adapter: injectedAdapter, device: injectedDevice, injected: true };
+  }
+  if (!globalThis.navigator?.gpu) {
     throw new Error('WebGPU is not supported in this browser. Try Chrome 113+ or Edge 113+.');
   }
 
@@ -87,7 +103,7 @@ export async function initGPU() {
     }
   });
 
-  return { adapter, device };
+  return { adapter, device, injected: false };
 }
 
 /**

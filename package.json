@@ -36,7 +36,10 @@
     "test:marching-tet-worker": "node tools/test_marching_tet_worker_contract.mjs",
     "test:product-route-witness-report": "node tools/test_product_route_witness_report.mjs",
     "smoke:product-route": "node tools/smoke_product_route.mjs",
-    "test:parity-compare": "node tools/test_parity_compare_contract.mjs"
+    "test:parity-compare": "node tools/test_parity_compare_contract.mjs",
+    "test:gpu-injection": "node tools/test_gpu_injection_contract.mjs",
+    "test:cooperative-runtime-foreground": "node tools/test_cooperative_runtime_foreground_contract.mjs",
+    "test:foreground-opportunity-bridge": "node tools/test_foreground_opportunity_bridge_contract.mjs"
   },
   "devDependencies": {
     "@kaminos/webgpu-inference-kit": "0.1.48",

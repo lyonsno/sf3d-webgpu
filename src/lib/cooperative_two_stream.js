@@ -239,6 +239,7 @@ export async function runCooperativeTwoStream(options) {
   const browserYields = [];
   let activeStage = null;
   const runtime = createSf3dCooperativeRuntime(device, {
+    foregroundOpportunities: options.foregroundOpportunities ?? null,
     onQueueFenceResolved(event) {
       queueFences.push(Object.freeze({ ...activeStage, ...event }));
     },
