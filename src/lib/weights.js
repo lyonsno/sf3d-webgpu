@@ -99,6 +99,43 @@ function extractTensorCPU(buffer, info) {
  * Returns a Uint8Array view if the range falls within a single chunk,
  * otherwise copies into a new buffer (only for tensors that span chunk boundaries).
  */
+/** Families read lazily through the raw accessors after load (CLIP estimator, CPU heads). */
+export const LAZILY_READ_TENSOR_PREFIXES = Object.freeze(['image_estimator.']);
+
+/**
+ * After the eager builders have uploaded their tensors, copy out only the
+ * tensors that will still be read lazily (retainPrefixes) or were never
+ * consumed, then release the streamed chunks so ~2 GB of JS heap can go.
+ * Returns { retained: Map<name, Uint8Array copy>, rawBytes(name), retainedBytes, droppedBytes }.
+ */
+export function compactRetainedTensors(tensors, chunkedBuffer, consumed, retainPrefixes = LAZILY_READ_TENSOR_PREFIXES) {
+  const retained = new Map();
+  let retainedBytes = 0;
+  let droppedBytes = 0;
+  for (const [name, info] of tensors) {
+    const keep = !consumed.has(name) || retainPrefixes.some(prefix => name.startsWith(prefix));
+    if (keep) {
+      retained.set(name, extractBytes(chunkedBuffer, info.offset, info.size).slice());
+      retainedBytes += info.size;
+    } else {
+      droppedBytes += info.size;
+    }
+  }
+  if (Array.isArray(chunkedBuffer?.chunks)) { chunkedBuffer.chunks.length = 0; chunkedBuffer.offsets.length = 0; }
+  const rawBytes = (name) => {
+    const bytes = retained.get(name);
+    if (!bytes) {
+      throw new Error(tensors.has(name)
+        ? `tensor ${name} was uploaded at load and its raw bytes were released; lazy raw access covers ${retainPrefixes.join(', ')}`
+        : `Missing weight: ${name}`);
+    }
+    return bytes;
+  };
+  return { retained, rawBytes, retainedBytes, droppedBytes };
+}
+
+export function extractBytesFromChunks(chunkedBuffer, offset, size) { return extractBytes(chunkedBuffer, offset, size); }
+
 function extractBytes(chunkedBuffer, offset, size) {
   if (chunkedBuffer instanceof ArrayBuffer) {
     // Legacy single-buffer path
@@ -173,21 +210,25 @@ export async function loadWeights(device, url, onProgress) {
   const headerBuf = headerBytes.slice().buffer;
   const { tensors } = parseHeader(headerBuf);
 
+  const consumed = new Set();
   const get = (name) => {
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
+    consumed.add(name);
     return extractTensor(device, chunkedBuffer, info);
   };
 
   const tryGet = (name) => {
     const info = tensors.get(name);
     if (!info) return null;
+    consumed.add(name);
     return extractTensor(device, chunkedBuffer, info);
   };
 
   const getCPU = (name) => {
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
+    consumed.add(name);
     return extractTensorCPU(chunkedBuffer, info);
   };
 
@@ -369,11 +410,21 @@ export async function loadWeights(device, url, onProgress) {
 
   console.log(`Loaded ${tensors.size} SF3D tensors from weight file`);
 
-  // Raw tensor access for modules that need direct weight lookup by name
-  // (e.g., CLIP visual encoder in clip_estimator.js)
-  const _rawGet = (name) => get(name);
-  const _rawGetCPU = (name) => getCPU(name);
-  const _rawTryGet = (name) => tryGet(name);
+  // Raw tensor access for modules that read weights lazily by name (the CLIP
+  // visual encoder and CPU heads in clip_estimator.js). Only those families
+  // (and anything the builders above did not consume) are kept, as standalone
+  // copies; the streamed chunks are released so the page does not carry the
+  // whole weight file in JS heap for the producer's lifetime.
+  const compact = compactRetainedTensors(tensors, chunkedBuffer, consumed);
+  console.log(`Retained ${(compact.retainedBytes / 1048576).toFixed(0)} MB of raw tensor bytes for lazy readers; released ${(compact.droppedBytes / 1048576).toFixed(0)} MB of streamed chunks`);
+  const rawInfo = (name) => {
+    const info = tensors.get(name);
+    if (!info) throw new Error(`Missing weight: ${name}`);
+    return { dtype: info.dtype, offset: 0, size: info.size };
+  };
+  const _rawGet = (name) => extractTensor(device, compact.rawBytes(name).buffer, rawInfo(name));
+  const _rawGetCPU = (name) => extractTensorCPU(compact.rawBytes(name).buffer, rawInfo(name));
+  const _rawTryGet = (name) => (tensors.has(name) ? _rawGet(name) : null);
   const _rawHas = (name) => tensors.has(name);
 
   return {
