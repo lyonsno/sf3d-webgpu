@@ -43,7 +43,13 @@ const DEFAULT_TET_BASE_PATH = new URL('tets/', SOURCE_PUBLIC_BASE_URL).href;
 export function resolveSourcePublicBaseUrl(basePath, moduleUrl, development = false) {
   const value = String(basePath || '');
   if (!value || value.startsWith('.')) {
-    return new URL(development ? '/' : '../', moduleUrl);
+    if (development) return new URL('/', moduleUrl);
+    // Built layouts: Vite emits chunks (the app entry, every worker) under
+    // assets/ with the public directory one level up; a library build's
+    // entry sits at the library root with its workers under assets/. In both
+    // the public base is the directory that contains assets/.
+    const dir = new URL('./', moduleUrl);
+    return dir.pathname.endsWith('/assets/') ? new URL('../', dir) : dir;
   }
   return new URL(value, moduleUrl);
 }
@@ -74,6 +80,22 @@ async function fetchTetArrayBuffer(url, bytesPerElement) {
  * @param {string|URL} basePath - path or URL to a tets directory (e.g., 'tets/')
  * @returns {Object} - { gridVertices, indices }
  */
+/**
+ * Grid vertices only (the decoder's query positions). Used by the main thread
+ * when a Worker owns marching tetrahedra and the 47 MB index table is not
+ * needed there.
+ */
+export async function loadTetGridVertices(basePath = DEFAULT_TET_BASE_PATH) {
+  const normalizedBase = String(basePath).endsWith('/') ? String(basePath) : `${basePath}/`;
+  const resolvedBase = new URL(normalizedBase, SOURCE_PUBLIC_BASE_URL);
+  const gridUrl = new URL('_grid_vertices.bin', resolvedBase).href;
+  const gridVertices = new Float32Array(await fetchTetArrayBuffer(gridUrl, Float32Array.BYTES_PER_ELEMENT));
+  if (gridVertices.length % 3 !== 0) {
+    throw new Error(`Tet vertex asset ${gridUrl} has ${gridVertices.length} values; expected xyz triples`);
+  }
+  return { gridVertices, indices: null, numVertices: gridVertices.length / 3, numTets: null };
+}
+
 export async function loadTetData(basePath = DEFAULT_TET_BASE_PATH) {
   const normalizedBase = String(basePath).endsWith('/') ? String(basePath) : `${basePath}/`;
   const resolvedBase = new URL(normalizedBase, SOURCE_PUBLIC_BASE_URL);

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   loadTetData,
+  loadTetGridVertices,
   resolveSourcePublicBaseUrl,
 } from '../src/lib/marching_tet.js';
 
@@ -23,6 +24,18 @@ assert.equal(
   resolveSourcePublicBaseUrl('', 'https://source.example/sf3d/assets/index.js', false).href,
   'https://source.example/sf3d/',
   'empty production bases must preserve relative-build public-root semantics',
+);
+// Library build (relative base): the entry sits at the library root and its
+// workers under assets/; both must resolve the same public base (the library
+// root), which is where the tet grid is copied. The live-flame composition
+// 404'd on /lib/tets/ because the entry went one level too high.
+assert.equal(
+  resolveSourcePublicBaseUrl('./', 'https://host.example/lib/sf3d/sf3d-producer.js', false).href,
+  'https://host.example/lib/sf3d/',
+);
+assert.equal(
+  resolveSourcePublicBaseUrl('./', 'https://host.example/lib/sf3d/assets/marching_tet_worker-abc.js', false).href,
+  'https://host.example/lib/sf3d/',
 );
 assert.equal(
   resolveSourcePublicBaseUrl('./', 'https://source.example/src/lib/marching_tet.js', true).href,
@@ -64,6 +77,14 @@ try {
   };
   const loaded = await loadTetData();
   assert.deepEqual(requested, [expectedGridUrl, expectedIndicesUrl]);
+  // Worker-owned marching tet: the main thread needs only the grid vertices
+  // (the decoder's query positions), not the 47 MB index table.
+  requested.length = 0;
+  const verticesOnly = await loadTetGridVertices();
+  assert.deepEqual(requested, [expectedGridUrl]);
+  assert.deepEqual([...verticesOnly.gridVertices], [0, 0.5, 1]);
+  assert.equal(verticesOnly.indices, null);
+  assert.equal(verticesOnly.numTets, null);
   assert.deepEqual([...loaded.gridVertices], [0, 0.5, 1]);
   assert.deepEqual([...loaded.indices], [0, 1, 2, 3]);
 

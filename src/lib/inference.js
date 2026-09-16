@@ -24,7 +24,7 @@ import { runCooperativeTwoStream } from './cooperative_two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
 import { runCooperativePostProcessor } from './cooperative_post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
-import { loadTetData, marchingTetrahedra, runMarchingTetOnWorker, scaleTensor } from './marching_tet.js';
+import { loadTetData, loadTetGridVertices, marchingTetrahedra, runMarchingTetOnWorker, scaleTensor } from './marching_tet.js';
 
 // Set to true for detailed tensor diagnostics during inference
 const DEBUG = false;
@@ -626,9 +626,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   // 6. Triplane query + decoder (GPU) — still part of triplane-decode timing
   report('Querying triplane and decoding...');
 
-  // Load tet grid data
-  const tetData = await loadTetData();
-  report(`Loaded tet grid: ${tetData.numVertices} vertices, ${tetData.numTets} tets`);
+  // Load tet grid data: the whole grid for the inline marching tet, or only
+  // the query positions when a Worker owns the tet table.
+  const tetData = options.marchingTetWorker ? await loadTetGridVertices() : await loadTetData();
+  report(`Loaded tet grid: ${tetData.numVertices} vertices, ${tetData.numTets ?? 'worker-owned'} tets`);
 
   // Scale grid vertices from [0, 1] to bbox
   const bbox = [-CONFIG.radius, CONFIG.radius];
