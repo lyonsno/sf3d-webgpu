@@ -68,26 +68,34 @@ function make() {
 {
   const { prepareProducerRun } = await import('../src/lib/producer_lifecycle.js');
   const acquired = [];
-  const fakeBridge = {
-    beginRun(runId) { acquired.push(`bridge:${runId}`); return { runId, foregroundOpportunities: { runId }, finish: async () => { acquired.push(`bridge-finish:${runId}`); return { status: 'succeeded' }; } }; },
+  const fakeForeground = {
+    async beginRun(runId) {
+      acquired.push(`foreground:${runId}`);
+      return {
+        runId,
+        foregroundOpportunities: { runId },
+        withForeground: async (_phase, work) => await work(),
+        finish: async () => { acquired.push(`foreground-finish:${runId}`); return { status: 'succeeded' }; },
+      };
+    },
   };
   const { lc, log } = make();
   const buildOptions = (overrides) => { if (overrides?.boom) throw new Error('bad route overrides'); return Object.freeze({ ...overrides }); };
   // empty run id → rejected before any acquisition
-  assert.throws(() => prepareProducerRun({ lifecycle: lc, bridge: fakeBridge, runId: '', buildOptions }), /runId must be a non-empty string/);
+  await assert.rejects(() => prepareProducerRun({ lifecycle: lc, foreground: fakeForeground, runId: '', buildOptions }), /runId must be a non-empty string/);
   assert.equal(lc.activeRunId, null); assert.deepEqual(acquired, []);
   // bad route options → rejected before any acquisition
-  assert.throws(() => prepareProducerRun({ lifecycle: lc, bridge: fakeBridge, runId: 'r-bad', buildOptions: () => buildOptions({ boom: true }) }), /bad route overrides/);
+  await assert.rejects(() => prepareProducerRun({ lifecycle: lc, foreground: fakeForeground, runId: 'r-bad', buildOptions: () => buildOptions({ boom: true }) }), /bad route overrides/);
   assert.equal(lc.activeRunId, null); assert.deepEqual(acquired, []);
   // a valid run acquires both and can be released through the returned boundary
-  const prepared = prepareProducerRun({ lifecycle: lc, bridge: fakeBridge, runId: 'r-ok', buildOptions });
-  assert.equal(lc.activeRunId, 'r-ok'); assert.deepEqual(acquired, ['bridge:r-ok']);
+  const prepared = await prepareProducerRun({ lifecycle: lc, foreground: fakeForeground, runId: 'r-ok', buildOptions });
+  assert.equal(lc.activeRunId, 'r-ok'); assert.deepEqual(acquired, ['foreground:r-ok']);
   assert.equal(prepared.options.foregroundOpportunities.runId, 'r-ok');
   const report = await prepared.release();
   assert.equal(report.status, 'succeeded'); assert.equal(lc.activeRunId, null);
-  assert.deepEqual(acquired, ['bridge:r-ok', 'bridge-finish:r-ok']);
+  assert.deepEqual(acquired, ['foreground:r-ok', 'foreground-finish:r-ok']);
   await prepared.release();                       // idempotent
-  assert.deepEqual(acquired, ['bridge:r-ok', 'bridge-finish:r-ok']);
+  assert.deepEqual(acquired, ['foreground:r-ok', 'foreground-finish:r-ok']);
   // dispose after a rejected run releases immediately (nothing was left active)
   assert.deepEqual(lc.dispose(), { status: 'released' }); assert.deepEqual(log, ['release']);
   console.log('ok  run setup validates before acquisition; release boundary is exactly-once');

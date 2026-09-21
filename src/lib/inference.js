@@ -17,6 +17,7 @@ import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
 import { validatePreprocessReply } from './worker_reply_validation.js';
 import { resizeBlendNormalize } from './preprocess_core.js';
 import { callWorker } from './worker_call.js';
+import { withForegroundScope } from './foreground_scope.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
 import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
@@ -235,10 +236,12 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   // 1. Preprocess image (CPU)
   _stageStart = performance.now();
   report('Preprocessing image...');
-  const imageData = await preprocessImage(imageElement,
-    imageElement.naturalWidth || imageElement.width,
-    imageElement.naturalHeight || imageElement.height,
-    { preprocessWorker: options.preprocessWorker, workerTimeoutMs: options.workerTimeoutMs });
+  const imageData = await withForegroundScope(options,
+    options.preprocessWorker ? 'image-preprocess-worker' : 'image-preprocess',
+    () => preprocessImage(imageElement,
+      imageElement.naturalWidth || imageElement.width,
+      imageElement.naturalHeight || imageElement.height,
+      { preprocessWorker: options.preprocessWorker, workerTimeoutMs: options.workerTimeoutMs }));
   const imageBuf = createStorageBuffer(device, imageData);
 
   // 2. Camera embedding (GPU) — counted as part of image-preprocess
@@ -714,12 +717,14 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   // Optionally offloaded to a Web Worker that owns the resident tet grid
   // (options.marchingTetWorker) — byte-identical output (same marchingTetrahedra
   // code); removes the ~30-40ms contiguous CPU stall from the main thread.
-  const mesh = options.marchingTetWorker
-    ? await runMarchingTetOnWorker(options.marchingTetWorker,
-        { sdf, vertexOffsets, bbox, resolution: CONFIG.isosurfaceResolution },
-        { timeoutMs: options.workerTimeoutMs })
-    : marchingTetrahedra(
-        gridPositions, sdf, tetData.indices, vertexOffsets, CONFIG.isosurfaceResolution);
+  const mesh = await withForegroundScope(options,
+    options.marchingTetWorker ? 'marching-tet-worker' : 'marching-tet',
+    () => options.marchingTetWorker
+      ? runMarchingTetOnWorker(options.marchingTetWorker,
+          { sdf, vertexOffsets, bbox, resolution: CONFIG.isosurfaceResolution },
+          { timeoutMs: options.workerTimeoutMs })
+      : marchingTetrahedra(
+          gridPositions, sdf, tetData.indices, vertexOffsets, CONFIG.isosurfaceResolution));
 
   report(`Mesh extracted: ${mesh.numVertices} vertices, ${mesh.numFaces} faces`);
 

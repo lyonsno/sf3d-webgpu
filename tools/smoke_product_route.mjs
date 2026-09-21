@@ -234,7 +234,7 @@ try {
       enabled: contend || contendSame,
       mode: contendSame ? 'same-device-foreground-opportunity' : (contend ? 'second-device' : null),
       submitted: 0, completed: 0, errors: [],
-      receipts: contendSame ? { completed: 0, failed: 0, canceled: 0, outsideRun: 0, schedulerBoundary: 0, idleDrain: 0, runFinish: 0 } : null,
+      receipts: contendSame ? { completed: 0, failed: 0, canceled: 0, outsideRun: 0, schedulerBoundary: 0, foregroundWindow: 0, runFinish: 0 } : null,
     };
     let contenderDone = Promise.resolve();
     if (contendSame) {
@@ -269,9 +269,9 @@ try {
             if (r.status === 'completed') { contender.completed += 1; contender.receipts.completed += 1; }
             else if (String(r.status).startsWith('canceled')) contender.receipts.canceled += 1;
             else { contender.receipts.failed += 1; contender.errors.push(`${requestId}: ${r.failure?.error?.message || r.status}`); }
-            if (r.servicedOutsideRun) contender.receipts.outsideRun += 1;
-            else if (r.boundary?.phase === 'sf3d-producer-idle-drain') contender.receipts.idleDrain += 1;
-            else if (r.boundary?.phase === 'sf3d-producer-run-finish') contender.receipts.runFinish += 1;
+            if (r.runId == null || r.boundary?.phase === 'foreground-idle') contender.receipts.outsideRun += 1;
+            else if (r.boundary?.phase === 'foreground-run-finish') contender.receipts.runFinish += 1;
+            else if (['image-preprocess-worker', 'image-preprocess', 'marching-tet-worker', 'marching-tet', 'clip-prep-worker', 'uv-unwrap-worker', 'uv-unwrap', 'uv-rasterize', 'texture-materialize-worker', 'glb-export'].includes(r.boundary?.phase)) contender.receipts.foregroundWindow += 1;
             else contender.receipts.schedulerBoundary += 1;
             await new Promise(r => requestAnimationFrame(r));
           }
@@ -408,11 +408,11 @@ try {
   if (raw.contender.enabled) console.log(`contender (${raw.contender.mode}): submitted=${raw.contender.submitted} completed=${raw.contender.completed} errors=${raw.contender.errors.length}`);
   if (raw.contender.receipts) {
     const r = raw.contender.receipts;
-    console.log(`host frames serviced at: scheduler duty boundary=${r.schedulerBoundary} idle drain=${r.idleDrain} run finish=${r.runFinish} outside run=${r.outsideRun}  (failed=${r.failed} canceled=${r.canceled})`);
+    console.log(`host frames serviced at: scheduler duty boundary=${r.schedulerBoundary} foreground window=${r.foregroundWindow} run finish=${r.runFinish} outside run=${r.outsideRun}  (failed=${r.failed} canceled=${r.canceled})`);
   }
   if (report.foregroundOpportunities) {
     const f = report.foregroundOpportunities;
-    console.log(`foreground opportunities: status=${f.status} requests=${f.requestCount} receipts=${f.receiptCount} no-demand boundaries=${f.noDemandBoundaryCount} scheduler services=${f.producer.schedulerBoundaryServiceCount} idle drains=${f.producer.idleDrainBoundaryCount} finish drain serviced=${f.producer.finishDrainServicedCount}`);
+    console.log(`foreground service: status=${f.status} requests=${f.requestCount} receipts=${f.receiptCount} pending=${f.pendingRequestCount} active=${f.activeRequestCount}`);
   }
   console.log(`GLB sha ${report.output.glbSha256.slice(0, 12)}… (${report.output.glbBytes} B, ${report.output.numVertices}v/${report.output.numFaces}f) expected ${EXPECTED_GLB_SHA ? EXPECTED_GLB_SHA.slice(0, 12) + '…' : 'none'}`);
   console.log(`offloads: ${Object.entries(report.effective.offloads).map(([k, v]) => `${k}=${v}`).join(' ')}`);

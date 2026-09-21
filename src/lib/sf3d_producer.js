@@ -37,13 +37,13 @@ import {
   productRouteWorkerModuleUrls,
   terminateProductRouteWorkers,
 } from './product_route.js';
-import { createForegroundOpportunityBridge } from './foreground_opportunity_bridge.js';
 import { createProducerLifecycle, prepareProducerRun } from './producer_lifecycle.js';
 import {
   createSf3dImageToMeshRouteReceipt,
   createStagedSubmitProfile,
   addStagedSubmitStage,
   createWebGpuBackendIdentity,
+  createWebGpuForegroundService,
   SF3D_IMAGE_TO_MESH_ROUTE_ID,
   WEBGPU_INFERENCE_KIT_VERSION,
   validateRouteReceipt,
@@ -173,13 +173,14 @@ export async function createSf3dProducer({
   const pipelines = initPipelines(dev);
   const ownsWorkers = workers == null;
   const routeWorkers = workers ?? createProductRouteWorkers();
-  const bridge = createForegroundOpportunityBridge({ routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, device: dev, queue: dev.queue });
+  const foreground = createWebGpuForegroundService({ routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, device: dev, queue: dev.queue });
 
   let runSequence = 0;
   // One run at a time; dispose() during a run defers the release until the
   // run ends and refuses everything new meanwhile (producer_lifecycle.js).
   const lifecycle = createProducerLifecycle({
     release() {
+      void foreground.dispose();
       if (ownsWorkers) terminateProductRouteWorkers(routeWorkers);
       // Release what the producer created; never destroy an injected weight set
       // or the (possibly borrowed) device.
@@ -208,9 +209,9 @@ export async function createSf3dProducer({
     /** Host (kiln) frames: kit-shaped { requestId, run(ctx), metadata } → { requestId, completion, cancel }. */
     requestForegroundOpportunity(request) {
       lifecycle.assertAcceptingRequests();
-      return bridge.request(request);
+      return foreground.request(request);
     },
-    foregroundSnapshot() { return bridge.snapshot(); },
+    foregroundSnapshot() { return foreground.snapshot(); },
 
     async run(image, { runId = null, onProgress = null, routeOverrides = {}, signal = null } = {}) {
       if (image == null) throw new Error('sf3d run requires an image (HTMLImageElement/ImageBitmap-like)');
@@ -220,8 +221,8 @@ export async function createSf3dProducer({
       // Every fallible input is validated before any state is acquired, and
       // everything after acquisition sits under one exactly-once release
       // boundary (producer_lifecycle.js prepareProducerRun).
-      const prepared = prepareProducerRun({
-        lifecycle, bridge, runId: id,
+      const prepared = await prepareProducerRun({
+        lifecycle, foreground, runId: id,
         buildOptions: () => createProductRouteOptions({ workers: routeWorkers, overrides: routeOverrides }),
       });
       const { options } = prepared;

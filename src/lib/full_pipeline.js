@@ -22,6 +22,7 @@ import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './texture_baker.j
 import { estimateMaterials } from './clip_estimator.js';
 import { makeCooperativeTextureBake, withDecoderArenaLease } from './cooperative_texture_bake.js';
 import { callWorker } from './worker_call.js';
+import { withForegroundScope } from './foreground_scope.js';
 
 const COND_SIZE = 512;
 const TEX_RESOLUTION = 1024;
@@ -81,20 +82,22 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   // on options.clipPrepWorker with byte-identical output.
   const { roughness, metallic } = await estimateMaterials(
     device, clipRaw, COND_SIZE, COND_SIZE, weights,
-    { clipPrepWorker: options.clipPrepWorker, workerTimeoutMs: options.workerTimeoutMs });
+    { clipPrepWorker: options.clipPrepWorker, workerTimeoutMs: options.workerTimeoutMs, withForeground: options.withForeground });
   mark('clip-material-estimate', clipStart, performance.now());
 
   // Step 3: UV unwrap (CPU). Optionally offloaded to a Web Worker
   // (options.uvUnwrapWorker) — the second-largest CPU foreground gap (~216ms);
   // byte-identical output (same unwrapUV code).
-  const uvResult = await timed('uv-unwrap', () => runUvUnwrap(
-    meshResult.vertices, meshResult.faces, meshResult.numVertices, meshResult.numFaces,
-    options.uvUnwrapWorker, options.workerTimeoutMs));
+  const uvResult = await timed('uv-unwrap', () => withForegroundScope(options,
+    options.uvUnwrapWorker ? 'uv-unwrap-worker' : 'uv-unwrap',
+    () => runUvUnwrap(
+      meshResult.vertices, meshResult.faces, meshResult.numVertices, meshResult.numFaces,
+      options.uvUnwrapWorker, options.workerTimeoutMs)));
 
   // Step 4: rasterize UV → per-texel 3D positions (CPU, synchronous)
-  const rasterResult = await timed('uv-rasterize', async () => rasterizeUV(
+  const rasterResult = await timed('uv-rasterize', () => withForegroundScope(options, 'uv-rasterize', () => rasterizeUV(
     uvResult.uvs, uvResult.newVertices, uvResult.newFaces,
-    uvResult.newNumFaces, TEX_RESOLUTION, uvResult.faceAssignment));
+    uvResult.newNumFaces, TEX_RESOLUTION, uvResult.faceAssignment)));
 
   // Step 5: texture bake (GPU triplane query). Optionally cooperative — batch
   // the per-texel decode into yieldable GPU duties (options.cooperativeBake).
@@ -117,6 +120,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     bakeOptions.materializeWorker = options.materializeWorker;
     bakeOptions.workerTimeoutMs = options.workerTimeoutMs;
   }
+  bakeOptions.withForeground = options.withForeground;
   // Optional decoder scratch arena (options.decoderArena): removes ~1.015GB
   // per-route decode allocation churn by reusing one buffer per slot across
   // ranges, held under the phase-resource working-set lease. maxBatch is the
@@ -150,11 +154,11 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   }
 
   // Step 6: GLB export
-  const glb = await timed('glb-export', () => exportGLB(
+  const glb = await timed('glb-export', () => withForegroundScope(options, 'glb-export', () => exportGLB(
     uvResult.newVertices, uvResult.newNormals, uvResult.newFaces, uvResult.uvs,
     bakeResult.albedo, bakeResult.normalMap,
     uvResult.newNumVertices, uvResult.newNumFaces, TEX_RESOLUTION,
-    roughness, metallic));
+    roughness, metallic)));
 
   // Which CPU phases ran off the main thread. Every worker dispatcher is
   // fail-loud (callWorker never falls back silently), so a requested worker is

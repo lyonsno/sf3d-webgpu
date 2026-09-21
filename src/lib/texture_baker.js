@@ -18,6 +18,7 @@ import {
 } from './gpu.js';
 import { materializeTextures } from './materialize_core.js';
 import { callWorker } from './worker_call.js';
+import { withForegroundScope } from './foreground_scope.js';
 
 /**
  * UV unwrap a mesh using cube projection with bounding-box normalization.
@@ -999,7 +1000,7 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     const tbnBuf = tbnData.slice().buffer;
     const maskBuf = mask.slice().buffer;
     const transferStart = performance.now();
-    const out = await callWorker(
+    const out = await withForegroundScope(options, 'texture-materialize-worker', () => callWorker(
       worker,
       { featuresBuf, normalsBuf, occupiedBuf, tbnBuf, maskBuf, resolution, numOccupied, id },
       [featuresBuf, normalsBuf, occupiedBuf, tbnBuf, maskBuf],
@@ -1015,7 +1016,7 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
           return { albedo: a, normalMap: n };
         },
       },
-    );
+    ));
     albedo = out.albedo; normalMap = out.normalMap;
     workerTransferMs = performance.now() - transferStart;
   } else {

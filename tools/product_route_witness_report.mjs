@@ -240,8 +240,8 @@ export function assembleProductRouteWitness(input) {
       errors: Object.freeze([...(contender?.errors || [])]),
       receipts: contender?.receipts ? Object.freeze({ ...contender.receipts }) : null,
     }),
-    // The producer's foreground-opportunity report (kit finish() report plus
-    // producer drain counters), present only for the same-device arm.
+    // The common foreground-service finish report, present only for the
+    // same-device arm.
     foregroundOpportunities: foregroundOpportunities ? Object.freeze({
       status: foregroundOpportunities.status ?? null,
       requestCount: foregroundOpportunities.requestCount ?? null,
@@ -253,7 +253,6 @@ export function assembleProductRouteWitness(input) {
       // without demand never reach the kit (see createSf3dCooperativeRuntime).
       // Carried for the kit's own accounting, not asserted on.
       noDemandBoundaryCount: foregroundOpportunities.noDemandBoundaryCount ?? null,
-      producer: Object.freeze({ ...(foregroundOpportunities.producer || {}) }),
     }) : null,
     inferenceWindow: Object.freeze({ startMs: inferenceWindow?.startMs ?? null, endMs: inferenceWindow?.endMs ?? null }),
     totalMs: finite(totalMs) ? +totalMs.toFixed(1) : null,
@@ -364,17 +363,14 @@ export function acceptProductRouteWitness(report, expectations = {}) {
       const settled = receipts.completed + receipts.failed + receipts.canceled;
       if (settled !== c.submitted) errors.push(`contender receipts ${receipts.completed}+${receipts.failed}+${receipts.canceled} != submitted ${c.submitted}`);
       if (receipts.completed !== c.completed) errors.push(`contender receipts.completed ${receipts.completed} != completed ${c.completed}`);
-      const located = receipts.outsideRun + receipts.schedulerBoundary + receipts.idleDrain + receipts.runFinish;
+      const located = receipts.outsideRun + receipts.schedulerBoundary + receipts.foregroundWindow + receipts.runFinish;
       if (located !== receipts.completed) errors.push(`contender service locations ${located} != completed ${receipts.completed}`);
-      const inRun = receipts.schedulerBoundary + receipts.idleDrain + receipts.runFinish;
+      const inRun = receipts.schedulerBoundary + receipts.foregroundWindow + receipts.runFinish;
       if (!(inRun > 0)) errors.push('same-device contender serviced zero host frames inside the run');
       const fg = report.foregroundOpportunities;
       if (fg) {
         if (fg.requestCount !== inRun) errors.push(`foreground requestCount ${fg.requestCount} != in-run contender receipts ${inRun}`);
         if (fg.receiptCount !== fg.requestCount) errors.push(`foreground receiptCount ${fg.receiptCount} != requestCount ${fg.requestCount}`);
-        const p = fg.producer || {};
-        if (p.idleDrainServicedCount !== receipts.idleDrain) errors.push(`producer idle drain serviced ${p.idleDrainServicedCount} != idle-drain receipts ${receipts.idleDrain}`);
-        if (p.finishDrainServicedCount !== receipts.runFinish) errors.push(`producer finish drain serviced ${p.finishDrainServicedCount} != run-finish receipts ${receipts.runFinish}`);
       }
     }
     if (report.contender.mode === 'same-device-foreground-opportunity' && !report.foregroundOpportunities) {
@@ -396,12 +392,10 @@ export function acceptProductRouteWitness(report, expectations = {}) {
 
   // Foreground-opportunity report (same-device host frames): every host
   // request must have been serviced (none pending/active at finish) and the
-  // producer's idle drain must not have failed.
+  // common service must have settled every receipt.
   const fg = report.foregroundOpportunities;
   if (fg) {
     if (fg.status !== 'succeeded') errors.push(`foreground opportunity report status ${fg.status} (demand left unsettled at run finish)`);
-    const drainFailures = fg.producer?.drainFailures || [];
-    if (drainFailures.length) errors.push(`foreground idle drain failures: ${drainFailures.map(f => f.message).join('; ')}`);
   }
 
   // Budget.

@@ -185,22 +185,20 @@ for (const [name, input, re] of identityFalsifiers) {
   console.log('ok  rejects: reviewer tamper (wrong manifest + no validations)');
 }
 
-// --- Same-device contender through the producer's foreground-opportunity bridge ---
+// --- Same-device contender through the common foreground service ---
 // The witness must carry the producer's foreground report and the contender's
 // receipt breakdown, and refuse a run whose foreground demand was left
-// pending/active, whose idle drain failed, or whose host frames failed/canceled.
+// pending/active or whose host frames failed/canceled.
 const fgReport = {
   status: 'succeeded', requestCount: 120, receiptCount: 120, pendingRequestCount: 0, activeRequestCount: 0,
   noDemandBoundaryCount: 3000,
-  producer: { schedulerBoundaryServiceCount: 100, idleDrainBoundaryCount: 15, idleDrainServicedCount: 18, finishDrainServicedCount: 2, drainFailures: [], drainAfterMs: 16.7, drainIntervalMs: 8 },
 };
 const sameDeviceContender = {
   enabled: true, mode: 'same-device-foreground-opportunity', submitted: 120, completed: 120, errors: [],
-  receipts: { completed: 120, failed: 0, canceled: 0, outsideRun: 0, schedulerBoundary: 100, idleDrain: 18, runFinish: 2 },
+  receipts: { completed: 120, failed: 0, canceled: 0, outsideRun: 0, schedulerBoundary: 100, foregroundWindow: 18, runFinish: 2 },
 };
 const withFg = assembleProductRouteWitness(validInput({ foregroundOpportunities: fgReport, contender: sameDeviceContender }));
 assert.equal(withFg.foregroundOpportunities.status, 'succeeded');
-assert.equal(withFg.foregroundOpportunities.producer.idleDrainBoundaryCount, 15);
 assert.equal(withFg.contender.mode, 'same-device-foreground-opportunity');
 assert.equal(withFg.contender.receipts.schedulerBoundary, 100);
 assert.deepEqual([...acceptProductRouteWitness(withFg, { requireContender: true }).errors], []);
@@ -208,7 +206,6 @@ assert.deepEqual([...acceptProductRouteWitness(withFg, { requireContender: true 
 assert.equal(good.foregroundOpportunities, null);
 const fgFalsifiers = [
   ['foreground demand left unsettled', validInput({ foregroundOpportunities: { ...fgReport, status: 'incomplete', pendingRequestCount: 2 }, contender: sameDeviceContender }), /foreground opportunity report status incomplete/],
-  ['idle drain failures', validInput({ foregroundOpportunities: { ...fgReport, producer: { ...fgReport.producer, drainFailures: [{ name: 'Error', message: 'boom' }] } }, contender: sameDeviceContender }), /foreground idle drain failures: boom/],
   ['same-device contender without foreground report', validInput({ contender: sameDeviceContender }), /same-device contender requires a foreground opportunity report/],
   ['host frames failed', validInput({ foregroundOpportunities: fgReport, contender: { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, failed: 3 } } }), /contender receipts: 3 failed/],
   ['host frames canceled', validInput({ foregroundOpportunities: fgReport, contender: { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, canceled: 1 } } }), /contender receipts: 1 canceled/],
@@ -227,8 +224,8 @@ for (const [name, input, re] of fgFalsifiers) {
 // actually serviced inside the run.
 {
   const adversarial = validInput({
-    foregroundOpportunities: { ...fgReport, requestCount: 0, receiptCount: 0, producer: { ...fgReport.producer, schedulerBoundaryServiceCount: 0, idleDrainBoundaryCount: 0, idleDrainServicedCount: 0, finishDrainServicedCount: 0 } },
-    contender: { ...sameDeviceContender, submitted: 100, completed: 1, receipts: { completed: 1, failed: 0, canceled: 0, outsideRun: 1, schedulerBoundary: 0, idleDrain: 0, runFinish: 0 } },
+    foregroundOpportunities: { ...fgReport, requestCount: 0, receiptCount: 0 },
+    contender: { ...sameDeviceContender, submitted: 100, completed: 1, receipts: { completed: 1, failed: 0, canceled: 0, outsideRun: 1, schedulerBoundary: 0, foregroundWindow: 0, runFinish: 0 } },
   });
   const verdict = acceptProductRouteWitness(assembleProductRouteWitness(adversarial), { requireContender: true });
   assert.equal(verdict.ok, false, 'malformed same-device accounting must be rejected');
@@ -239,7 +236,7 @@ for (const [name, input, re] of fgFalsifiers) {
 const accountingFalsifiers = [
   ['completed != submitted', { ...sameDeviceContender, completed: 119 }, /contender completed 119 != submitted 120/],
   ['receipt statuses do not sum to submitted', { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, completed: 119 } }, /contender receipts 119\+0\+0 != submitted 120/],
-  ['service locations do not sum to completed', { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, idleDrain: 17 } }, /service locations 119 != completed 120/],
+  ['service locations do not sum to completed', { ...sameDeviceContender, receipts: { ...sameDeviceContender.receipts, foregroundWindow: 17 } }, /service locations 119 != completed 120/],
 ];
 for (const [name, contender, re] of accountingFalsifiers) {
   const verdict = acceptProductRouteWitness(assembleProductRouteWitness(validInput({ foregroundOpportunities: fgReport, contender })), { requireContender: true });
@@ -248,13 +245,10 @@ for (const [name, contender, re] of accountingFalsifiers) {
   console.log(`ok  rejects: ${name}`);
 }
 {
-  // In-run receipts (100+18+2 = 120) must equal the producer's request/receipt counts.
+  // In-run receipts (100+18+2 = 120) must equal the common service request/receipt counts.
   const fg = { ...fgReport, requestCount: 119, receiptCount: 119 };
   const verdict = acceptProductRouteWitness(assembleProductRouteWitness(validInput({ foregroundOpportunities: fg, contender: sameDeviceContender })), { requireContender: true });
   assert.match(verdict.errors.join('\n'), /foreground requestCount 119 != in-run contender receipts 120/);
-  const fg2 = { ...fgReport, producer: { ...fgReport.producer, idleDrainServicedCount: 17 } };
-  const verdict2 = acceptProductRouteWitness(assembleProductRouteWitness(validInput({ foregroundOpportunities: fg2, contender: sameDeviceContender })), { requireContender: true });
-  assert.match(verdict2.errors.join('\n'), /idle drain serviced 17 != idle-drain receipts 18/);
   console.log('ok  rejects: in-run receipts disagree with the producer foreground report');
 }
 

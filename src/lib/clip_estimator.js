@@ -15,6 +15,7 @@
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
 import { createWebGpuResourceCaches } from '@kaminos/webgpu-inference-kit';
 import { callWorker } from './worker_call.js';
+import { withForegroundScope } from './foreground_scope.js';
 import {
   clipPrepWeightsFrom,
   prepareClipEmbeddings,
@@ -204,8 +205,9 @@ export async function estimateMaterials(device, rgba8, imgWidth, imgHeight, weig
 
   // Step 1: CPU preprocessing — blend, resize to 224, normalize, patch embed
   const embeddings = options.clipPrepWorker
-    ? await runClipPrep(options.clipPrepWorker, rgba8, imgWidth, imgHeight, weights,
-        { timeoutMs: options.workerTimeoutMs })
+    ? await withForegroundScope(options, 'clip-prep-worker', () => runClipPrep(
+        options.clipPrepWorker, rgba8, imgWidth, imgHeight, weights,
+        { timeoutMs: options.workerTimeoutMs }))
     : validateClipEmbeddings(prepareClipEmbeddings(rgba8, imgWidth, imgHeight, clipPrepWeightsFrom(weights)));
 
   // Step 2: Visual transformer (CPU fp32 for precision, GPU for speed)

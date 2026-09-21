@@ -50,21 +50,25 @@ export function createProducerLifecycle({ release }) {
  * producer after lifecycle.beginRun had already fired).
  *
  * buildOptions() must return the frozen route options WITHOUT the
- * foreground interlock; it is attached here from the bridge run.
+ * foreground service; it is attached here from the admitted service run.
  */
-export function prepareProducerRun({ lifecycle, bridge, runId, buildOptions }) {
+export async function prepareProducerRun({ lifecycle, foreground, runId, buildOptions }) {
   if (typeof runId !== 'string' || !runId.trim()) throw new Error('runId must be a non-empty string');
   if (typeof buildOptions !== 'function') throw new Error('buildOptions must be a function');
   const baseOptions = buildOptions();            // throws on unknown worker roles / bad overrides
   lifecycle.beginRun(runId);                       // refuses when disposed or a run is active
   let foregroundRun;
   try {
-    foregroundRun = bridge.beginRun(runId);
+    foregroundRun = await foreground.beginRun(runId);
   } catch (error) {
     lifecycle.endRun(runId);
     throw error;
   }
-  const options = Object.freeze({ ...baseOptions, foregroundOpportunities: foregroundRun.foregroundOpportunities });
+  const options = Object.freeze({
+    ...baseOptions,
+    foregroundOpportunities: foregroundRun.foregroundOpportunities,
+    withForeground: foregroundRun.withForeground,
+  });
   let released = null;
   return Object.freeze({
     runId,
