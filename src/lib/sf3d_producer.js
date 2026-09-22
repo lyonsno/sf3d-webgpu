@@ -30,6 +30,7 @@
 import { initGPU } from './gpu.js';
 import { loadWeights } from './weights.js';
 import { initPipelines } from './inference.js';
+import { retainClipPrepWorker, releaseClipPrepWorker } from './clip_estimator.js';
 import { runFullPipelineToGlb } from './full_pipeline.js';
 import {
   createProductRouteOptions,
@@ -191,11 +192,17 @@ export async function createSf3dProducer({
   let pipelines;
   let routeWorkers;
   let foreground;
+  let retainedClipPrepWorker = false;
   try {
     pipelines = initPipelines(dev);
     routeWorkers = workers ?? createProductRouteWorkers();
+    if (routeWorkers?.clipPrepWorker) {
+      retainClipPrepWorker(routeWorkers.clipPrepWorker, modelWeights);
+      retainedClipPrepWorker = true;
+    }
     foreground = createWebGpuForegroundService({ routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, device: dev, queue: dev.queue });
   } catch (error) {
+    if (retainedClipPrepWorker) await releaseClipPrepWorker(routeWorkers.clipPrepWorker, modelWeights);
     if (ownsWorkers && routeWorkers) terminateProductRouteWorkers(routeWorkers);
     if (ownsWeights) releaseLoadedWeights(modelWeights);
     throw error;
@@ -209,6 +216,10 @@ export async function createSf3dProducer({
       try {
         await foreground.dispose();
       } finally {
+        // An injected worker is borrowed, but the copied preparation tensors
+        // sent into it by this producer are not. Reset only after foreground
+        // work drains, and only once every producer using this identity released.
+        if (retainedClipPrepWorker) await releaseClipPrepWorker(routeWorkers.clipPrepWorker, modelWeights);
         if (ownsWorkers) terminateProductRouteWorkers(routeWorkers);
         // Release what the producer created; never destroy an injected weight set
         // or the (possibly borrowed) device.

@@ -245,9 +245,61 @@ export async function estimateMaterials(device, rgba8, imgWidth, imgHeight, weig
   return { roughness, metallic, prepOffloaded: Boolean(options.clipPrepWorker) };
 }
 
-// Per-worker one-time init (the 9.4MB conv1 weight + embeddings stay resident
-// in the worker). A failed init is forgotten so a later call can retry.
-const _clipPrepInit = new WeakMap();
+// A CLIP-preparation worker owns one copied 9.4 MB-ish preparation-weight set
+// at a time. Its cache therefore belongs to *both* the worker and the source
+// weight-set identity. Calls through one worker are serialized: a replacement
+// init cannot overwrite the tensors under an earlier preparation request.
+const _clipPrepState = new WeakMap();
+
+function clipPrepStateFor(worker) {
+  let state = _clipPrepState.get(worker);
+  if (!state) {
+    state = { tail: Promise.resolve(), weightIdentity: null, owners: new Map() };
+    _clipPrepState.set(worker, state);
+  }
+  return state;
+}
+
+function queueClipPrep(state, operation) {
+  const queued = state.tail.catch(() => undefined).then(operation);
+  state.tail = queued;
+  return queued;
+}
+
+/**
+ * Register a producer's use of an injected CLIP-preparation worker. The
+ * registration lets producer disposal reset only a cache no sibling producer
+ * still owns; it never terminates a host-owned worker or destroys its weights.
+ */
+export function retainClipPrepWorker(worker, weights) {
+  if (!worker) return;
+  const state = clipPrepStateFor(worker);
+  state.owners.set(weights, (state.owners.get(weights) || 0) + 1);
+}
+
+/**
+ * Release the copied preparation tensors installed by one producer. This is
+ * intentionally an acknowledged worker operation, after the caller's run and
+ * foreground drain; clearing the loader's raw map alone cannot release bytes
+ * already transferred to a borrowed worker.
+ */
+export async function releaseClipPrepWorker(worker, weights, { timeoutMs = 30000 } = {}) {
+  if (!worker) return;
+  const state = clipPrepStateFor(worker);
+  const owners = state.owners.get(weights) || 0;
+  if (owners > 1) state.owners.set(weights, owners - 1);
+  else state.owners.delete(weights);
+  return queueClipPrep(state, async () => {
+    if (state.weightIdentity !== weights || state.owners.has(weights)) return;
+    await callWorker(
+      worker,
+      { type: 'reset', id: `clip-reset-${Math.random().toString(36).slice(2)}` },
+      [],
+      { timeoutMs, onResult: (d) => { if (d.reset !== true) throw new Error('clip prep reset not acknowledged'); return true; } },
+    );
+    state.weightIdentity = null;
+  });
+}
 
 /**
  * Run the CLIP CPU prep on a Worker (clip_prep_worker.js). Fail-loud through
@@ -255,33 +307,40 @@ const _clipPrepInit = new WeakMap();
  * main thread silently. The caller's rgba8 is copied, not detached.
  */
 export async function runClipPrep(worker, rgba8, width, height, weights, { timeoutMs = 30000 } = {}) {
-  const prep = weights && typeof weights._rawGetCPU === 'function'
-    ? clipPrepWeightsFrom(weights)
-    : validateClipPrepWeights(weights);
-  let init = _clipPrepInit.get(worker);
-  if (!init) {
-    const conv1W = prep.conv1W.slice().buffer;
-    const classEmb = prep.classEmb.slice().buffer;
-    const posEmb = prep.posEmb.slice().buffer;
-    init = callWorker(
+  const state = clipPrepStateFor(worker);
+  return queueClipPrep(state, async () => {
+    if (state.weightIdentity !== weights) {
+      const prep = weights && typeof weights._rawGetCPU === 'function'
+        ? clipPrepWeightsFrom(weights)
+        : validateClipPrepWeights(weights);
+      const conv1W = prep.conv1W.slice().buffer;
+      const classEmb = prep.classEmb.slice().buffer;
+      const posEmb = prep.posEmb.slice().buffer;
+      try {
+        await callWorker(
+          worker,
+          { type: 'init', id: `clip-init-${Math.random().toString(36).slice(2)}`, conv1W, classEmb, posEmb },
+          [conv1W, classEmb, posEmb],
+          { timeoutMs, onResult: (d) => { if (d.initialized !== true) throw new Error('clip prep init not acknowledged'); return true; } },
+        );
+        state.weightIdentity = weights;
+      } catch (error) {
+        // Worker init revokes its old set before validating the replacement;
+        // never let the caller model a failed swap as still bound to the old one.
+        state.weightIdentity = null;
+        throw error;
+      }
+    }
+    const bytes = (rgba8 instanceof Uint8ClampedArray || rgba8 instanceof Uint8Array)
+      ? rgba8 : new Uint8ClampedArray(rgba8);
+    const rgba = bytes.slice().buffer;
+    return await callWorker(
       worker,
-      { type: 'init', id: `clip-init-${Math.random().toString(36).slice(2)}`, conv1W, classEmb, posEmb },
-      [conv1W, classEmb, posEmb],
-      { timeoutMs, onResult: (d) => { if (d.initialized !== true) throw new Error('clip prep init not acknowledged'); return true; } },
+      { id: `clip-prep-${Math.random().toString(36).slice(2)}`, rgba, width, height },
+      [rgba],
+      { timeoutMs, onResult: (d) => validateClipEmbeddings(new Float32Array(d.embeddings)) },
     );
-    _clipPrepInit.set(worker, init);
-    init.catch(() => { if (_clipPrepInit.get(worker) === init) _clipPrepInit.delete(worker); });
-  }
-  await init;
-  const bytes = (rgba8 instanceof Uint8ClampedArray || rgba8 instanceof Uint8Array)
-    ? rgba8 : new Uint8ClampedArray(rgba8);
-  const rgba = bytes.slice().buffer;
-  return await callWorker(
-    worker,
-    { id: `clip-prep-${Math.random().toString(36).slice(2)}`, rgba, width, height },
-    [rgba],
-    { timeoutMs, onResult: (d) => validateClipEmbeddings(new Float32Array(d.embeddings)) },
-  );
+  });
 }
 
 // Inline CLIP shaders (add / GELU / fused attention) bake their sizes into the

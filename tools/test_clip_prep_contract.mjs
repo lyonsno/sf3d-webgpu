@@ -130,6 +130,58 @@ function makeFakeWorker(behavior) {
   console.log('ok  runClipPrep: one-time init, one request per call, byte-identical');
 }
 {
+  const withMarker = (marker) => ({
+    conv1W: weights.conv1W,
+    classEmb: Object.assign(weights.classEmb.slice(), { 0: marker }),
+    posEmb: weights.posEmb,
+  });
+  let installedMarker = null;
+  const worker = makeFakeWorker((self, msg) => {
+    if (msg.type === 'init') {
+      installedMarker = new Float32Array(msg.classEmb)[0];
+      queueMicrotask(() => self._emit('message', { data: { id: msg.id, ok: true, initialized: true } }));
+      return;
+    }
+    const embeddings = new Float32Array(CLIP_NUM_TOKENS * CLIP_HIDDEN_DIM);
+    embeddings[0] = installedMarker;
+    queueMicrotask(() => self._emit('message', { data: { id: msg.id, ok: true, embeddings: embeddings.buffer } }));
+  });
+  const firstWeights = withMarker(1);
+  const secondWeights = withMarker(2);
+  const first = await runClipPrep(worker, new Uint8ClampedArray(4), 1, 1, firstWeights, { timeoutMs: 5000 });
+  const second = await runClipPrep(worker, new Uint8ClampedArray(4), 1, 1, secondWeights, { timeoutMs: 5000 });
+  assert.equal(first[0], 1, 'first preparation request uses its initialized tensors');
+  assert.equal(second[0], 2,
+    'a replacement weight identity must reinitialize the shared worker before its preparation request');
+  assert.equal(worker.posted.filter(p => p.msg.type === 'init').length, 2,
+    'one worker receives one initialization per distinct weight identity');
+  console.log('ok  runClipPrep rebinds a shared worker for replacement weights');
+}
+{
+  const withMarker = (marker) => ({
+    conv1W: weights.conv1W,
+    classEmb: Object.assign(weights.classEmb.slice(), { 0: marker }),
+    posEmb: weights.posEmb,
+  });
+  let installedMarker = null;
+  const worker = makeFakeWorker((self, msg) => {
+    const reply = data => queueMicrotask(() => self._emit('message', { data: { id: msg.id, ok: true, ...data } }));
+    if (msg.type === 'init') { installedMarker = new Float32Array(msg.classEmb)[0]; reply({ initialized: true }); return; }
+    const embeddings = new Float32Array(CLIP_NUM_TOKENS * CLIP_HIDDEN_DIM);
+    embeddings[0] = installedMarker;
+    reply({ embeddings: embeddings.buffer });
+  });
+  const [first, second] = await Promise.all([
+    runClipPrep(worker, new Uint8ClampedArray(4), 1, 1, withMarker(3), { timeoutMs: 5000 }),
+    runClipPrep(worker, new Uint8ClampedArray(4), 1, 1, withMarker(4), { timeoutMs: 5000 }),
+  ]);
+  assert.equal(first[0], 3, 'the first queued request cannot be rebound underneath itself');
+  assert.equal(second[0], 4, 'the replacement waits for the first request, then uses its own tensors');
+  assert.equal(worker.posted.filter(p => p.msg.type === 'init').length, 2,
+    'concurrent replacement requests serialize distinct worker generations');
+  console.log('ok  runClipPrep serializes concurrent replacement-weight requests');
+}
+{
   const worker = makeFakeWorker((self, msg) => {
     if (msg.type === 'init') { queueMicrotask(() => self._emit('message', { data: { id: msg.id, ok: true, initialized: true } })); return; }
     queueMicrotask(() => self._emit('message', { data: { id: msg.id, ok: true, embeddings: new ArrayBuffer(16) } }));

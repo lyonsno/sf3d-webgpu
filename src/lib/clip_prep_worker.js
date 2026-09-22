@@ -4,7 +4,9 @@
  *
  * Protocol (request/response by id, driven through worker_call.js):
  *   { type: 'init', id, conv1W, classEmb, posEmb }   ArrayBuffers (copied in
- *       once; the worker keeps them resident)      → { id, ok: true, initialized: true }
+ *       for the caller's current weight identity)  → { id, ok: true, initialized: true }
+ *   { type: 'reset', id }                            releases copied tensors
+ *                                                   → { id, ok: true, reset: true }
  *   { id, rgba, width, height }                     rgba ArrayBuffer (transferred)
  *                                                    → { id, ok: true, embeddings }  (transferred)
  * Uses the SAME clip_prep_core math as the main-thread path, so the
@@ -18,6 +20,10 @@ self.onmessage = (e) => {
   const d = e.data;
   if (d?.type === 'init') {
     try {
+      // Revoke old copied tensors before validating a replacement. A failed
+      // replacement must not leave a caller believing it can still use old
+      // preparation weights.
+      prepWeights = null;
       prepWeights = validateClipPrepWeights({
         conv1W: new Float32Array(d.conv1W),
         classEmb: new Float32Array(d.classEmb),
@@ -27,6 +33,11 @@ self.onmessage = (e) => {
     } catch (err) {
       self.postMessage({ id: d.id, ok: false, error: String(err?.stack || err) });
     }
+    return;
+  }
+  if (d?.type === 'reset') {
+    prepWeights = null;
+    self.postMessage({ id: d.id, ok: true, reset: true });
     return;
   }
   try {

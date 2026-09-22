@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadWeights } from '../src/lib/weights.js';
 import { createSf3dProducer, releaseLoadedWeights } from '../src/lib/sf3d_producer.js';
+import { runClipPrep } from '../src/lib/clip_estimator.js';
 import { weightFixture, fakeWeightDevice, installWeightFetch } from './fixtures/weight_resource_fixture.mjs';
 
 globalThis.GPUBufferUsage = { STORAGE: 128, COPY_SRC: 4, COPY_DST: 8, UNIFORM: 64, MAP_READ: 1 };
@@ -140,6 +141,38 @@ test('injected weight sets remain host-owned, including their lazy buffers and r
     releaseLoadedWeights(weights); // the host, not the disposed borrower, releases its set
     assert.ok(device.buffers.every(buffer => buffer.destroyed === 1));
   } finally { restore(); }
+});
+
+test('producer disposal resets copied preparation weights in an injected worker after foreground drain', async () => {
+  const device = fakeWeightDevice();
+  const listeners = new Set();
+  let resetCount = 0;
+  const worker = {
+    addEventListener(type, listener) { if (type === 'message') listeners.add(listener); },
+    removeEventListener(type, listener) { if (type === 'message') listeners.delete(listener); },
+    postMessage(message) {
+      const reply = data => { for (const listener of [...listeners]) listener({ data: { id: message.id, ok: true, ...data } }); };
+      if (message.type === 'init') { queueMicrotask(() => reply({ initialized: true })); return; }
+      if (message.type === 'reset') { resetCount += 1; queueMicrotask(() => reply({ reset: true })); return; }
+      queueMicrotask(() => reply({ embeddings: new Float32Array(50 * 768).buffer }));
+    },
+  };
+  const prep = {
+    conv1W: new Float32Array(768 * 3072),
+    classEmb: new Float32Array(768),
+    posEmb: new Float32Array(50 * 768),
+  };
+  const weights = { _rawGetCPU(name) {
+    if (name.endsWith('conv1.weight')) return prep.conv1W;
+    if (name.endsWith('class_embedding')) return prep.classEmb;
+    if (name.endsWith('positional_embedding')) return prep.posEmb;
+    throw new Error(`unexpected prep tensor ${name}`);
+  } };
+  const producer = await createSf3dProducer({ device, weights, workers: { clipPrepWorker: worker } });
+  await runClipPrep(worker, new Uint8ClampedArray(4), 1, 1, weights);
+  await producer.dispose().completion;
+  assert.equal(resetCount, 1,
+    'producer disposal acknowledges release of the copied tensors without terminating the injected worker');
 });
 
 test('known loader weights cannot be injected into another GPU device', async () => {
