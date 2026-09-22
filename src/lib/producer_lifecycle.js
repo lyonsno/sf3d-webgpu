@@ -8,11 +8,23 @@
  */
 export function createProducerLifecycle({ release }) {
   if (typeof release !== 'function') throw new Error('release must be a function');
-  const state = { activeRunId: null, disposed: false, released: false };
+  const state = { activeRunId: null, disposed: false, releaseStarted: false };
+  let resolveCompletion;
+  let rejectCompletion;
+  const completion = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
   const doRelease = () => {
-    if (state.released) return;
-    state.released = true;
-    release();
+    if (state.releaseStarted) return completion;
+    state.releaseStarted = true;
+    Promise.resolve()
+      .then(() => release())
+      .then(
+        () => resolveCompletion(Object.freeze({ status: 'released' })),
+        error => rejectCompletion(error),
+      );
+    return completion;
   };
   return Object.freeze({
     get activeRunId() { return state.activeRunId; },
@@ -22,22 +34,24 @@ export function createProducerLifecycle({ release }) {
       if (state.activeRunId != null) throw new Error(`sf3d producer already has an active run (${state.activeRunId})`);
       state.activeRunId = runId;
     },
-    /** 'released' when a deferred dispose ran at this run's end, else 'idle'. */
+    /** 'release-started' when a deferred dispose begins at this run's end, else 'idle'. */
     endRun(runId) {
       if (state.activeRunId !== runId) throw new Error(`${runId} is not the active run (${state.activeRunId ?? 'none'})`);
       state.activeRunId = null;
-      if (state.disposed) { doRelease(); return 'released'; }
+      if (state.disposed) { doRelease(); return 'release-started'; }
       return 'idle';
     },
     assertAcceptingRequests() {
       if (state.disposed) throw new Error('sf3d producer is disposed');
     },
     dispose() {
-      if (state.disposed) return Object.freeze({ status: 'already-disposed' });
+      if (state.disposed) return Object.freeze({ status: 'already-disposed', completion });
       state.disposed = true;
-      if (state.activeRunId != null) return Object.freeze({ status: 'deferred-until-run-ends', runId: state.activeRunId });
+      if (state.activeRunId != null) {
+        return Object.freeze({ status: 'deferred-until-run-ends', runId: state.activeRunId, completion });
+      }
       doRelease();
-      return Object.freeze({ status: 'released' });
+      return Object.freeze({ status: 'releasing', completion });
     },
   });
 }

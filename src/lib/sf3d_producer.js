@@ -18,10 +18,11 @@
  * arena are not reentrant); `signal` is checked at run start only (no mid-run
  * cancellation of SF3D GPU work); the route receipt's artifact hashes are
  * 'not-computed' as in the app (the witness harness hashes the GLB).
- * `dispose()` terminates producer-created workers and releases producer-loaded
- * weight buffers; it never destroys an injected device or injected weights;
- * called during a run it defers the release until the run ends and refuses
- * new runs and requests meanwhile (returns the status).
+ * `dispose()` refuses new work synchronously and returns a stable completion
+ * promise. That completion settles only after admitted foreground work drains,
+ * then producer-created workers and producer-loaded weight buffers release; it
+ * never destroys an injected device or injected weights. Called during a run,
+ * teardown waits for the run's foreground finish boundary first.
  * A failed run throws with `error.sf3dRun` = { runId, lastProgress,
  * foregroundOpportunityReport, identity } so the host keeps the phase and the
  * last trustworthy evidence.
@@ -179,12 +180,15 @@ export async function createSf3dProducer({
   // One run at a time; dispose() during a run defers the release until the
   // run ends and refuses everything new meanwhile (producer_lifecycle.js).
   const lifecycle = createProducerLifecycle({
-    release() {
-      void foreground.dispose();
-      if (ownsWorkers) terminateProductRouteWorkers(routeWorkers);
-      // Release what the producer created; never destroy an injected weight set
-      // or the (possibly borrowed) device.
-      if (ownsWeights) releaseLoadedWeights(modelWeights);
+    async release() {
+      try {
+        await foreground.dispose();
+      } finally {
+        if (ownsWorkers) terminateProductRouteWorkers(routeWorkers);
+        // Release what the producer created; never destroy an injected weight set
+        // or the (possibly borrowed) device.
+        if (ownsWeights) releaseLoadedWeights(modelWeights);
+      }
     },
   });
 
@@ -284,7 +288,9 @@ export async function createSf3dProducer({
      * and weight buffers now. During a run: refuses new runs/requests at once
      * and releases when the run ends (the run's own finish and receipts still
      * happen). Never destroys an injected device or injected weights.
-     * Returns { status: 'released' | 'deferred-until-run-ends' | 'already-disposed' }.
+     * Returns a synchronous status plus one stable `completion` promise. The
+     * promise resolves with { status: 'released' } only after foreground drain
+     * and producer-owned resource release have both finished.
      */
     dispose() {
       return lifecycle.dispose();

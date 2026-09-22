@@ -5,12 +5,12 @@
  * Advisory review A2 (2026-09-16): dispose() during an active run left the
  * bridge run open (drain timer firing, second beginRun refused forever) and
  * pending host requests without a settlement path. Contract:
- *   1. dispose() with no active run releases immediately (once);
+ *   1. dispose() with no active run starts one asynchronous release (once);
  *   2. dispose() during an active run defers the release until that run ends,
  *      reports the deferral, and the run's own finish still happens;
  *   3. after dispose is requested, new runs and new foreground requests are
  *      refused, but the active run's end still releases exactly once;
- *   4. a second dispose is a no-op.
+ *   4. a second dispose returns the same completion authority.
  */
 import assert from 'node:assert/strict';
 import { createProducerLifecycle } from '../src/lib/producer_lifecycle.js';
@@ -21,10 +21,13 @@ function make() {
   return { lc, log };
 }
 
-// 1. Idle dispose releases immediately.
+// 1. Idle dispose starts release immediately and exposes its completion.
 {
   const { lc, log } = make();
-  assert.deepEqual(lc.dispose(), { status: 'released' });
+  const disposal = lc.dispose();
+  assert.equal(disposal.status, 'releasing');
+  assert.deepEqual(log, []);
+  assert.deepEqual(await disposal.completion, { status: 'released' });
   assert.deepEqual(log, ['release']);
   assert.equal(lc.disposed, true);
   assert.throws(() => lc.beginRun('r1'), /disposed/);
@@ -37,12 +40,15 @@ function make() {
   const { lc, log } = make();
   lc.beginRun('r2');
   assert.equal(lc.activeRunId, 'r2');
-  assert.deepEqual(lc.dispose(), { status: 'deferred-until-run-ends', runId: 'r2' });
+  const disposal = lc.dispose();
+  assert.equal(disposal.status, 'deferred-until-run-ends');
+  assert.equal(disposal.runId, 'r2');
   assert.deepEqual(log, [], 'nothing released while the run is active');
   assert.equal(lc.disposed, true);
   assert.throws(() => lc.beginRun('r3'), /disposed/);
   assert.throws(() => lc.assertAcceptingRequests(), /disposed/);
-  assert.equal(lc.endRun('r2'), 'released');
+  assert.equal(lc.endRun('r2'), 'release-started');
+  assert.deepEqual(await disposal.completion, { status: 'released' });
   assert.deepEqual(log, ['release']);
   assert.equal(lc.activeRunId, null);
   console.log('ok  dispose during a run defers; run end releases once');
@@ -55,8 +61,12 @@ function make() {
   assert.throws(() => lc.beginRun('r5'), /already has an active run/);
   assert.throws(() => lc.endRun('r9'), /not the active run/);
   assert.equal(lc.endRun('r4'), 'idle');
-  assert.deepEqual(lc.dispose(), { status: 'released' });
-  assert.deepEqual(lc.dispose(), { status: 'already-disposed' });
+  const first = lc.dispose();
+  const second = lc.dispose();
+  assert.equal(first.status, 'releasing');
+  assert.equal(second.status, 'already-disposed');
+  assert.equal(first.completion, second.completion);
+  assert.deepEqual(await first.completion, { status: 'released' });
   assert.deepEqual(log, ['release']);
   console.log('ok  second dispose no-op; run exclusivity; unknown endRun refused');
 }
@@ -97,7 +107,10 @@ function make() {
   await prepared.release();                       // idempotent
   assert.deepEqual(acquired, ['foreground:r-ok', 'foreground-finish:r-ok']);
   // dispose after a rejected run releases immediately (nothing was left active)
-  assert.deepEqual(lc.dispose(), { status: 'released' }); assert.deepEqual(log, ['release']);
+  const disposal = lc.dispose();
+  assert.equal(disposal.status, 'releasing');
+  assert.deepEqual(await disposal.completion, { status: 'released' });
+  assert.deepEqual(log, ['release']);
   console.log('ok  run setup validates before acquisition; release boundary is exactly-once');
 }
 

@@ -225,7 +225,7 @@ producer.requestForegroundOpportunity({
 });
 
 const { glb, receipt, cooperativeReports, foregroundOpportunityReport } = await producer.run(image, { runId: 'run-1' });
-producer.dispose();
+await producer.dispose().completion; // drains admitted foreground work, then releases producer-owned resources
 ```
 
 Host frames are serviced at the next cooperative duty boundary; during
