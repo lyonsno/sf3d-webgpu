@@ -37,5 +37,9 @@ assert.equal(r.retained.get('image_estimator.b').buffer.byteLength, 4, 'a standa
 // Reading a dropped tensor after compaction fails loud.
 assert.throws(() => r.rawBytes('dino.a'), /dino.a was uploaded at load and its raw bytes were released/);
 assert.deepEqual([...r.rawBytes('other.c')], [10, 11, 12, 13, 14, 15]);
+r.dispose();
+r.dispose();
+assert.equal(r.retained.size, 0, 'explicit disposal clears the actual backing Map, not just an access flag');
+assert.throws(() => r.rawBytes('other.c'), /SF3D weights are disposed/);
 console.log('ok  compaction retains lazily read families and unconsumed tensors; releases the rest');
 console.log('\nWEIGHTS COMPACTION CONTRACT PASSED');

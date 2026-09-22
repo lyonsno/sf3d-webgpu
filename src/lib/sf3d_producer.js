@@ -59,8 +59,12 @@ export function resolveWeightsUrl(weightsUrl, base = globalThis.location?.href ?
   try { return new URL(weightsUrl, base ?? undefined).href; } catch { return weightsUrl; }
 }
 
-/** Release reachable buffers in the loader's component tree; callers enforce ownership. */
+/** Release a loader-owned weight set, or a legacy component tree. Callers enforce ownership. */
 export function releaseLoadedWeights(weights) {
+  // The loader owns both eager uploads and lazy resources hidden behind its
+  // accessors, including retained CPU bytes. Tree walking is only the legacy
+  // fallback; never combine it with disposal and double-destroy the buffers.
+  if (typeof weights?.dispose === 'function') return weights.dispose();
   let released = 0;
   const seen = new Set();
   const visit = (value) => {
@@ -173,6 +177,7 @@ export async function createSf3dProducer({
   const backend = await describeBackend(gpu.adapter, dev);
   const ownsWeights = weights == null;
   const modelWeights = weights ?? await loadWeights(dev, weightsUrl, onWeightsProgress || undefined);
+  modelWeights._assertActive?.(dev);
   // Explicit resource identity for a mounting host: where the weights came
   // from and which worker module URLs must be reachable from the artifact.
   const resources = Object.freeze({
@@ -182,10 +187,19 @@ export async function createSf3dProducer({
     workerModuleUrls: productRouteWorkerModuleUrls(),
     workersSource: workers == null ? 'created-by-producer' : 'injected-by-host',
   });
-  const pipelines = initPipelines(dev);
   const ownsWorkers = workers == null;
-  const routeWorkers = workers ?? createProductRouteWorkers();
-  const foreground = createWebGpuForegroundService({ routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, device: dev, queue: dev.queue });
+  let pipelines;
+  let routeWorkers;
+  let foreground;
+  try {
+    pipelines = initPipelines(dev);
+    routeWorkers = workers ?? createProductRouteWorkers();
+    foreground = createWebGpuForegroundService({ routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, device: dev, queue: dev.queue });
+  } catch (error) {
+    if (ownsWorkers && routeWorkers) terminateProductRouteWorkers(routeWorkers);
+    if (ownsWeights) releaseLoadedWeights(modelWeights);
+    throw error;
+  }
 
   let runSequence = 0;
   // One run at a time; dispose() during a run defers the release until the

@@ -110,6 +110,7 @@ export const LAZILY_READ_TENSOR_PREFIXES = Object.freeze(['image_estimator.']);
  */
 export function compactRetainedTensors(tensors, chunkedBuffer, consumed, retainPrefixes = LAZILY_READ_TENSOR_PREFIXES) {
   const retained = new Map();
+  let disposed = false;
   let retainedBytes = 0;
   let droppedBytes = 0;
   for (const [name, info] of tensors) {
@@ -123,6 +124,7 @@ export function compactRetainedTensors(tensors, chunkedBuffer, consumed, retainP
   }
   if (Array.isArray(chunkedBuffer?.chunks)) { chunkedBuffer.chunks.length = 0; chunkedBuffer.offsets.length = 0; }
   const rawBytes = (name) => {
+    if (disposed) throw new Error('SF3D weights are disposed');
     const bytes = retained.get(name);
     if (!bytes) {
       throw new Error(tensors.has(name)
@@ -131,7 +133,10 @@ export function compactRetainedTensors(tensors, chunkedBuffer, consumed, retainP
     }
     return bytes;
   };
-  return { retained, rawBytes, retainedBytes, droppedBytes };
+  return {
+    retained, rawBytes, retainedBytes, droppedBytes,
+    dispose() { disposed = true; retained.clear(); },
+  };
 }
 
 export function extractBytesFromChunks(chunkedBuffer, offset, size) { return extractBytes(chunkedBuffer, offset, size); }
@@ -210,19 +215,36 @@ export async function loadWeights(device, url, onProgress) {
   const headerBuf = headerBytes.slice().buffer;
   const { tensors } = parseHeader(headerBuf);
 
+  const ownedBuffers = new Set();
+  try {
+    return buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers);
+  } catch (error) {
+    // No weight set is returned on a partial load; its allocations still have
+    // an owner and must not wait for a producer that will never be created.
+    for (const buffer of ownedBuffers) buffer.destroy();
+    throw error;
+  }
+}
+
+function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers) {
+  const upload = (buffer, info) => {
+    const gpuBuffer = extractTensor(device, buffer, info);
+    ownedBuffers.add(gpuBuffer);
+    return gpuBuffer;
+  };
   const consumed = new Set();
   const get = (name) => {
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
     consumed.add(name);
-    return extractTensor(device, chunkedBuffer, info);
+    return upload(chunkedBuffer, info);
   };
 
   const tryGet = (name) => {
     const info = tensors.get(name);
     if (!info) return null;
     consumed.add(name);
-    return extractTensor(device, chunkedBuffer, info);
+    return upload(chunkedBuffer, info);
   };
 
   const getCPU = (name) => {
@@ -317,7 +339,7 @@ export async function loadWeights(device, url, onProgress) {
           proj: { weight: get(`${prefix}.attn.proj.weight`), bias: get(`${prefix}.attn.proj.bias`) },
         },
         normZ1: { weight: get(`${prefix}.norm_z1.weight`), bias: get(`${prefix}.norm_z1.bias`) },
-        normX: tryGet(`${prefix}.norm_x.weight`) ? {
+        normX: tensors.has(`${prefix}.norm_x.weight`) ? {
           weight: get(`${prefix}.norm_x.weight`), bias: get(`${prefix}.norm_x.bias`),
         } : null,
         normZ2: { weight: get(`${prefix}.norm_z2.weight`), bias: get(`${prefix}.norm_z2.bias`) },
@@ -417,15 +439,44 @@ export async function loadWeights(device, url, onProgress) {
   // whole weight file in JS heap for the producer's lifetime.
   const compact = compactRetainedTensors(tensors, chunkedBuffer, consumed);
   console.log(`Retained ${(compact.retainedBytes / 1048576).toFixed(0)} MB of raw tensor bytes for lazy readers; released ${(compact.droppedBytes / 1048576).toFixed(0)} MB of streamed chunks`);
+  const lazyBuffers = new Map();
+  let disposed = false;
+  const _assertActive = (requestedDevice = device) => {
+    if (disposed) throw new Error('SF3D weights are disposed');
+    if (requestedDevice !== device) throw new Error('SF3D weights belong to a different GPUDevice');
+  };
   const rawInfo = (name) => {
+    _assertActive();
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
     return { dtype: info.dtype, offset: 0, size: info.size };
   };
-  const _rawGet = (name) => extractTensor(device, compact.rawBytes(name).buffer, rawInfo(name));
-  const _rawGetCPU = (name) => extractTensorCPU(compact.rawBytes(name).buffer, rawInfo(name));
-  const _rawTryGet = (name) => (tensors.has(name) ? _rawGet(name) : null);
-  const _rawHas = (name) => tensors.has(name);
+  // Lazy uploads belong to this same weight set. Reuse by tensor name also
+  // makes a partially failed CLIP initialization retry without duplicate GPU
+  // uploads; ownership never moves into the estimator's cache.
+  const _rawGet = (name) => {
+    _assertActive();
+    if (!lazyBuffers.has(name)) {
+      lazyBuffers.set(name, upload(compact.rawBytes(name).buffer, rawInfo(name)));
+    }
+    return lazyBuffers.get(name);
+  };
+  const _rawGetCPU = (name) => {
+    _assertActive();
+    return extractTensorCPU(compact.rawBytes(name).buffer, rawInfo(name));
+  };
+  const _rawTryGet = (name) => { _assertActive(); return tensors.has(name) ? _rawGet(name) : null; };
+  const _rawHas = (name) => { _assertActive(); return tensors.has(name); };
+  const dispose = () => {
+    if (disposed) return 0;
+    disposed = true;
+    const count = ownedBuffers.size;
+    for (const buffer of ownedBuffers) buffer.destroy();
+    ownedBuffers.clear();
+    lazyBuffers.clear();
+    compact.dispose();
+    return count;
+  };
 
   return {
     imageTokenizer,
@@ -435,6 +486,8 @@ export async function loadWeights(device, url, onProgress) {
     postProcessor,
     decoder,
     imageEstimator,
+    dispose,
+    _assertActive,
     _rawGet,
     _rawGetCPU,
     _rawTryGet,

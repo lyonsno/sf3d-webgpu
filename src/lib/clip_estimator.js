@@ -33,8 +33,11 @@ const PROJ_DIM = 512;
 const WG_SIZE = 256;
 
 
-let _pipelines = null;
-let _weightBuffers = null;
+// Pipelines can be shared only within one device. Weight bindings additionally
+// belong to one weight-set identity; neither cache owns the buffers returned
+// by an accessor (an injected accessor may return host-owned resources).
+const _pipelinePromises = new WeakMap();
+const _deviceWeightBuffers = new WeakMap();
 
 const RUNTIME_CLIP_SHADER_URLS = Object.freeze({
   linear: new URL('../shaders/linear.wgsl', import.meta.url).href,
@@ -152,33 +155,46 @@ function splitWG(total) {
 }
 
 async function _ensurePipelines(device) {
-  if (_pipelines) return;
-
-  const urls = resolveClipShaderUrls();
-  const sources = await loadClipShaderSources();
-
-  _pipelines = {
-    linear: await createValidatedClipPipeline(device, sources.linear, urls.linear),
-    layernorm: await createValidatedClipPipeline(device, sources.layernorm, urls.layernorm),
-  };
+  let pending = _pipelinePromises.get(device);
+  if (!pending) {
+    pending = (async () => {
+      const urls = resolveClipShaderUrls();
+      const sources = await loadClipShaderSources();
+      return {
+        linear: await createValidatedClipPipeline(device, sources.linear, urls.linear),
+        layernorm: await createValidatedClipPipeline(device, sources.layernorm, urls.layernorm),
+      };
+    })();
+    _pipelinePromises.set(device, pending);
+    pending.catch(() => {
+      if (_pipelinePromises.get(device) === pending) _pipelinePromises.delete(device);
+    });
+  }
+  return pending;
 }
 
 function _ensureWeightBuffers(device, weights) {
-  if (_weightBuffers) return;
-  _weightBuffers = {};
+  weights._assertActive?.(device);
+  let cache = _deviceWeightBuffers.get(device);
+  if (!cache) {
+    cache = new WeakMap();
+    _deviceWeightBuffers.set(device, cache);
+  }
+  if (cache.has(weights)) return cache.get(weights);
+  const buffers = {};
 
   const makeGPU = (name) => weights._rawGet(name);
 
   // Visual encoder weights
-  _weightBuffers.lnPre = { weight: makeGPU('image_estimator.model.visual.ln_pre.weight'),
+  buffers.lnPre = { weight: makeGPU('image_estimator.model.visual.ln_pre.weight'),
                            bias: makeGPU('image_estimator.model.visual.ln_pre.bias') };
-  _weightBuffers.lnPost = { weight: makeGPU('image_estimator.model.visual.ln_post.weight'),
+  buffers.lnPost = { weight: makeGPU('image_estimator.model.visual.ln_post.weight'),
                             bias: makeGPU('image_estimator.model.visual.ln_post.bias') };
 
-  _weightBuffers.blocks = [];
+  buffers.blocks = [];
   for (let i = 0; i < NUM_BLOCKS; i++) {
     const p = `image_estimator.model.visual.transformer.resblocks.${i}`;
-    _weightBuffers.blocks.push({
+    buffers.blocks.push({
       ln1: { weight: makeGPU(`${p}.ln_1.weight`), bias: makeGPU(`${p}.ln_1.bias`) },
       ln2: { weight: makeGPU(`${p}.ln_2.weight`), bias: makeGPU(`${p}.ln_2.bias`) },
       qkv: { weight: makeGPU(`${p}.attn.in_proj_weight`), bias: makeGPU(`${p}.attn.in_proj_bias`) },
@@ -187,6 +203,10 @@ function _ensureWeightBuffers(device, weights) {
       proj: { weight: makeGPU(`${p}.mlp.c_proj.weight`), bias: makeGPU(`${p}.mlp.c_proj.bias`) },
     });
   }
+  // Publish only a complete set. On failure, loader-created allocations remain
+  // owned by the loader and reusable on retry; borrowed accessors stay borrowed.
+  cache.set(weights, buffers);
+  return buffers;
 }
 
 /**
@@ -200,8 +220,9 @@ function _ensureWeightBuffers(device, weights) {
  *   second-largest contiguous main-thread stall (~240ms).
  */
 export async function estimateMaterials(device, rgba8, imgWidth, imgHeight, weights, options = {}) {
-  await _ensurePipelines(device);
-  _ensureWeightBuffers(device, weights);
+  weights._assertActive?.(device);
+  const pipelines = await _ensurePipelines(device);
+  const weightBuffers = _ensureWeightBuffers(device, weights);
 
   // Step 1: CPU preprocessing — blend, resize to 224, normalize, patch embed
   const embeddings = options.clipPrepWorker
@@ -214,7 +235,7 @@ export async function estimateMaterials(device, rgba8, imgWidth, imgHeight, weig
   const USE_CPU_TRANSFORMER = false; // GPU path enabled with fp32 weights
   const features = USE_CPU_TRANSFORMER
     ? _runVisualTransformerCPU(embeddings, weights)
-    : await _runVisualTransformer(device, embeddings, weights);
+    : await _runVisualTransformer(device, embeddings, weights, pipelines, weightBuffers);
 
   // Step 3: CPU heads (tiny)
   const roughness = _runHead(features, weights, 'roughness');
@@ -425,37 +446,37 @@ function _cpuGelu(x) {
   return out;
 }
 
-async function _runVisualTransformer(device, embeddings, weights) {
+async function _runVisualTransformer(device, embeddings, weights, pipelines, weightBuffers) {
   const N = NUM_TOKENS, D = HIDDEN_DIM;
 
   let xBuf = createStorageBuffer(device, new Float32Array(embeddings));
   let encoder = device.createCommandEncoder();
 
   // Pre-LN
-  xBuf = _dispatchLN(encoder, device, xBuf, N, D, _weightBuffers.lnPre);
+  xBuf = _dispatchLN(encoder, device, xBuf, N, D, weightBuffers.lnPre, pipelines);
 
   for (let b = 0; b < NUM_BLOCKS; b++) {
-    const blk = _weightBuffers.blocks[b];
+    const blk = weightBuffers.blocks[b];
 
     // LN1 → fused QKV → attention → out proj → residual
-    const ln1 = _dispatchLN(encoder, device, xBuf, N, D, blk.ln1);
+    const ln1 = _dispatchLN(encoder, device, xBuf, N, D, blk.ln1, pipelines);
     // in_proj_weight is NOT transposed (PyTorch native [outDim, inDim])
-    const qkv = _dispatchLinear(encoder, device, ln1, N, D, 3*D, blk.qkv, false);
+    const qkv = _dispatchLinear(encoder, device, ln1, N, D, 3*D, blk.qkv, false, pipelines);
     const attn = _dispatchFusedAttn(encoder, device, qkv, N);
-    const proj = _dispatchLinear(encoder, device, attn, N, D, D, blk.outProj, true);
+    const proj = _dispatchLinear(encoder, device, attn, N, D, D, blk.outProj, true, pipelines);
     xBuf = _dispatchAdd(encoder, device, xBuf, proj, N * D);
 
     // LN2 → MLP (fc → GELU → proj) → residual
-    const ln2 = _dispatchLN(encoder, device, xBuf, N, D, blk.ln2);
-    const fc = _dispatchLinear(encoder, device, ln2, N, D, MLP_DIM, blk.fc, true);
+    const ln2 = _dispatchLN(encoder, device, xBuf, N, D, blk.ln2, pipelines);
+    const fc = _dispatchLinear(encoder, device, ln2, N, D, MLP_DIM, blk.fc, true, pipelines);
     const gelu = _dispatchGelu(encoder, device, fc, N * MLP_DIM);
-    const mlp = _dispatchLinear(encoder, device, gelu, N, MLP_DIM, D, blk.proj, true);
+    const mlp = _dispatchLinear(encoder, device, gelu, N, MLP_DIM, D, blk.proj, true, pipelines);
     xBuf = _dispatchAdd(encoder, device, xBuf, mlp, N * D);
 
   }
 
   // Post-LN
-  xBuf = _dispatchLN(encoder, device, xBuf, N, D, _weightBuffers.lnPost);
+  xBuf = _dispatchLN(encoder, device, xBuf, N, D, weightBuffers.lnPost, pipelines);
 
   device.queue.submit([encoder.finish()]);
   await device.queue.onSubmittedWorkDone();
@@ -478,14 +499,14 @@ async function _runVisualTransformer(device, embeddings, weights) {
 
 // --- GPU dispatch helpers ---
 
-function _dispatchLinear(encoder, device, input, rows, inDim, outDim, w, transposed = true) {
+function _dispatchLinear(encoder, device, input, rows, inDim, outDim, w, transposed, pipelines) {
   const totalWG = ceilDiv(rows * outDim, WG_SIZE);
   const [wgX, wgY] = splitWG(totalWG);
   const params = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(params, 0, new Uint32Array([rows, inDim, outDim, wgX, transposed ? 1 : 0]));
   const output = createEmptyBuffer(device, rows * outDim * 4);
   const bg = device.createBindGroup({
-    layout: _pipelines.linear.getBindGroupLayout(0),
+    layout: pipelines.linear.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: params } },
       { binding: 1, resource: { buffer: input } },
@@ -495,14 +516,14 @@ function _dispatchLinear(encoder, device, input, rows, inDim, outDim, w, transpo
     ],
   });
   const pass = encoder.beginComputePass();
-  pass.setPipeline(_pipelines.linear);
+  pass.setPipeline(pipelines.linear);
   pass.setBindGroup(0, bg);
   pass.dispatchWorkgroups(wgX, wgY);
   pass.end();
   return output;
 }
 
-function _dispatchLN(encoder, device, input, N, D, norm) {
+function _dispatchLN(encoder, device, input, N, D, norm, pipelines) {
   const paramsData = new ArrayBuffer(16);
   const v = new DataView(paramsData);
   v.setUint32(0, N, true);
@@ -512,7 +533,7 @@ function _dispatchLN(encoder, device, input, N, D, norm) {
   device.queue.writeBuffer(params, 0, new Uint8Array(paramsData));
   const output = createEmptyBuffer(device, N * D * 4);
   const bg = device.createBindGroup({
-    layout: _pipelines.layernorm.getBindGroupLayout(0),
+    layout: pipelines.layernorm.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: params } },
       { binding: 1, resource: { buffer: input } },
@@ -522,7 +543,7 @@ function _dispatchLN(encoder, device, input, N, D, norm) {
     ],
   });
   const pass = encoder.beginComputePass();
-  pass.setPipeline(_pipelines.layernorm);
+  pass.setPipeline(pipelines.layernorm);
   pass.setBindGroup(0, bg);
   pass.dispatchWorkgroups(N);
   pass.end();

@@ -47,6 +47,7 @@
     "test:sf3d-producer-helpers": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_sf3d_producer_helpers_contract.mjs",
     "test:producer-lifecycle": "node tools/test_producer_lifecycle_contract.mjs && node tools/test_producer_disposal_completion_contract.mjs",
     "test:weights-compaction": "node tools/test_weights_compaction_contract.mjs",
+    "test:weight-resource-retirement": "node --import ./tools/wgsl-raw-loader-register.mjs tools/test_weight_resource_retirement_contract.mjs",
     "test:parity-evidence-admission": "node tools/test_parity_evidence_admission_contract.mjs"
   },
   "devDependencies": {
