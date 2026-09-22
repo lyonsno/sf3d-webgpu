@@ -46,4 +46,34 @@ assert.equal(destroyed, 2);
 assert.equal(releaseLoadedWeights(null), 0);
 console.log('ok  releaseLoadedWeights destroys only GPU buffers');
 
+// loadWeights returns a component tree, not a flat map. Follow arrays and
+// packed-resource wrappers, deduplicate shared buffers, and leave CPU payloads
+// opaque rather than walking every element of a model-sized typed array.
+const retired = [];
+const buffer = name => ({ destroy() { retired.push(name); } });
+const q = buffer('q');
+const packed = buffer('packed');
+const bias = buffer('bias');
+const cpu = new Float32Array([1, 2, 3]);
+Object.defineProperty(cpu, 'doNotEnumerate', {
+  enumerable: true,
+  get() { throw new Error('CPU tensor contents must remain opaque'); },
+});
+const nestedWeights = {
+  imageTokenizer: { blocks: [{
+    attn: { q: { weight: q, bias } },
+    mlp: { fc1: { weight: { buffer: packed, representation: 'f16-packed-u32' } } },
+  }] },
+  cameraEmbedder: { bias },
+  cpu,
+  bytes: new ArrayBuffer(8),
+  _rawGet() { throw new Error('release must not invoke lazy upload accessors'); },
+};
+nestedWeights.alias = nestedWeights.imageTokenizer;
+nestedWeights.self = nestedWeights;
+assert.equal(releaseLoadedWeights(nestedWeights), 3, 'all distinct nested weight buffers must retire');
+assert.deepEqual(retired.sort(), ['bias', 'packed', 'q']);
+assert.deepEqual([...cpu], [1, 2, 3]);
+console.log('ok  nested component weights retire once; aliases, cycles, CPU tensors and lazy readers are safe');
+
 console.log('\nSF3D PRODUCER HELPERS CONTRACT PASSED');

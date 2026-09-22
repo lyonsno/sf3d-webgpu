@@ -59,12 +59,23 @@ export function resolveWeightsUrl(weightsUrl, base = globalThis.location?.href ?
   try { return new URL(weightsUrl, base ?? undefined).href; } catch { return weightsUrl; }
 }
 
-/** Producer-created GPU weight buffers are released on dispose; injected weights and the borrowed device never are. */
+/** Release reachable buffers in the loader's component tree; callers enforce ownership. */
 export function releaseLoadedWeights(weights) {
   let released = 0;
-  for (const value of Object.values(weights || {})) {
-    if (value && typeof value.destroy === 'function') { value.destroy(); released += 1; }
-  }
+  const seen = new Set();
+  const visit = (value) => {
+    if (!value || typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+    // Raw CPU payloads are leaves, not containers of GPU resources.
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return;
+    if (typeof value.destroy === 'function') {
+      value.destroy();
+      released += 1;
+      return;
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(weights);
   return released;
 }
 
