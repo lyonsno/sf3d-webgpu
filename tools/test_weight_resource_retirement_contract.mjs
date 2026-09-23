@@ -175,6 +175,61 @@ test('producer disposal resets copied preparation weights in an injected worker 
     'producer disposal acknowledges release of the copied tensors without terminating the injected worker');
 });
 
+test('negative CLIP reset acknowledgment rejects disposal after owned workers and weights are retired', async () => {
+  const restoreFetch = installWeightFetch(weightFixture({ normX: false, fullClipPrep: true }));
+  const OriginalWorker = globalThis.Worker;
+  const createdWorkers = [];
+  globalThis.Worker = class {
+    constructor(url, options) {
+      this.url = String(url);
+      this.name = options?.name || '';
+      this.listeners = { message: new Set(), error: new Set(), messageerror: new Set() };
+      this.terminated = 0;
+      this.installed = null;
+      createdWorkers.push(this);
+    }
+    addEventListener(type, listener) { this.listeners[type]?.add(listener); }
+    removeEventListener(type, listener) { this.listeners[type]?.delete(listener); }
+    emit(type, data) { for (const listener of [...this.listeners[type]]) listener(data); }
+    postMessage(message) {
+      const reply = payload => queueMicrotask(() => this.emit('message', { data: { id: message.id, ok: true, ...payload } }));
+      if (message.type === 'init') {
+        this.installed = { conv1W: message.conv1W, classEmb: message.classEmb, posEmb: message.posEmb };
+        reply({ initialized: true });
+      } else if (message.type === 'reset') {
+        this.installed = null;
+        reply({ reset: false });
+      } else {
+        reply({ embeddings: new Float32Array(50 * 768).buffer });
+      }
+    }
+    terminate() { this.terminated += 1; }
+  };
+
+  try {
+    const device = fakeWeightDevice();
+    const producer = await createSf3dProducer({ device, weightsUrl: 'fixture://weights' });
+    const clipWorker = producer.workers.clipPrepWorker;
+    assert.equal(createdWorkers.length, 5, 'producer owns the five product-route workers');
+    await runClipPrep(clipWorker, new Uint8ClampedArray(4), 1, 1, producer.weights, { timeoutMs: 5000 });
+    assert.ok(clipWorker.installed, 'CLIP worker holds producer-owned preparation tensors before release');
+
+    await assert.rejects(
+      () => producer.dispose().completion,
+      /clip prep reset not acknowledged/,
+      'the reset failure remains visible to the lifecycle caller');
+    assert.deepEqual(createdWorkers.map(worker => worker.terminated), [1, 1, 1, 1, 1],
+      'every producer-owned worker receives its termination attempt despite reset failure');
+    assert.ok(device.buffers.every(buffer => buffer.destroyed === 1),
+      'producer-owned eager GPU weight buffers retire despite reset failure');
+    assert.throws(() => producer.weights._rawGetCPU(prepName), /SF3D weights are disposed/,
+      'producer-owned retained preparation bytes are cleared despite reset failure');
+  } finally {
+    globalThis.Worker = OriginalWorker;
+    restoreFetch();
+  }
+});
+
 test('known loader weights cannot be injected into another GPU device', async () => {
   const restore = installWeightFetch(weightFixture({ normX: false }));
   try {

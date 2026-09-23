@@ -19,7 +19,7 @@ import {
   blendClipPixels, patchEmbedClip, prepareClipEmbeddings, preprocessForClip,
   validateClipEmbeddings, validateClipPrepWeights,
 } from '../src/lib/clip_prep_core.js';
-import { runClipPrep } from '../src/lib/clip_estimator.js';
+import { releaseClipPrepWorker, runClipPrep } from '../src/lib/clip_estimator.js';
 
 // Deterministic pseudo-random (LCG) so the contract is stable run to run.
 function lcg(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; }; }
@@ -180,6 +180,37 @@ function makeFakeWorker(behavior) {
   assert.equal(worker.posted.filter(p => p.msg.type === 'init').length, 2,
     'concurrent replacement requests serialize distinct worker generations');
   console.log('ok  runClipPrep serializes concurrent replacement-weight requests');
+}
+{
+  const withMarker = (marker) => ({
+    conv1W: weights.conv1W,
+    classEmb: Object.assign(weights.classEmb.slice(), { 0: marker }),
+    posEmb: weights.posEmb,
+  });
+  let installedMarker = null;
+  const worker = makeFakeWorker((self, msg) => {
+    const reply = data => queueMicrotask(() => self._emit('message', { data: { id: msg.id, ok: true, ...data } }));
+    if (msg.type === 'init') { installedMarker = new Float32Array(msg.classEmb)[0]; reply({ initialized: true }); return; }
+    if (msg.type === 'reset') { installedMarker = null; reply({ reset: false }); return; }
+    if (installedMarker == null) {
+      queueMicrotask(() => self._emit('message', { data: { id: msg.id, ok: false, error: 'used before init' } }));
+      return;
+    }
+    const embeddings = new Float32Array(CLIP_NUM_TOKENS * CLIP_HIDDEN_DIM);
+    embeddings[0] = installedMarker;
+    reply({ embeddings: embeddings.buffer });
+  });
+  const sameWeights = withMarker(5);
+  await runClipPrep(worker, new Uint8ClampedArray(4), 1, 1, sameWeights, { timeoutMs: 5000 });
+  await assert.rejects(
+    () => releaseClipPrepWorker(worker, sameWeights, { timeoutMs: 5000 }),
+    /clip prep reset not acknowledged/,
+    'a negative reset acknowledgment remains visible as a release failure');
+  const recovered = await runClipPrep(worker, new Uint8ClampedArray(4), 1, 1, sameWeights, { timeoutMs: 5000 });
+  assert.equal(recovered[0], 5, 'same-identity reuse reinstalls tensors after an ambiguous reset');
+  assert.equal(worker.posted.filter(p => p.msg.type === 'init').length, 2,
+    'failed reset invalidates the modeled binding and forces a fresh initialization');
+  console.log('ok  runClipPrep recovers same-identity use after an unacknowledged reset');
 }
 {
   const worker = makeFakeWorker((self, msg) => {

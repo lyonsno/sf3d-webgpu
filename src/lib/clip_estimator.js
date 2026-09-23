@@ -291,13 +291,17 @@ export async function releaseClipPrepWorker(worker, weights, { timeoutMs = 30000
   else state.owners.delete(weights);
   return queueClipPrep(state, async () => {
     if (state.weightIdentity !== weights || state.owners.has(weights)) return;
+    // The worker clears its tensors before acknowledging reset. A rejected,
+    // malformed, or lost reply therefore cannot prove that the old binding
+    // remains installed; invalidate the parent model before sending the request
+    // so same-identity reuse must initialize again even when this rejects.
+    state.weightIdentity = null;
     await callWorker(
       worker,
       { type: 'reset', id: `clip-reset-${Math.random().toString(36).slice(2)}` },
       [],
       { timeoutMs, onResult: (d) => { if (d.reset !== true) throw new Error('clip prep reset not acknowledged'); return true; } },
     );
-    state.weightIdentity = null;
   });
 }
 

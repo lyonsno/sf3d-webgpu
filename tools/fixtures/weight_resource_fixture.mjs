@@ -1,5 +1,5 @@
 /** Tiny synthetic tensors for exercising the real loader, not model numerics. */
-export function weightFixture({ normX = true, seed = 0 } = {}) {
+export function weightFixture({ normX = true, seed = 0, fullClipPrep = false } = {}) {
   const names = new Set();
   const add = (...values) => values.forEach(value => names.add(value));
   const pair = prefix => add(`${prefix}.weight`, `${prefix}.bias`);
@@ -43,20 +43,30 @@ export function weightFixture({ normX = true, seed = 0 } = {}) {
   }
   add('image_estimator.model.visual.conv1.weight', 'image_estimator.model.visual.class_embedding',
     'image_estimator.model.visual.positional_embedding');
+  const clipPrepShapes = fullClipPrep ? new Map([
+    ['image_estimator.model.visual.conv1.weight', [768, 3072]],
+    ['image_estimator.model.visual.class_embedding', [768]],
+    ['image_estimator.model.visual.positional_embedding', [50, 768]],
+  ]) : new Map();
+  const tensorByteSize = name => (clipPrepShapes.get(name) || [1]).reduce((size, dim) => size * dim, 4);
   const headerSize = 16 + names.size * 160;
-  const bytes = new Uint8Array(headerSize + names.size * 4);
+  const bytes = new Uint8Array(headerSize + [...names].reduce((size, name) => size + tensorByteSize(name), 0));
   const view = new DataView(bytes.buffer);
   [0x33445346, 1, names.size, headerSize].forEach((value, i) => view.setUint32(i * 4, value, true));
   const values = new Map();
+  let payloadOffset = 0;
   [...names].forEach((name, i) => {
     const entry = 16 + i * 160;
     bytes.set(new TextEncoder().encode(name), entry);
-    view.setUint32(entry + 132, 1, true);
-    view.setUint32(entry + 136, 1, true);
-    view.setUint32(entry + 152, i * 4, true);
-    view.setUint32(entry + 156, 4, true);
-    view.setFloat32(headerSize + i * 4, seed + i + 1, true);
+    const shape = clipPrepShapes.get(name) || [1];
+    const byteSize = tensorByteSize(name);
+    view.setUint32(entry + 132, shape.length, true);
+    shape.forEach((dimension, axis) => view.setUint32(entry + 136 + axis * 4, dimension, true));
+    view.setUint32(entry + 152, payloadOffset, true);
+    view.setUint32(entry + 156, byteSize, true);
+    view.setFloat32(headerSize + payloadOffset, seed + i + 1, true);
     values.set(name, seed + i + 1);
+    payloadOffset += byteSize;
   });
   return { bytes, values };
 }

@@ -84,6 +84,24 @@ export function releaseLoadedWeights(weights) {
   return released;
 }
 
+/** Attempt every independent cleanup, then preserve the failure(s) for the caller. */
+async function releaseProducerResources({ foreground, retainedClipPrepWorker, routeWorkers, modelWeights, ownsWorkers, ownsWeights }) {
+  const errors = [];
+  const attempt = async operation => {
+    try { await operation(); } catch (error) { errors.push(error); }
+  };
+
+  if (foreground) await attempt(() => foreground.dispose());
+  if (retainedClipPrepWorker) {
+    await attempt(() => releaseClipPrepWorker(routeWorkers.clipPrepWorker, modelWeights));
+  }
+  if (ownsWorkers && routeWorkers) await attempt(() => terminateProductRouteWorkers(routeWorkers));
+  if (ownsWeights) await attempt(() => releaseLoadedWeights(modelWeights));
+
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, 'SF3D producer cleanup encountered multiple failures');
+}
+
 /** Run/clock identity bound to a producer run (Wake answer 5: run/clock identity + effective topology). */
 export function buildRunIdentity({ runId, routeId, startedAtMs, finishedAtMs, deviceInjected, commit, kitVersion }) {
   return Object.freeze({
@@ -202,9 +220,13 @@ export async function createSf3dProducer({
     }
     foreground = createWebGpuForegroundService({ routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, device: dev, queue: dev.queue });
   } catch (error) {
-    if (retainedClipPrepWorker) await releaseClipPrepWorker(routeWorkers.clipPrepWorker, modelWeights);
-    if (ownsWorkers && routeWorkers) terminateProductRouteWorkers(routeWorkers);
-    if (ownsWeights) releaseLoadedWeights(modelWeights);
+    try {
+      await releaseProducerResources({
+        foreground, retainedClipPrepWorker, routeWorkers, modelWeights, ownsWorkers, ownsWeights,
+      });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'SF3D producer initialization and cleanup failed', { cause: error });
+    }
     throw error;
   }
 
@@ -212,19 +234,13 @@ export async function createSf3dProducer({
   // One run at a time; dispose() during a run defers the release until the
   // run ends and refuses everything new meanwhile (producer_lifecycle.js).
   const lifecycle = createProducerLifecycle({
+    // An injected worker is borrowed, but copied prep tensors sent into it are
+    // not. Reset after foreground drain, then attempt every independently owned
+    // resource even if reset or drain fails; never destroy injected weights/device.
     async release() {
-      try {
-        await foreground.dispose();
-      } finally {
-        // An injected worker is borrowed, but the copied preparation tensors
-        // sent into it by this producer are not. Reset only after foreground
-        // work drains, and only once every producer using this identity released.
-        if (retainedClipPrepWorker) await releaseClipPrepWorker(routeWorkers.clipPrepWorker, modelWeights);
-        if (ownsWorkers) terminateProductRouteWorkers(routeWorkers);
-        // Release what the producer created; never destroy an injected weight set
-        // or the (possibly borrowed) device.
-        if (ownsWeights) releaseLoadedWeights(modelWeights);
-      }
+      await releaseProducerResources({
+        foreground, retainedClipPrepWorker, routeWorkers, modelWeights, ownsWorkers, ownsWeights,
+      });
     },
   });
 
