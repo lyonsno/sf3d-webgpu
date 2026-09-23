@@ -117,8 +117,12 @@ function make() {
 // A rejected foreground finish is not a settlement certificate. Another model
 // run and resource retirement are refused, while a still-attached host must be
 // able to request outside-run frames once the kit's failure path permits them.
-for (const disposeDuringRun of [false, true]) {
-  const finishError = new Error('foreground finish rejected');
+for (const [reasonLabel, finishError] of [
+  ['error', new Error('foreground finish rejected')],
+  ['null', null],
+  ['zero', 0],
+  ['undefined', undefined],
+]) for (const disposeDuringRun of [false, true]) {
   let releaseCalls = 0;
   const lifecycle = createProducerLifecycle({ release() { releaseCalls += 1; } });
   const prepared = await (await import('../src/lib/producer_lifecycle.js')).prepareProducerRun({
@@ -127,11 +131,13 @@ for (const disposeDuringRun of [false, true]) {
       runId, foregroundOpportunities: {}, withForeground: async (_phase, work) => work(),
       async finish() { throw finishError; },
     }; } },
-    runId: `failed-finish-${disposeDuringRun}`,
+    runId: `failed-finish-${reasonLabel}-${disposeDuringRun}`,
     buildOptions: () => Object.freeze({}),
   });
   const earlyDisposal = disposeDuringRun ? lifecycle.dispose() : null;
-  await assert.rejects(prepared.release(), error => error === finishError);
+  const finishResult = await prepared.release().then(
+    () => ({ rejected: false }), reason => ({ rejected: true, reason }));
+  assert.deepEqual(finishResult, { rejected: true, reason: finishError });
   assert.equal(lifecycle.quarantined, true);
   assert.equal(lifecycle.disposed, disposeDuringRun);
   assert.equal(lifecycle.activeRunId, null);
@@ -140,7 +146,9 @@ for (const disposeDuringRun of [false, true]) {
   else assert.doesNotThrow(() => lifecycle.assertAcceptingRequests(), 'attached host may keep requesting frames');
   assert.equal(releaseCalls, 0, 'failed finish cannot trigger owned-resource retirement');
   const disposal = earlyDisposal ?? lifecycle.dispose();
-  await assert.rejects(disposal.completion, /foreground finish rejected/);
+  const disposalResult = await disposal.completion.then(
+    () => ({ rejected: false }), reason => ({ rejected: true, reason }));
+  assert.deepEqual(disposalResult, { rejected: true, reason: finishError });
   assert.equal(releaseCalls, 0);
 }
 

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadWeights } from '../src/lib/weights.js';
-import { createSf3dProducer, releaseLoadedWeights, releaseProducerResources } from '../src/lib/sf3d_producer.js';
+import { createSf3dProducer, finishProducerRunWithEvidence, releaseLoadedWeights, releaseProducerResources } from '../src/lib/sf3d_producer.js';
 import { createProductRouteWorkers } from '../src/lib/product_route.js';
 import { runClipPrep } from '../src/lib/clip_estimator.js';
 import { weightFixture, fakeWeightDevice, installWeightFetch } from './fixtures/weight_resource_fixture.mjs';
@@ -306,6 +306,64 @@ test('inference and foreground-finish failures preserve both causes and last run
     assert.equal(producer.disposed, false, 'failed finish does not detach the foreground host');
     await assert.rejects(producer.dispose().completion, error => error === finishError);
   } finally { globalThis.performance = originalPerformance; }
+});
+
+test('falsy foreground-finish rejection remains a distinct dual-failure cause', async () => {
+  const originalPerformance = globalThis.performance;
+  const inferenceError = new Error('inference phase failed with null finish');
+  let failNextClock = false;
+  globalThis.performance = {
+    timeOrigin: originalPerformance.timeOrigin,
+    now() {
+      if (failNextClock) { failNextClock = false; throw null; }
+      return originalPerformance.now();
+    },
+  };
+  try {
+    const producer = await createSf3dProducer({ device: fakeWeightDevice(), weights: {}, workers: {} });
+    let thrown;
+    try {
+      await producer.run({ width: 1, height: 1 }, {
+        runId: 'dual-null-finish',
+        onProgress() {
+          producer.requestForegroundOpportunity({ requestId: 'dual-null-frame', run() { return null; } });
+          failNextClock = true;
+          throw inferenceError;
+        },
+      });
+    } catch (error) { thrown = error; }
+    assert.ok(thrown instanceof AggregateError);
+    assert.deepEqual(thrown.errors, [inferenceError, null]);
+    assert.equal(thrown.sf3dRun?.runId, 'dual-null-finish');
+    assert.equal(producer.quarantined, true);
+    const disposal = producer.dispose();
+    assert.equal(disposal.status, 'quarantined');
+    assert.deepEqual(await disposal.completion.then(
+      () => ({ rejected: false }), reason => ({ rejected: true, reason })),
+    { rejected: true, reason: null });
+  } finally { globalThis.performance = originalPerformance; }
+});
+
+test('finish-only failure retains completed inference run evidence', async () => {
+  const finishError = new Error('foreground finish rejected after inference');
+  let releaseCalls = 0;
+  await assert.rejects(() => finishProducerRunWithEvidence({
+    prepared: { release() { releaseCalls += 1; throw finishError; } },
+    pipelineFailed: false,
+    runId: 'finish-only',
+    lastProgress: 'GLB export complete',
+    startedAtMs: 1,
+    deviceInjected: true,
+    commit: 'test-commit',
+  }), error => {
+    assert.equal(error, finishError);
+    assert.equal(error.sf3dRun?.runId, 'finish-only');
+    assert.equal(error.sf3dRun?.lastProgress, 'GLB export complete');
+    assert.equal(error.sf3dRun?.foregroundOpportunityReport, null);
+    assert.equal(error.sf3dRun?.inferenceCompleted, true);
+    return true;
+  });
+  assert.equal(releaseCalls, 1);
 });
 
 test('inference-only failure keeps its original error and a settled foreground report', async () => {

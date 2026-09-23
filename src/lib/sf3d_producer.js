@@ -124,6 +124,39 @@ export function buildRunIdentity({ runId, routeId, startedAtMs, finishedAtMs, de
     kitVersion,
   });
 }
+
+/** Internal run-settlement seam: the caller supplies the completed pipeline result/error. */
+export async function finishProducerRunWithEvidence({
+  prepared, pipelineFailed, pipelineError, runId, lastProgress,
+  startedAtMs, deviceInjected, commit,
+}) {
+  let foregroundOpportunityReport = null;
+  let finishFailed = false;
+  let finishError;
+  try {
+    foregroundOpportunityReport = await prepared.release();
+  } catch (releaseError) {
+    finishFailed = true;
+    finishError = releaseError;
+  }
+  if (!pipelineFailed && !finishFailed) return foregroundOpportunityReport;
+  const reason = pipelineFailed && finishFailed
+    ? new AggregateError([pipelineError, finishError], 'SF3D inference and foreground finish both failed', { cause: pipelineError })
+    : pipelineFailed ? pipelineError : finishError;
+  const evidence = Object.freeze({
+    runId,
+    lastProgress,
+    foregroundOpportunityReport,
+    inferenceCompleted: !pipelineFailed,
+    identity: buildRunIdentity({ runId, routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, startedAtMs, finishedAtMs: performance.now(), deviceInjected, commit, kitVersion: WEBGPU_INFERENCE_KIT_VERSION }),
+  });
+  // JavaScript rejection reasons need not be Error objects (or extensible).
+  // Preserve the original as cause while keeping run identity inspectable.
+  let terminalError = reason instanceof Error ? reason : new Error('SF3D run failed with non-Error reason', { cause: reason });
+  if (!Object.isExtensible(terminalError)) terminalError = new Error(terminalError.message, { cause: terminalError });
+  terminalError.sf3dRun = evidence;
+  throw terminalError;
+}
 export const SF3D_REQUIRED_RECEIPT_STAGES = Object.freeze([
   'image-preprocess', 'dinov2-tokenizer', 'two-stream-backbone',
   'triplane-decode', 'marching-tet', 'texture-bake', 'glb-export',
@@ -298,28 +331,11 @@ export async function createSf3dProducer({
       try {
         result = await runFullPipelineToGlb(dev, pipelines, modelWeights, image, options, progress);
       } catch (error) {
-        // Preserve the phase and the last trustworthy evidence on the error
-        // (Wake answer 5): the host keeps it with its own episode receipts.
-        let finishError = null;
-        try {
-          foregroundOpportunityReport = await prepared.release();
-        } catch (releaseError) {
-          finishError = releaseError;
-        }
-        const terminalError = finishError
-          ? new AggregateError([error, finishError], 'SF3D inference and foreground finish both failed', { cause: error })
-          : error;
-        try {
-          terminalError.sf3dRun = Object.freeze({
-            runId: id,
-            lastProgress,
-            foregroundOpportunityReport,
-            identity: buildRunIdentity({ runId: id, routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, startedAtMs, finishedAtMs: performance.now(), deviceInjected: gpu.injected, commit, kitVersion: WEBGPU_INFERENCE_KIT_VERSION }),
-          });
-        } catch { /* error object not extensible; the throw still carries the message */ }
-        throw terminalError;
+        await finishProducerRunWithEvidence({ prepared, pipelineFailed: true, pipelineError: error,
+          runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit });
       }
-      foregroundOpportunityReport = await prepared.release();       // finishes the bridge run, ends the lifecycle run (deferred dispose if requested)
+      foregroundOpportunityReport = await finishProducerRunWithEvidence({ prepared, pipelineFailed: false,
+        runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit });
       const finishedAtMs = performance.now();
       const receipt = buildRouteReceipt({ backend, image, result, commit });
       const receiptValidation = validateRouteReceipt(receipt);

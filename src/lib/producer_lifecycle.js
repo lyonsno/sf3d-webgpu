@@ -8,7 +8,7 @@
  */
 export function createProducerLifecycle({ release }) {
   if (typeof release !== 'function') throw new Error('release must be a function');
-  const state = { activeRunId: null, disposed: false, releaseStarted: false, quarantinedError: null };
+  const state = { activeRunId: null, disposed: false, releaseStarted: false, quarantined: false, quarantineReason: undefined };
   let resolveCompletion;
   let rejectCompletion;
   const completion = new Promise((resolve, reject) => {
@@ -32,9 +32,9 @@ export function createProducerLifecycle({ release }) {
   return Object.freeze({
     get activeRunId() { return state.activeRunId; },
     get disposed() { return state.disposed; },
-    get quarantined() { return state.quarantinedError !== null; },
+    get quarantined() { return state.quarantined; },
     beginRun(runId) {
-      if (state.quarantinedError) throw new Error('sf3d producer is quarantined after failed foreground finish', { cause: state.quarantinedError });
+      if (state.quarantined) throw new Error('sf3d producer is quarantined after failed foreground finish', { cause: state.quarantineReason });
       if (state.disposed) throw new Error('sf3d producer is disposed');
       if (state.activeRunId != null) throw new Error(`sf3d producer already has an active run (${state.activeRunId})`);
       state.activeRunId = runId;
@@ -43,14 +43,15 @@ export function createProducerLifecycle({ release }) {
     endRun(runId) {
       if (state.activeRunId !== runId) throw new Error(`${runId} is not the active run (${state.activeRunId ?? 'none'})`);
       state.activeRunId = null;
-      if (state.quarantinedError) return 'quarantined';
+      if (state.quarantined) return 'quarantined';
       if (state.disposed) { doRelease(); return 'release-started'; }
       return 'idle';
     },
     quarantine(runId, error) {
       if (state.activeRunId !== runId) throw new Error(`${runId} is not the active run (${state.activeRunId ?? 'none'})`);
-      if (state.quarantinedError) return;
-      state.quarantinedError = error;
+      if (state.quarantined) return;
+      state.quarantined = true;
+      state.quarantineReason = error;
       rejectCompletion(error);
     },
     assertAcceptingRequests() {
@@ -59,7 +60,7 @@ export function createProducerLifecycle({ release }) {
     dispose() {
       if (state.disposed) return Object.freeze({ status: 'already-disposed', completion });
       state.disposed = true;
-      if (state.quarantinedError) return Object.freeze({ status: 'quarantined', completion });
+      if (state.quarantined) return Object.freeze({ status: 'quarantined', completion });
       if (state.activeRunId != null) {
         return Object.freeze({ status: 'deferred-until-run-ends', runId: state.activeRunId, completion });
       }
