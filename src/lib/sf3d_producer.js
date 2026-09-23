@@ -25,7 +25,11 @@
  * teardown waits for the run's foreground finish boundary first.
  * A failed run throws with `error.sf3dRun` = { runId, lastProgress,
  * foregroundOpportunityReport, identity } so the host keeps the phase and the
- * last trustworthy evidence.
+ * last trustworthy evidence. If both inference and foreground finish fail,
+ * the thrown AggregateError preserves both original errors in order.
+ * Failed foreground finish quarantines model execution and owned resources;
+ * an attached host may still request outside-run frames, but disposal refuses
+ * resource retirement until a separately proven settlement path exists.
  */
 import { initGPU } from './gpu.js';
 import { loadWeights } from './weights.js';
@@ -84,14 +88,16 @@ export function releaseLoadedWeights(weights) {
   return released;
 }
 
-/** Attempt every independent cleanup, then preserve the failure(s) for the caller. */
-async function releaseProducerResources({ foreground, retainedClipPrepWorker, routeWorkers, modelWeights, ownsWorkers, ownsWeights }) {
+/** Drain foreground before retiring anything it may still reference. */
+export async function releaseProducerResources({ foreground, retainedClipPrepWorker, routeWorkers, modelWeights, ownsWorkers, ownsWeights }) {
   const errors = [];
   const attempt = async operation => {
     try { await operation(); } catch (error) { errors.push(error); }
   };
 
-  if (foreground) await attempt(() => foreground.dispose());
+  // Rejection is not a settlement certificate. Keep all owned resources alive
+  // and let the host quarantine this producer instead of risking use-after-free.
+  if (foreground) await foreground.dispose();
   if (retainedClipPrepWorker) {
     await attempt(() => releaseClipPrepWorker(routeWorkers.clipPrepWorker, modelWeights));
   }
@@ -235,8 +241,9 @@ export async function createSf3dProducer({
   // run ends and refuses everything new meanwhile (producer_lifecycle.js).
   const lifecycle = createProducerLifecycle({
     // An injected worker is borrowed, but copied prep tensors sent into it are
-    // not. Reset after foreground drain, then attempt every independently owned
-    // resource even if reset or drain fails; never destroy injected weights/device.
+    // not. After a successful foreground drain, attempt independent owned
+    // cleanup even if reset fails. Failed drain quarantines all owned resources;
+    // never destroy injected weights/device.
     async release() {
       await releaseProducerResources({
         foreground, retainedClipPrepWorker, routeWorkers, modelWeights, ownsWorkers, ownsWeights,
@@ -261,6 +268,7 @@ export async function createSf3dProducer({
     adapterFeatures: Object.freeze([...backend.features]),
     get activeRunId() { return lifecycle.activeRunId; },
     get disposed() { return lifecycle.disposed; },
+    get quarantined() { return lifecycle.quarantined; },
 
     /** Host (kiln) frames: kit-shaped { requestId, run(ctx), metadata } → { requestId, completion, cancel }. */
     requestForegroundOpportunity(request) {
@@ -283,7 +291,7 @@ export async function createSf3dProducer({
       });
       const { options } = prepared;
       let result;
-      let foregroundOpportunityReport;
+      let foregroundOpportunityReport = null;
       let lastProgress = null;
       const startedAtMs = performance.now();
       const progress = (message) => { lastProgress = String(message); if (onProgress) onProgress(message); };
@@ -292,16 +300,24 @@ export async function createSf3dProducer({
       } catch (error) {
         // Preserve the phase and the last trustworthy evidence on the error
         // (Wake answer 5): the host keeps it with its own episode receipts.
-        foregroundOpportunityReport = await prepared.release();   // finishes the bridge run, ends the lifecycle run (deferred dispose if requested)
+        let finishError = null;
         try {
-          error.sf3dRun = Object.freeze({
+          foregroundOpportunityReport = await prepared.release();
+        } catch (releaseError) {
+          finishError = releaseError;
+        }
+        const terminalError = finishError
+          ? new AggregateError([error, finishError], 'SF3D inference and foreground finish both failed', { cause: error })
+          : error;
+        try {
+          terminalError.sf3dRun = Object.freeze({
             runId: id,
             lastProgress,
             foregroundOpportunityReport,
             identity: buildRunIdentity({ runId: id, routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, startedAtMs, finishedAtMs: performance.now(), deviceInjected: gpu.injected, commit, kitVersion: WEBGPU_INFERENCE_KIT_VERSION }),
           });
         } catch { /* error object not extensible; the throw still carries the message */ }
-        throw error;
+        throw terminalError;
       }
       foregroundOpportunityReport = await prepared.release();       // finishes the bridge run, ends the lifecycle run (deferred dispose if requested)
       const finishedAtMs = performance.now();

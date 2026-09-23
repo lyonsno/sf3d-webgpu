@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadWeights } from '../src/lib/weights.js';
-import { createSf3dProducer, releaseLoadedWeights } from '../src/lib/sf3d_producer.js';
+import { createSf3dProducer, releaseLoadedWeights, releaseProducerResources } from '../src/lib/sf3d_producer.js';
+import { createProductRouteWorkers } from '../src/lib/product_route.js';
 import { runClipPrep } from '../src/lib/clip_estimator.js';
 import { weightFixture, fakeWeightDevice, installWeightFetch } from './fixtures/weight_resource_fixture.mjs';
 
@@ -228,6 +229,99 @@ test('negative CLIP reset acknowledgment rejects disposal after owned workers an
     globalThis.Worker = OriginalWorker;
     restoreFetch();
   }
+});
+
+test('failed foreground drain retains owned workers and weights', async () => {
+  const finishError = new Error('foreground drain did not settle');
+  let clipWorkerReads = 0;
+  let workerTerminations = 0;
+  let weightDisposals = 0;
+  const routeWorkers = { get clipPrepWorker() {
+    clipWorkerReads += 1;
+    return { terminate() { workerTerminations += 1; } };
+  } };
+  await assert.rejects(() => releaseProducerResources({
+    foreground: { dispose() { throw finishError; } },
+    retainedClipPrepWorker: true,
+    routeWorkers,
+    modelWeights: { dispose() { weightDisposals += 1; } },
+    ownsWorkers: true,
+    ownsWeights: true,
+  }), error => error === finishError);
+  assert.equal(clipWorkerReads, 0, 'failed drain cannot start CLIP reset or worker retirement');
+  assert.equal(workerTerminations, 0);
+  assert.equal(weightDisposals, 0);
+});
+
+test('later worker constructor failure terminates every worker created before the throw', () => {
+  const OriginalWorker = globalThis.Worker;
+  const created = [];
+  globalThis.Worker = class {
+    constructor() {
+      if (created.length === 1) throw new Error('second worker failed');
+      this.terminated = 0;
+      created.push(this);
+    }
+    terminate() { this.terminated += 1; }
+  };
+  try {
+    assert.throws(() => createProductRouteWorkers(), /second worker failed/);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].terminated, 1);
+  } finally { globalThis.Worker = OriginalWorker; }
+});
+
+test('inference and foreground-finish failures preserve both causes and last run evidence', async () => {
+  const originalPerformance = globalThis.performance;
+  const inferenceError = new Error('inference phase failed');
+  const finishError = new Error('foreground finish clock failed');
+  let failNextClock = false;
+  globalThis.performance = {
+    timeOrigin: originalPerformance.timeOrigin,
+    now() {
+      if (failNextClock) { failNextClock = false; throw finishError; }
+      return originalPerformance.now();
+    },
+  };
+  try {
+    const device = fakeWeightDevice();
+    const producer = await createSf3dProducer({ device, weights: {}, workers: {} });
+    let thrown;
+    try {
+      await producer.run({ width: 1, height: 1 }, {
+        runId: 'dual-failure',
+        onProgress() {
+          producer.requestForegroundOpportunity({ requestId: 'dual-failure-frame', run() { return null; } });
+          failNextClock = true;
+          throw inferenceError;
+        },
+      });
+    } catch (error) { thrown = error; }
+    assert.ok(thrown instanceof AggregateError, `neither failure may replace the other (got ${thrown?.name}: ${thrown?.message})`);
+    assert.deepEqual(thrown.errors, [inferenceError, finishError]);
+    assert.equal(thrown.sf3dRun?.runId, 'dual-failure');
+    assert.equal(thrown.sf3dRun?.lastProgress, 'Preprocessing image...');
+    assert.equal(thrown.sf3dRun?.foregroundOpportunityReport, null);
+    assert.equal(producer.quarantined, true, 'failed finish quarantines model execution');
+    assert.equal(producer.disposed, false, 'failed finish does not detach the foreground host');
+    await assert.rejects(producer.dispose().completion, error => error === finishError);
+  } finally { globalThis.performance = originalPerformance; }
+});
+
+test('inference-only failure keeps its original error and a settled foreground report', async () => {
+  const inferenceError = new Error('inference callback failed');
+  const producer = await createSf3dProducer({ device: fakeWeightDevice(), weights: {}, workers: {} });
+  await assert.rejects(() => producer.run({ width: 1, height: 1 }, {
+    runId: 'single-failure',
+    onProgress() { throw inferenceError; },
+  }), error => {
+    assert.equal(error, inferenceError);
+    assert.equal(error.sf3dRun?.runId, 'single-failure');
+    assert.equal(error.sf3dRun?.foregroundOpportunityReport?.status, 'succeeded');
+    return true;
+  });
+  assert.equal(producer.quarantined, false);
+  await producer.dispose().completion;
 });
 
 test('known loader weights cannot be injected into another GPU device', async () => {

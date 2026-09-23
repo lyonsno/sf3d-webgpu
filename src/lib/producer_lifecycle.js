@@ -8,13 +8,16 @@
  */
 export function createProducerLifecycle({ release }) {
   if (typeof release !== 'function') throw new Error('release must be a function');
-  const state = { activeRunId: null, disposed: false, releaseStarted: false };
+  const state = { activeRunId: null, disposed: false, releaseStarted: false, quarantinedError: null };
   let resolveCompletion;
   let rejectCompletion;
   const completion = new Promise((resolve, reject) => {
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
+  // A failed foreground finish may quarantine before a host asks to dispose.
+  // Preserve rejection for that later caller without emitting an unhandled one.
+  completion.catch(() => {});
   const doRelease = () => {
     if (state.releaseStarted) return completion;
     state.releaseStarted = true;
@@ -29,7 +32,9 @@ export function createProducerLifecycle({ release }) {
   return Object.freeze({
     get activeRunId() { return state.activeRunId; },
     get disposed() { return state.disposed; },
+    get quarantined() { return state.quarantinedError !== null; },
     beginRun(runId) {
+      if (state.quarantinedError) throw new Error('sf3d producer is quarantined after failed foreground finish', { cause: state.quarantinedError });
       if (state.disposed) throw new Error('sf3d producer is disposed');
       if (state.activeRunId != null) throw new Error(`sf3d producer already has an active run (${state.activeRunId})`);
       state.activeRunId = runId;
@@ -38,8 +43,15 @@ export function createProducerLifecycle({ release }) {
     endRun(runId) {
       if (state.activeRunId !== runId) throw new Error(`${runId} is not the active run (${state.activeRunId ?? 'none'})`);
       state.activeRunId = null;
+      if (state.quarantinedError) return 'quarantined';
       if (state.disposed) { doRelease(); return 'release-started'; }
       return 'idle';
+    },
+    quarantine(runId, error) {
+      if (state.activeRunId !== runId) throw new Error(`${runId} is not the active run (${state.activeRunId ?? 'none'})`);
+      if (state.quarantinedError) return;
+      state.quarantinedError = error;
+      rejectCompletion(error);
     },
     assertAcceptingRequests() {
       if (state.disposed) throw new Error('sf3d producer is disposed');
@@ -47,6 +59,7 @@ export function createProducerLifecycle({ release }) {
     dispose() {
       if (state.disposed) return Object.freeze({ status: 'already-disposed', completion });
       state.disposed = true;
+      if (state.quarantinedError) return Object.freeze({ status: 'quarantined', completion });
       if (state.activeRunId != null) {
         return Object.freeze({ status: 'deferred-until-run-ends', runId: state.activeRunId, completion });
       }
@@ -94,6 +107,9 @@ export async function prepareProducerRun({ lifecycle, foreground, runId, buildOp
       released = (async () => {
         try {
           return await foregroundRun.finish();
+        } catch (error) {
+          lifecycle.quarantine(runId, error);
+          throw error;
         } finally {
           lifecycle.endRun(runId);
         }

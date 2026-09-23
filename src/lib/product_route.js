@@ -87,13 +87,18 @@ export function createProductRouteWorkers() {
   if (typeof Worker !== 'function') {
     throw new Error('createProductRouteWorkers requires a browser Worker constructor');
   }
-  return {
-    preprocessWorker: new Worker(new URL('./preprocess_worker.js', import.meta.url), { type: 'module', name: 'sf3d-preprocess' }),
-    clipPrepWorker: new Worker(new URL('./clip_prep_worker.js', import.meta.url), { type: 'module', name: 'sf3d-clip-prep' }),
-    marchingTetWorker: new Worker(new URL('./marching_tet_worker.js', import.meta.url), { type: 'module', name: 'sf3d-marching-tet' }),
-    uvUnwrapWorker: new Worker(new URL('./uv_unwrap_worker.js', import.meta.url), { type: 'module', name: 'sf3d-uv-unwrap' }),
-    materializeWorker: new Worker(new URL('./materialize_worker.js', import.meta.url), { type: 'module', name: 'sf3d-materialize' }),
-  };
+  const workers = {};
+  try {
+    workers.preprocessWorker = new Worker(new URL('./preprocess_worker.js', import.meta.url), { type: 'module', name: 'sf3d-preprocess' });
+    workers.clipPrepWorker = new Worker(new URL('./clip_prep_worker.js', import.meta.url), { type: 'module', name: 'sf3d-clip-prep' });
+    workers.marchingTetWorker = new Worker(new URL('./marching_tet_worker.js', import.meta.url), { type: 'module', name: 'sf3d-marching-tet' });
+    workers.uvUnwrapWorker = new Worker(new URL('./uv_unwrap_worker.js', import.meta.url), { type: 'module', name: 'sf3d-uv-unwrap' });
+    workers.materializeWorker = new Worker(new URL('./materialize_worker.js', import.meta.url), { type: 'module', name: 'sf3d-materialize' });
+    return workers;
+  } catch (error) {
+    terminateProductRouteWorkers(workers);
+    throw error;
+  }
 }
 
 export function terminateProductRouteWorkers(workers) {

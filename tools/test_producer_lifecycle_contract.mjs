@@ -114,4 +114,34 @@ function make() {
   console.log('ok  run setup validates before acquisition; release boundary is exactly-once');
 }
 
+// A rejected foreground finish is not a settlement certificate. Another model
+// run and resource retirement are refused, while a still-attached host must be
+// able to request outside-run frames once the kit's failure path permits them.
+for (const disposeDuringRun of [false, true]) {
+  const finishError = new Error('foreground finish rejected');
+  let releaseCalls = 0;
+  const lifecycle = createProducerLifecycle({ release() { releaseCalls += 1; } });
+  const prepared = await (await import('../src/lib/producer_lifecycle.js')).prepareProducerRun({
+    lifecycle,
+    foreground: { async beginRun(runId) { return {
+      runId, foregroundOpportunities: {}, withForeground: async (_phase, work) => work(),
+      async finish() { throw finishError; },
+    }; } },
+    runId: `failed-finish-${disposeDuringRun}`,
+    buildOptions: () => Object.freeze({}),
+  });
+  const earlyDisposal = disposeDuringRun ? lifecycle.dispose() : null;
+  await assert.rejects(prepared.release(), error => error === finishError);
+  assert.equal(lifecycle.quarantined, true);
+  assert.equal(lifecycle.disposed, disposeDuringRun);
+  assert.equal(lifecycle.activeRunId, null);
+  assert.throws(() => lifecycle.beginRun('after-failed-finish'), /quarantined|disposed/);
+  if (disposeDuringRun) assert.throws(() => lifecycle.assertAcceptingRequests(), /disposed/);
+  else assert.doesNotThrow(() => lifecycle.assertAcceptingRequests(), 'attached host may keep requesting frames');
+  assert.equal(releaseCalls, 0, 'failed finish cannot trigger owned-resource retirement');
+  const disposal = earlyDisposal ?? lifecycle.dispose();
+  await assert.rejects(disposal.completion, /foreground finish rejected/);
+  assert.equal(releaseCalls, 0);
+}
+
 console.log('\nPRODUCER LIFECYCLE CONTRACT PASSED');
