@@ -26,6 +26,13 @@ const run = (script, args, env = {}) => spawnSync(process.execPath, [path.join(R
   cwd: REPO, env: { ...process.env, ...env }, encoding: 'utf8', timeout: 120000,
 });
 const readReport = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
+const sha256File = (filePath) => new Promise((resolve, reject) => {
+  const hash = createHash('sha256');
+  const stream = fs.createReadStream(filePath);
+  stream.on('data', chunk => hash.update(chunk));
+  stream.on('error', reject);
+  stream.on('end', () => resolve(hash.digest('hex')));
+});
 
 // --- Product-route witness ---
 const cases = [
@@ -82,7 +89,7 @@ if (createdFixtureWeights) fs.writeFileSync(weightPath, Buffer.from('sf3d-weight
 try {
   const report = path.join(tmp, 'product-weight-source-identity.json');
   const journal = path.join(journalRoot, 'product-weight-source-identity.jsonl');
-  const expectedSha = createHash('sha256').update(fs.readFileSync(weightPath)).digest('hex');
+  const expectedSha = await sha256File(weightPath);
   const r = run('smoke_product_route.mjs', ['--allow-dirty', '--report', report, '--journal', journal], { SF3D_WITNESS_INJECT_FAILURE: 'kit-identity' });
   assert.notEqual(r.status, 0, 'injected source-identity failure must fail');
   const d = readReport(report);
