@@ -75,8 +75,9 @@ const ALLOW_DIRTY = hasFlag('--allow-dirty');
 
 const KNOWN_ARMS = ['product-default', 'no-workers', 'workers-only', 'monolithic'];
 // Deterministic failure injection for the failure-report contract
-// (tools/test_witness_failure_report_contract.mjs): the named phase throws at
-// its start, before doing any real work.
+// (tools/test_witness_failure_report_contract.mjs): ordinary phases throw at
+// entry; browser-evaluation injects a real page.evaluate() throw before app
+// navigation, model loading, or GPU work.
 const INJECT_FAILURE = process.env.SF3D_WITNESS_INJECT_FAILURE || null;
 let phase = 'arguments';
 let journal = null;
@@ -88,10 +89,10 @@ const memoryObservation = () => ({
   hostFreeBytes: os.freemem(),
   hostTotalBytes: os.totalmem(),
 });
-const enterPhase = (name, details = {}) => {
+const enterPhase = (name, details = {}, { injectFailure = true } = {}) => {
   phase = name;
   journal?.append('phase-entered', { phase: name, ...details, memoryObservation: memoryObservation() });
-  if (INJECT_FAILURE === name) throw new Error(`injected failure at ${name}`);
+  if (injectFailure && INJECT_FAILURE === name) throw new Error(`injected failure at ${name}`);
 };
 const completePhase = (name, details = {}) => journal?.append('phase-completed', { phase: name, ...details, memoryObservation: memoryObservation() });
 function validateInvocation() {
@@ -338,6 +339,15 @@ try {
       memoryObservation: memoryObservation(),
     });
   });
+  // Exercise a real Puppeteer/CDP page evaluation before navigation can load
+  // the model or submit any GPU work. This is a bounded harness-contract
+  // failure point, not an inference run.
+  enterPhase('browser-evaluation', {}, { injectFailure: false });
+  await page.evaluate((inject) => {
+    if (inject) throw new Error('injected failure at browser-evaluation');
+    return true;
+  }, INJECT_FAILURE === 'browser-evaluation');
+  completePhase('browser-evaluation');
   const pageErrors = [];
   page.on('pageerror', e => { pageErrors.push(e.message); console.error('[pageerror]', e.message); });
   page.on('console', m => { if (m.type() === 'error') console.error('[console.error]', m.text().slice(0, 300)); });

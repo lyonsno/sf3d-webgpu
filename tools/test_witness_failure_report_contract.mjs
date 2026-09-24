@@ -42,6 +42,7 @@ const cases = [
   ['kit identity', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'kit-identity' }, 'kit-identity', /injected failure at kit-identity/],
   ['vite start', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'vite-start' }, 'vite-start', /injected failure at vite-start/],
   ['browser launch', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'browser-launch' }, 'browser-launch', /injected failure at browser-launch/],
+  ['browser evaluation', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'browser-evaluation' }, 'browser-evaluation', /injected failure at browser-evaluation/],
 ];
 for (const [name, args, env, phase, re] of cases) {
   const report = path.join(tmp, `product-${phase}.json`);
@@ -54,7 +55,7 @@ for (const [name, args, env, phase, re] of cases) {
   assert.equal(d.failurePhase, phase, `${name}: names its phase`);
   assert.match(d.error.message, re);
   assert.equal(d.requested.report, report, 'requested report path recorded');
-  if (phase === 'kit-identity' || phase === 'vite-start' || phase === 'browser-launch') {
+  if (phase === 'kit-identity' || phase === 'vite-start' || phase === 'browser-launch' || phase === 'browser-evaluation') {
     assert.match(d.source.commit, /^[0-9a-f]{40}$/, `${name}: effective source identity recorded once established`);
   }
   if (phase === 'browser-launch') {
@@ -75,6 +76,18 @@ for (const [name, args, env, phase, re] of cases) {
     assert.equal(d.parentPhaseJournal.lastEnteredPhase, 'browser-launch');
     assert.equal(d.parentPhaseJournal.lastCompletedPhase, 'vite-start');
     assert.equal(d.parentPhaseJournal.integrityOk, true);
+  }
+  if (phase === 'browser-evaluation') {
+    assert.equal(d.requested.protocolTimeoutMs, 0, 'browser evaluation uses explicit deadline configuration');
+    assert.ok(fs.existsSync(journal), 'parent journal survives a browser evaluation failure before primary output');
+    const replay = run('replay_parent_phase_journal.mjs', ['--journal', journal]);
+    assert.equal(replay.status, 0, `browser-evaluation journal replays (stderr: ${replay.stderr})`);
+    const replayed = JSON.parse(replay.stdout);
+    assert.equal(replayed.integrityOk, true);
+    assert.equal(replayed.lastEnteredPhase, 'browser-evaluation');
+    assert.equal(replayed.lastCompletedPhase, 'browser-launch');
+    assert.equal(d.parentPhaseJournal.integrityOk, true);
+    assert.ok(d.parentPhaseJournal.eventCount >= replayed.eventCount, 'failure report includes the replayed journal summary');
   }
   console.log(`ok  product-route witness: ${name} → durable report at phase ${phase}`);
 }
