@@ -8,6 +8,10 @@
 import { defineConfig } from 'vite';
 import { cp } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveViteCommit } from './tools/vite_commit_identity.mjs';
+
+const COMMIT_HASH = resolveViteCommit(path.dirname(fileURLToPath(import.meta.url)));
 
 function copyTetGrid() {
   let outDir;
@@ -22,6 +26,7 @@ function copyTetGrid() {
 }
 
 export default defineConfig({
+  define: { __COMMIT_HASH__: JSON.stringify(COMMIT_HASH) },
   base: './',
   publicDir: false,
   plugins: [copyTetGrid()],

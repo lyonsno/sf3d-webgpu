@@ -1,6 +1,10 @@
 import { defineConfig } from 'vite';
 import { access, cp, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveViteCommit } from './tools/vite_commit_identity.mjs';
+
+const COMMIT_HASH = resolveViteCommit(path.dirname(fileURLToPath(import.meta.url)));
 
 const BUILD_LOCAL_MODEL_ASSETS = new Set(['weights.bin']);
 
@@ -55,6 +59,7 @@ function copyPublicAssetsWithoutLocalModels() {
 }
 
 export default defineConfig({
+  define: { __COMMIT_HASH__: JSON.stringify(COMMIT_HASH) },
   plugins: [copyPublicAssetsWithoutLocalModels()],
   server: {
     port: 5176,
