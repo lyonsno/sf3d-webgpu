@@ -51,6 +51,7 @@ for (const [name, args, env, phase, re] of cases) {
     assert.match(d.source.commit, /^[0-9a-f]{40}$/, `${name}: effective source identity recorded once established`);
   }
   if (phase === 'browser-launch') {
+    assert.equal(d.requested.protocolTimeoutMs, 0, 'long browser evaluation has an explicit disabled protocol deadline');
     assert.ok(fs.existsSync(journal), 'parent journal survives a browser-launch failure before primary output');
     const events = fs.readFileSync(journal, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
     assert.equal(events[0].type, 'invocation-requested');
@@ -69,6 +70,40 @@ for (const [name, args, env, phase, re] of cases) {
     assert.equal(d.parentPhaseJournal.integrityOk, true);
   }
   console.log(`ok  product-route witness: ${name} → durable report at phase ${phase}`);
+}
+
+// The browser is deliberately not launched: this proves the exact mounted
+// artifact is content-identified before any model work begins.
+const weightPath = path.join(REPO, 'public/weights.bin');
+const createdPublic = !fs.existsSync(path.dirname(weightPath));
+fs.mkdirSync(path.dirname(weightPath), { recursive: true });
+const createdFixtureWeights = !fs.existsSync(weightPath);
+if (createdFixtureWeights) fs.writeFileSync(weightPath, Buffer.from('sf3d-weight-hash-fixture-v0'));
+try {
+  const report = path.join(tmp, 'product-weight-source-identity.json');
+  const journal = path.join(journalRoot, 'product-weight-source-identity.jsonl');
+  const expectedSha = createHash('sha256').update(fs.readFileSync(weightPath)).digest('hex');
+  const r = run('smoke_product_route.mjs', ['--allow-dirty', '--report', report, '--journal', journal], { SF3D_WITNESS_INJECT_FAILURE: 'kit-identity' });
+  assert.notEqual(r.status, 0, 'injected source-identity failure must fail');
+  const d = readReport(report);
+  assert.equal(d.failurePhase, 'kit-identity');
+  assert.equal(d.source.weightArtifact.sha256, expectedSha, 'failure report binds the exact weight bytes');
+  assert.equal(d.source.weightArtifact.sha256Status, 'computed');
+  assert.equal(d.requested.expectedWeightsSha256, null);
+  const mismatchReport = path.join(tmp, 'product-weight-digest-mismatch.json');
+  const mismatchJournal = path.join(journalRoot, 'product-weight-digest-mismatch.jsonl');
+  const mismatch = run('smoke_product_route.mjs', [
+    '--allow-dirty', '--expected-weights-sha', '0'.repeat(64), '--report', mismatchReport, '--journal', mismatchJournal,
+  ]);
+  assert.notEqual(mismatch.status, 0, 'an incorrect expected weight identity must reject');
+  const md = readReport(mismatchReport);
+  assert.equal(md.failurePhase, 'source-identity');
+  assert.equal(md.requested.expectedWeightsSha256, '0'.repeat(64));
+  assert.equal(md.source.weightArtifact.sha256, expectedSha, 'mismatch report preserves the observed digest');
+  assert.match(md.error.message, /does not match requested/);
+} finally {
+  if (createdFixtureWeights) fs.unlinkSync(weightPath);
+  if (createdPublic) fs.rmdirSync(path.dirname(weightPath));
 }
 
 if (process.env.SF3D_FAILURE_REPORT_PRODUCT_ONLY === '1') {

@@ -25,7 +25,7 @@
  * Usage:
  *   node tools/smoke_product_route.mjs [--arm product-default|no-workers|workers-only|monolithic|'{json overrides}']
  *     [--contend | --contend-same-device] [--image P] [--report P] [--expected-glb-sha SHA|none]
- *     [--max-gap-budget-ms N] [--allow-dirty] [--label TEXT]
+ *     [--expected-weights-sha SHA] [--protocol-timeout-ms N] [--max-gap-budget-ms N] [--allow-dirty] [--label TEXT]
  */
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
@@ -61,6 +61,11 @@ const JOURNAL_PATH = path.resolve(argVal('--journal', path.join(
 )));
 const expectedShaArg = argVal('--expected-glb-sha', CANONICAL_DEMO_CHAIR_GLB_SHA256);
 const EXPECTED_GLB_SHA = expectedShaArg === 'none' ? null : expectedShaArg;
+const EXPECTED_WEIGHTS_SHA256 = argVal('--expected-weights-sha', null);
+// Puppeteer's 180 s protocol default is shorter than the authorized producer
+// route. Zero explicitly disables that hidden deadline; callers may set a
+// measured finite value when their execution contract has one.
+const PROTOCOL_TIMEOUT_MS = Number(argVal('--protocol-timeout-ms', '0'));
 // The product-default arm on the canonical image must also reproduce the
 // measured cooperative duty counts (kit submittedGpuDutyCount), not just the GLB.
 const EXPECTED_DUTY_COUNTS = (ARM === 'product-default' && EXPECTED_GLB_SHA === CANONICAL_DEMO_CHAIR_GLB_SHA256)
@@ -98,6 +103,12 @@ function validateInvocation() {
   if (CONTEND_SAME && !(ARM === 'product-default' || ARM.startsWith('{'))) {
     throw new Error('--contend-same-device runs through the producer (product route); use --arm product-default or a JSON overrides object');
   }
+  if (!Number.isSafeInteger(PROTOCOL_TIMEOUT_MS) || PROTOCOL_TIMEOUT_MS < 0) {
+    throw new Error('--protocol-timeout-ms must be a non-negative integer (0 disables the protocol deadline)');
+  }
+  if (EXPECTED_WEIGHTS_SHA256 != null && !/^[0-9a-f]{64}$/i.test(EXPECTED_WEIGHTS_SHA256)) {
+    throw new Error('--expected-weights-sha must be a 64-character SHA-256 hex digest');
+  }
   enterPhase('input');
   if (!fs.existsSync(IMAGE)) throw new Error(`image not found: ${IMAGE}`);
 }
@@ -108,7 +119,7 @@ function writeFailure(failurePhase, error, partial = {}) {
     ok: false,
     arm: ARM_NAME,
     failurePhase,
-    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, expectedGlbSha: EXPECTED_GLB_SHA, report: REPORT_PATH, journal: JOURNAL_PATH },
+    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, expectedGlbSha: EXPECTED_GLB_SHA, expectedWeightsSha256: EXPECTED_WEIGHTS_SHA256, protocolTimeoutMs: PROTOCOL_TIMEOUT_MS, report: REPORT_PATH, journal: JOURNAL_PATH },
     // Effective identity as far as it was established when the run died.
     source: source ?? null,
     error: { message: error?.message || String(error), stack: error?.stack || null },
@@ -198,6 +209,8 @@ try {
       reportPath: REPORT_PATH,
       journalPath: JOURNAL_PATH,
       expectedGlbSha256: EXPECTED_GLB_SHA,
+      expectedWeightsSha256: EXPECTED_WEIGHTS_SHA256,
+      protocolTimeoutMs: PROTOCOL_TIMEOUT_MS,
     },
   });
   validateInvocation();
@@ -221,15 +234,30 @@ try {
     label: LABEL || null,
     input: { path: fs.realpathSync(IMAGE), bytes: inputStat.size, sha256: inputSha256 },
     weightArtifact: weightsStat ? {
-      path: fs.realpathSync(weightsPath),
-      bytes: weightsStat.size,
-      modifiedAtMs: weightsStat.mtimeMs,
-      sha256: null,
-      sha256Status: 'not-computed',
+    path: fs.realpathSync(weightsPath),
+    bytes: weightsStat.size,
+    modifiedAtMs: weightsStat.mtimeMs,
+    sha256: null,
+    sha256Status: 'hashing',
     } : { path: weightsPath, status: 'missing-before-browser-load' },
     weightRepresentation: { status: 'not-exposed-by-current-loader', format: null },
   };
+  if (weightsStat) {
+    const sha256 = await sha256File(weightsPath);
+    const afterHash = fs.statSync(weightsPath);
+    if (afterHash.size !== weightsStat.size || afterHash.mtimeMs !== weightsStat.mtimeMs || afterHash.ino !== weightsStat.ino) {
+      throw new Error('weights.bin changed while its source identity was being hashed');
+    }
+    source = {
+      ...source,
+      weightArtifact: { ...source.weightArtifact, sha256, sha256Status: 'computed' },
+    };
+  }
   journal.append('effective-identity', { ...source, routeId: 'sf3d.image-to-mesh.webgpu-local.v0' });
+  if (EXPECTED_WEIGHTS_SHA256 && !weightsStat) throw new Error('requested --expected-weights-sha but public/weights.bin is missing');
+  if (EXPECTED_WEIGHTS_SHA256 && source.weightArtifact.sha256.toLowerCase() !== EXPECTED_WEIGHTS_SHA256.toLowerCase()) {
+    throw new Error(`weights.bin SHA-256 ${source.weightArtifact.sha256} does not match requested ${EXPECTED_WEIGHTS_SHA256}`);
+  }
   completePhase('source-identity', { commit, dirty });
   if (dirty && !ALLOW_DIRTY) {
     throw new Error('worktree is dirty; commit first or pass --allow-dirty (the report will still record dirty=true)');
@@ -271,6 +299,7 @@ try {
   browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     headless: false,
+    protocolTimeout: PROTOCOL_TIMEOUT_MS,
     args: [
       '--enable-unsafe-webgpu', '--use-angle=metal',
       '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
@@ -576,6 +605,12 @@ try {
     throw new Error(`producer route receipt failed validation: ${(raw.routeReceiptValidation.errors || []).join('; ')}`);
   }
   const durable = { ...report, verdict: { ok: verdict.ok, errors: [...verdict.errors] } };
+  durable.execution = {
+    requestedProtocolTimeoutMs: PROTOCOL_TIMEOUT_MS,
+    effectiveProtocolTimeout: PROTOCOL_TIMEOUT_MS === 0 ? 'disabled' : 'finite',
+    expectedWeightsSha256: EXPECTED_WEIGHTS_SHA256,
+    effectiveWeightsSha256: source.weightArtifact?.sha256 ?? null,
+  };
   fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
   fs.writeFileSync(REPORT_PATH, JSON.stringify(durable, null, 2));
   completePhase('assemble', { verdict: verdict.ok ? 'accepted' : 'rejected' });
