@@ -202,7 +202,7 @@ try {
     journalPath: JOURNAL_PATH,
     invocationId: INVOCATION_ID,
     requested: {
-      routeId: 'sf3d.image-to-mesh.webgpu-local.v0',
+      harnessRouteClass: 'sf3d.image-to-mesh.webgpu-local.v0',
       arm: ARM,
       contend: CONTEND,
       contendSameDevice: CONTEND_SAME,
@@ -254,7 +254,11 @@ try {
       weightArtifact: { ...source.weightArtifact, sha256, sha256Status: 'computed' },
     };
   }
-  journal.append('effective-identity', { ...source, routeId: 'sf3d.image-to-mesh.webgpu-local.v0' });
+  journal.append('effective-identity', {
+    ...source,
+    harnessRouteClass: 'sf3d.image-to-mesh.webgpu-local.v0',
+    effectiveProducerDeviceRoute: { status: 'unobserved', reason: 'pre-navigation identity checkpoint' },
+  });
   if (EXPECTED_WEIGHTS_SHA256 && !weightsStat) throw new Error('requested --expected-weights-sha but public/weights.bin is missing');
   if (EXPECTED_WEIGHTS_SHA256 && source.weightArtifact.sha256.toLowerCase() !== EXPECTED_WEIGHTS_SHA256.toLowerCase()) {
     throw new Error(`weights.bin SHA-256 ${source.weightArtifact.sha256} does not match requested ${EXPECTED_WEIGHTS_SHA256}`);

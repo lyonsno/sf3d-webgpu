@@ -88,6 +88,11 @@ for (const [name, args, env, phase, re] of cases) {
     assert.equal(replayed.lastCompletedPhase, 'browser-launch');
     assert.equal(d.parentPhaseJournal.integrityOk, true);
     assert.ok(d.parentPhaseJournal.eventCount >= replayed.eventCount, 'failure report includes the replayed journal summary');
+    const events = fs.readFileSync(journal, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+    const identity = events.find(event => event.type === 'effective-identity').payload;
+    assert.equal(identity.harnessRouteClass, 'sf3d.image-to-mesh.webgpu-local.v0');
+    assert.equal(identity.routeId, undefined, 'pre-navigation state must not assert an effective route id');
+    assert.equal(identity.effectiveProducerDeviceRoute?.status, 'unobserved');
   }
   console.log(`ok  product-route witness: ${name} → durable report at phase ${phase}`);
 }
