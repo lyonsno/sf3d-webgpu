@@ -392,6 +392,7 @@ try {
       createProductRouteOptions, createProductRouteWorkers, describeProductRouteOptions, terminateProductRouteWorkers,
     } = await import('/src/lib/product_route.js');
     const { projectCooperativeReport } = await import('/tools/product_route_witness_report.mjs');
+    const { readBrowserKitIdentity } = await import('/tools/browser_kit_identity.js');
     const { acceptBoundedPrefixArm, expectedChannelDutyCount } = await import('/tools/bounded_prefix_acceptance.mjs');
     const { acceptCooperativeMechanismReport } = await import('/tools/cooperative_identity_acceptance.mjs');
 
@@ -399,7 +400,24 @@ try {
     const producer = window._sf3d_producer;
     const img = window._witnessImage;
     if (!device || !weights || !pipelines || !img) throw new Error('page state missing (device/weights/pipelines/image)');
-    if (contendSame && !producer) throw new Error('page state missing (_sf3d_producer) for the same-device arm');
+    if (!producer) throw new Error('page state missing (_sf3d_producer) for producer route identity');
+    if (producer.device !== device) throw new Error('producer device is not window._sf3d_device; refusing route identity substitution');
+    const browserKit = await readBrowserKitIdentity();
+    const producerRoute = {
+      invocation: contendSame ? 'producer.run' : 'direct-full-pipeline',
+      deviceRelation: producer.device === device ? 'producer-device===window._sf3d_device' : 'mismatch',
+      rendererDeviceRelationship: 'not-observed-by-this-witness',
+      producer: {
+        routeId: producer.routeId,
+        commit: producer.commit,
+        kitVersion: producer.kitVersion,
+        deviceInjected: producer.deviceInjected,
+        deviceTopology: producer.deviceInjected ? 'host-injected-device' : 'producer-owned-device',
+        backend: producer.backend,
+      },
+      runIdentity: null,
+      browserKit,
+    };
     if (document.visibilityState !== 'visible') throw new Error(`page visibility ${document.visibilityState} at start`);
 
     // Arm → options.
@@ -524,6 +542,7 @@ try {
         type: 'phase-entered', phase: 'full-pipeline',
         requested: { arm: armSpec, contend, contendSameDevice: contendSame },
         resolvedRouteOptions: describeProductRouteOptions(options),
+        effectiveProducerDeviceRoute: producerRoute,
       });
       out = contendSame
         ? await producer.run(img, { runId: `witness:${armSpec.startsWith('{') ? 'custom' : armSpec}`, onProgress: (m) => progress.push(String(m)), routeOverrides: overrides })
@@ -579,8 +598,7 @@ try {
     const bakeTel = out.cooperativeReports?.['texture-bake']?.textureBakeTelemetry;
     const materializationOffloaded = bakeTel?.materializationOffloaded ?? bakeTel?.phases?.materializationOffloaded ?? null;
 
-    const adapter = await navigator.gpu.requestAdapter();
-    const info = adapter?.info || {};
+    producerRoute.runIdentity = out.identity ?? null;
     return {
       frames, stageSpans: out.stageSpans, stageTimings: out.stageTimings, totalMs: out.totalMs,
       inferenceWindow: { startMs, endMs }, visibility,
@@ -590,7 +608,14 @@ try {
       contender, progressCount: progress.length,
       foregroundOpportunities: out.foregroundOpportunityReport ?? null,
       routeReceiptValidation: out.receiptValidation ?? null,
-      backend: { vendor: info.vendor ?? null, architecture: info.architecture ?? null, device: info.device ?? null, description: info.description ?? null, userAgent: navigator.userAgent },
+      producerRoute,
+      backend: {
+        vendor: producer.adapterInfo?.vendor ?? null,
+        architecture: producer.adapterInfo?.architecture ?? null,
+        device: producer.adapterInfo?.device ?? null,
+        description: producer.adapterInfo?.description ?? null,
+        userAgent: navigator.userAgent,
+      },
     };
   }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME, expectedDutyCounts: EXPECTED_DUTY_COUNTS });
 
@@ -611,6 +636,7 @@ try {
     output: { ...raw.output, expectedGlbSha256: EXPECTED_GLB_SHA },
     contender: raw.contender, stageTimings: raw.stageTimings, totalMs: raw.totalMs,
     foregroundOpportunities: raw.foregroundOpportunities,
+    producerRoute: raw.producerRoute,
   });
   const verdict = acceptProductRouteWitness(report, {
     expectedGlbSha: EXPECTED_GLB_SHA, requireContender: CONTEND || CONTEND_SAME, maxGapBudgetMs: MAX_GAP_BUDGET_MS,

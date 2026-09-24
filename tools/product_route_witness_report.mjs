@@ -16,7 +16,7 @@
  *   - a non-finite gap; a max-gap budget breach.
  */
 
-export const PRODUCT_ROUTE_WITNESS_SCHEMA = 'sf3d.product-route-witness.v0';
+export const PRODUCT_ROUTE_WITNESS_SCHEMA = 'sf3d.product-route-witness.v1';
 export const CANONICAL_DEMO_CHAIR_GLB_SHA256 =
   'e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7';
 /** Measured cooperative duty counts for the product route on demo_chair.png (kit submittedGpuDutyCount). */
@@ -207,7 +207,7 @@ export function assembleProductRouteWitness(input) {
     arm, source, requestedOptions, offloads, cooperativeReports = {}, cooperativeValidations = {},
     materializationOffloaded = null, frames, stageSpans, inferenceWindow, visibility,
     output, contender, stageTimings = {}, totalMs, generatedAt = new Date().toISOString(),
-    foregroundOpportunities = null,
+    foregroundOpportunities = null, producerRoute = null,
   } = input;
   if (typeof arm !== 'string' || !arm) throw new TypeError('arm must be a non-empty string');
   if (!Array.isArray(frames)) throw new TypeError('frames must be an array');
@@ -228,6 +228,21 @@ export function assembleProductRouteWitness(input) {
       cooperativeValidations: Object.freeze({ ...cooperativeValidations }),
       materializationOffloaded,
       visibility: visibility ?? null,
+      producerRoute: producerRoute ? Object.freeze({
+        invocation: producerRoute.invocation ?? null,
+        deviceRelation: producerRoute.deviceRelation ?? null,
+        rendererDeviceRelationship: producerRoute.rendererDeviceRelationship ?? 'not-observed-by-this-witness',
+        producer: Object.freeze({
+          routeId: producerRoute.producer?.routeId ?? null,
+          commit: producerRoute.producer?.commit ?? null,
+          kitVersion: producerRoute.producer?.kitVersion ?? null,
+          deviceInjected: producerRoute.producer?.deviceInjected ?? null,
+          deviceTopology: producerRoute.producer?.deviceTopology ?? null,
+          backend: producerRoute.producer?.backend ? Object.freeze({ ...producerRoute.producer.backend }) : null,
+        }),
+        runIdentity: producerRoute.runIdentity ? Object.freeze({ ...producerRoute.runIdentity }) : null,
+        browserKit: producerRoute.browserKit ? Object.freeze({ ...producerRoute.browserKit }) : null,
+      }) : null,
     }),
     contender: Object.freeze({
       enabled: Boolean(contender?.enabled),
@@ -279,6 +294,43 @@ export function acceptProductRouteWitness(report, expectations = {}) {
   } = expectations;
   const errors = [];
   if (report?.schema !== PRODUCT_ROUTE_WITNESS_SCHEMA) errors.push(`schema must be ${PRODUCT_ROUTE_WITNESS_SCHEMA}`);
+
+  // Bind the exercised call path and actual producer device to this report.
+  // A fresh requestAdapter() probe is not evidence about the producer's device.
+  const route = report.effective?.producerRoute;
+  if (!route) errors.push('producer route identity is missing');
+  else {
+    if (!['direct-full-pipeline', 'producer.run'].includes(route.invocation)) errors.push(`producer invocation ${route.invocation ?? 'missing'} is unsupported`);
+    if (route.deviceRelation !== 'producer-device===window._sf3d_device') errors.push(`producer/window device relation ${route.deviceRelation ?? 'missing'} != producer-device===window._sf3d_device`);
+    if (route.rendererDeviceRelationship !== 'not-observed-by-this-witness') errors.push(`renderer device relationship ${route.rendererDeviceRelationship ?? 'missing'} is outside this witness contract`);
+    const producer = route.producer || {};
+    if (producer.routeId !== SF3D_ROUTE_ID) errors.push(`producer routeId ${producer.routeId ?? 'missing'} != expected ${SF3D_ROUTE_ID}`);
+    if (!producer.commit || producer.commit !== report.source?.commit) errors.push(`producer commit ${producer.commit ?? 'missing'} != source commit ${report.source?.commit ?? 'missing'}`);
+    if (!producer.kitVersion) errors.push('producer kit version is missing');
+    else if (producer.kitVersion !== report.source?.kitVersion) errors.push(`producer kit version ${producer.kitVersion} != installed kit version ${report.source?.kitVersion ?? 'missing'}`);
+    const expectedTopology = producer.deviceInjected === true ? 'host-injected-device' : producer.deviceInjected === false ? 'producer-owned-device' : null;
+    if (!expectedTopology || producer.deviceTopology !== expectedTopology) errors.push(`producer device topology ${producer.deviceTopology ?? 'missing'} disagrees with deviceInjected ${producer.deviceInjected ?? 'missing'}`);
+    if (producer.backend?.kind !== 'webgpu-local' || producer.backend?.runtime !== 'browser' || !producer.backend?.adapterName) errors.push('producer backend identity is missing or invalid');
+    const browserKit = route.browserKit;
+    if (!browserKit) errors.push('browser-executed kit identity is missing');
+    else {
+      if (browserKit.packageName !== '@kaminos/webgpu-inference-kit') errors.push(`browser kit package ${browserKit.packageName ?? 'missing'} != @kaminos/webgpu-inference-kit`);
+      if (browserKit.exportedVersion !== report.source?.kitVersion) errors.push(`browser kit version ${browserKit.exportedVersion ?? 'missing'} != installed kit version ${report.source?.kitVersion ?? 'missing'}`);
+      if (!/^[0-9a-f]{64}$/i.test(browserKit.exportFingerprint ?? '')) errors.push('browser kit export fingerprint is missing or invalid');
+      if (typeof browserKit.witnessModuleUrl !== 'string' || !browserKit.witnessModuleUrl) errors.push('browser kit witness module URL is missing');
+    }
+    if (route.invocation === 'producer.run') {
+      const identity = route.runIdentity;
+      if (!identity) errors.push('producer.run identity is missing');
+      else {
+        if (identity.schema !== 'sf3d.producer-run-identity.v0') errors.push(`producer run identity schema ${identity.schema ?? 'missing'} is invalid`);
+        if (identity.routeId !== producer.routeId) errors.push(`producer run routeId ${identity.routeId ?? 'missing'} != producer routeId ${producer.routeId ?? 'missing'}`);
+        if (identity.deviceTopology !== producer.deviceTopology) errors.push(`producer run deviceTopology ${identity.deviceTopology ?? 'missing'} != producer deviceTopology ${producer.deviceTopology ?? 'missing'}`);
+        if (identity.producerCommit !== producer.commit) errors.push(`producer run commit ${identity.producerCommit ?? 'missing'} != producer commit ${producer.commit ?? 'missing'}`);
+        if (identity.kitVersion !== producer.kitVersion) errors.push(`producer run kit version ${identity.kitVersion ?? 'missing'} != producer kit version ${producer.kitVersion ?? 'missing'}`);
+      }
+    } else if (route.runIdentity != null) errors.push('direct-full-pipeline must not claim a producer.run identity');
+  }
 
   // Output identity.
   if (expectedGlbSha) {

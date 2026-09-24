@@ -311,6 +311,7 @@ export async function createSf3dProducer({
   return Object.freeze({
     schema: SF3D_PRODUCER_SCHEMA,
     routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID,
+    commit,
     kitVersion: WEBGPU_INFERENCE_KIT_VERSION,
     device: dev,
     adapter: gpu.adapter,

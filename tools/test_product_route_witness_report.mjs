@@ -70,6 +70,18 @@ function validInput(over = {}) {
   return {
     arm: 'product-default',
     source: { commit: 'abc123', dirty: false, kitVersion: '0.1.48' },
+    producerRoute: {
+      invocation: 'direct-full-pipeline',
+      deviceRelation: 'producer-device===window._sf3d_device',
+      rendererDeviceRelationship: 'not-observed-by-this-witness',
+      producer: {
+        routeId: SF3D_ROUTE_ID, commit: 'abc123', kitVersion: '0.1.48', deviceInjected: true,
+        deviceTopology: 'host-injected-device',
+        backend: { kind: 'webgpu-local', runtime: 'browser', adapterName: 'Apple M4 Max', browser: 'Chrome', features: [], limits: { maxBufferSize: 1 }, timestampQuery: 'unavailable' },
+      },
+      runIdentity: null,
+      browserKit: { packageName: '@kaminos/webgpu-inference-kit', exportedVersion: '0.1.48', exportFingerprint: 'a'.repeat(64), witnessModuleUrl: 'http://127.0.0.1:4173/tools/browser_kit_identity.js' },
+    },
     requestedOptions: {
       cooperativeDino: true, cooperativeTwoStream: true, cooperativePostProcessor: true, cooperativeBake: true,
       decoderArena: true, twoStreamDutyGranularity: 'attention-tile', postProcessorDutyGranularity: 'channel-range', postProcessorCompletionPolicy: 'bounded-prefix',
@@ -100,6 +112,32 @@ assert.equal(good.effective.cooperative['post-processor'].maxObservedInFlightGpu
 const accepted = acceptProductRouteWitness(good, { requireContender: true });
 assert.deepEqual([...accepted.errors], [], 'valid witness must be accepted');
 assert.equal(accepted.ok, true);
+assert.ok(good.effective.producerRoute, 'assembly must preserve effective producer route identity');
+assert.equal(good.effective.producerRoute.invocation, 'direct-full-pipeline');
+assert.equal(good.effective.producerRoute.rendererDeviceRelationship, 'not-observed-by-this-witness');
+const producerRunInput = validInput({ producerRoute: {
+  ...validInput().producerRoute,
+  invocation: 'producer.run',
+  runIdentity: { schema: 'sf3d.producer-run-identity.v0', runId: 'witness:test', routeId: SF3D_ROUTE_ID, deviceTopology: 'host-injected-device', producerCommit: 'abc123', kitVersion: '0.1.48' },
+} });
+assert.equal(acceptProductRouteWitness(assembleProductRouteWitness(producerRunInput)).ok, true, 'producer.run identity must be accepted when it agrees with the producer');
+const routeFalsifiers = [
+  ['missing producer route identity', validInput({ producerRoute: null }), /producer route identity is missing/],
+  ['wrong producer route', validInput({ producerRoute: { ...validInput().producerRoute, producer: { ...validInput().producerRoute.producer, routeId: 'other.route' } } }), /producer routeId other.route != expected/],
+  ['fallback device mismatch', validInput({ producerRoute: { ...validInput().producerRoute, deviceRelation: 'mismatch' } }), /producer\/window device relation mismatch != producer-device===window\._sf3d_device/],
+  ['renderer device overclaim', validInput({ producerRoute: { ...validInput().producerRoute, rendererDeviceRelationship: 'same-device' } }), /renderer device relationship same-device is outside this witness contract/],
+  ['browser kit version mismatch', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, exportedVersion: '0.1.47' } } }), /browser kit version 0.1.47 != installed kit version 0.1.48/],
+  ['producer kit version mismatch', validInput({ producerRoute: { ...validInput().producerRoute, producer: { ...validInput().producerRoute.producer, kitVersion: '0.1.47' } } }), /producer kit version 0.1.47 != installed kit version 0.1.48/],
+  ['missing served kit identity', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: null } }), /browser-executed kit identity is missing/],
+  ['producer-run route mismatch', validInput({ producerRoute: { ...producerRunInput.producerRoute, runIdentity: { ...producerRunInput.producerRoute.runIdentity, routeId: 'other.route' } } }), /producer run routeId other.route != producer routeId/],
+  ['producer-run topology mismatch', validInput({ producerRoute: { ...producerRunInput.producerRoute, runIdentity: { ...producerRunInput.producerRoute.runIdentity, deviceTopology: 'producer-owned-device' } } }), /producer run deviceTopology producer-owned-device != producer deviceTopology/],
+];
+for (const [name, input, re] of routeFalsifiers) {
+  const verdict = acceptProductRouteWitness(assembleProductRouteWitness(input));
+  assert.equal(verdict.ok, false, `${name} must be rejected`);
+  assert.match(verdict.errors.join('\n'), re, `${name} must name its reason`);
+  console.log(`ok  rejects: ${name}`);
+}
 // Budget gate: the 120ms stall breaches a 33ms budget but not a 200ms one.
 assert.equal(acceptProductRouteWitness(good, { maxGapBudgetMs: 200 }).ok, true);
 const budget = acceptProductRouteWitness(good, { maxGapBudgetMs: 33.3 });
