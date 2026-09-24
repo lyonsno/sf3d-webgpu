@@ -9,12 +9,12 @@ async function sha256(bytes) {
   return bytesToHex(new Uint8Array(digest));
 }
 
-export async function assembleBrowserKitIdentity({ exportedVersion, exportNames, servedModules, witnessModuleUrl }) {
-  const modules = [...servedModules]
-    .map(module => ({ url: module.url, bytes: Number(module.bytes), sha256: module.sha256 }))
-    .sort((a, b) => a.url.localeCompare(b.url));
+export async function assembleBrowserKitIdentity({ exportedVersion, exportNames, executedModules, witnessModuleUrl }) {
+  const modules = [...executedModules]
+    .map(module => ({ scriptId: String(module.scriptId), url: module.url, bytes: Number(module.bytes), sha256: module.sha256 }))
+    .sort((a, b) => a.url.localeCompare(b.url) || a.scriptId.localeCompare(b.scriptId));
   const canonicalModules = JSON.stringify(modules);
-  const servedModuleSetSha256 = await sha256(new TextEncoder().encode(canonicalModules));
+  const executedModuleSetSha256 = await sha256(new TextEncoder().encode(canonicalModules));
   const canonicalApi = JSON.stringify({
     packageName: '@kaminos/webgpu-inference-kit', exportedVersion, exportNames,
   });
@@ -24,42 +24,21 @@ export async function assembleBrowserKitIdentity({ exportedVersion, exportNames,
     exportedVersion,
     exportNames,
     exportFingerprint,
-    servedModuleSetSha256,
-    servedModuleCount: modules.length,
-    servedModules: Object.freeze(modules.map(module => Object.freeze(module))),
+    identityBasis: 'chrome-debugger-executed-module-source',
+    executedModuleSetSha256,
+    executedModuleCount: modules.length,
+    kitModuleCount: modules.filter(module => /@kaminos_webgpu-inference-kit|\/node_modules\/@kaminos\/webgpu-inference-kit\//.test(module.url)).length,
+    executedModules: Object.freeze(modules.map(module => Object.freeze(module))),
     witnessModuleUrl,
   });
 }
 
-export async function readBrowserKitIdentity() {
+export async function readBrowserKitIdentity({ executedModules }) {
   const exportNames = Object.keys(kit).sort();
   const exportedVersion = kit.WEBGPU_INFERENCE_KIT_VERSION;
-  const entries = performance.getEntriesByType('resource');
-  const isOptimizerModule = (entry) => {
-    const url = new URL(entry.name, location.href);
-    return /\.m?js$/i.test(url.pathname)
-      && (url.pathname.includes('/node_modules/.vite/deps/')
-        || url.pathname.includes('/node_modules/@kaminos/webgpu-inference-kit/'));
-  };
-  const kitModuleEntries = entries.filter(entry => {
-    const url = new URL(entry.name, location.href);
-    return /\.m?js$/i.test(url.pathname)
-      && (url.pathname.includes('@kaminos_webgpu-inference-kit')
-        || url.pathname.includes('/node_modules/@kaminos/webgpu-inference-kit/'));
-  });
-  if (!kitModuleEntries.length) throw new Error('browser did not expose a loaded @kaminos/webgpu-inference-kit module response');
-  const moduleUrls = [...new Set(entries.filter(isOptimizerModule).map(entry => entry.name))].sort();
-  const servedModules = [];
-  for (const name of moduleUrls) {
-    const url = new URL(name, location.href);
-    const response = await fetch(url.href, { cache: 'no-store' });
-    if (!response.ok) throw new Error(`could not read browser-served module ${url.pathname}: HTTP ${response.status}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (!bytes.byteLength) throw new Error(`browser-served module is empty: ${url.pathname}`);
-    servedModules.push({ url: `${url.pathname}${url.search}`, bytes: bytes.byteLength, sha256: await sha256(bytes) });
-  }
+  if (!Array.isArray(executedModules) || executedModules.length === 0) throw new Error('Chrome did not provide executed kit module sources');
   const identity = await assembleBrowserKitIdentity({
-    exportedVersion, exportNames, servedModules, witnessModuleUrl: import.meta.url,
+    exportedVersion, exportNames, executedModules, witnessModuleUrl: import.meta.url,
   });
   return identity;
 }

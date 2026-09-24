@@ -83,10 +83,11 @@ function validInput(over = {}) {
       runIdentity: null,
       browserKit: {
         packageName: '@kaminos/webgpu-inference-kit', exportedVersion: '0.1.48', exportFingerprint: 'a'.repeat(64),
-        servedModuleSetSha256: 'b'.repeat(64), servedModuleCount: 2,
-        servedModules: [
-          { url: '/node_modules/.vite/deps/@kaminos_webgpu-inference-kit.js?v=abc', bytes: 1200, sha256: 'c'.repeat(64) },
-          { url: '/node_modules/.vite/deps/chunk-abc.js', bytes: 800, sha256: 'd'.repeat(64) },
+        identityBasis: 'chrome-debugger-executed-module-source',
+        executedModuleSetSha256: 'b'.repeat(64), executedModuleCount: 2, kitModuleCount: 1,
+        executedModules: [
+          { scriptId: '7', url: '/node_modules/.vite/deps/@kaminos_webgpu-inference-kit.js?v=abc', bytes: 1200, sha256: 'c'.repeat(64) },
+          { scriptId: '8', url: '/node_modules/.vite/deps/chunk-abc.js', bytes: 800, sha256: 'd'.repeat(64) },
         ],
         witnessModuleUrl: 'http://127.0.0.1:4173/tools/browser_kit_identity.js',
       },
@@ -140,8 +141,9 @@ const routeFalsifiers = [
   ['browser kit version mismatch', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, exportedVersion: '0.1.47' } } }), /browser kit version 0.1.47 != installed kit version 0.1.48/],
   ['producer kit version mismatch', validInput({ producerRoute: { ...validInput().producerRoute, producer: { ...validInput().producerRoute.producer, kitVersion: '0.1.47' } } }), /producer kit version 0.1.47 != installed kit version 0.1.48/],
   ['missing served kit identity', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: null } }), /browser-executed kit identity is missing/],
-  ['browser kit implementation bytes missing', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, servedModules: [] } } }), /browser-served kit module bytes are missing/],
-  ['browser kit implementation digest missing', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, servedModuleSetSha256: null } } }), /browser-served kit module set digest is missing or invalid/],
+  ['browser kit implementation bytes missing', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, executedModules: [], executedModuleCount: 0, kitModuleCount: 0 } } }), /Chrome-executed kit module sources are missing/],
+  ['browser kit implementation digest missing', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, executedModuleSetSha256: null } } }), /Chrome-executed module set digest is missing or invalid/],
+  ['browser kit dependencies without kit module', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, kitModuleCount: 0, executedModules: [{ scriptId: '8', url: '/node_modules/.vite/deps/chunk-abc.js', bytes: 800, sha256: 'd'.repeat(64) }] } } }), /Chrome-executed kit module source is missing or miscounted/],
   ['producer build commit fallback', validInput({ producerRoute: { ...validInput().producerRoute, producer: { ...validInput().producerRoute.producer, commit: 'dev' } } }), /producer commit dev != source commit abc123/],
   ['producer-run route mismatch', validInput({ producerRoute: { ...producerRunInput.producerRoute, runIdentity: { ...producerRunInput.producerRoute.runIdentity, routeId: 'other.route' } } }), /producer run routeId other.route != producer routeId/],
   ['producer-run topology mismatch', validInput({ producerRoute: { ...producerRunInput.producerRoute, runIdentity: { ...producerRunInput.producerRoute.runIdentity, deviceTopology: 'producer-owned-device' } } }), /producer run deviceTopology producer-owned-device != producer deviceTopology/],

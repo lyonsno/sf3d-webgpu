@@ -319,20 +319,24 @@ export function acceptProductRouteWitness(report, expectations = {}) {
       if (browserKit.packageName !== '@kaminos/webgpu-inference-kit') errors.push(`browser kit package ${browserKit.packageName ?? 'missing'} != @kaminos/webgpu-inference-kit`);
       if (browserKit.exportedVersion !== report.source?.kitVersion) errors.push(`browser kit version ${browserKit.exportedVersion ?? 'missing'} != installed kit version ${report.source?.kitVersion ?? 'missing'}`);
       if (!/^[0-9a-f]{64}$/i.test(browserKit.exportFingerprint ?? '')) errors.push('browser kit export fingerprint is missing or invalid');
-      if (!Array.isArray(browserKit.servedModules) || browserKit.servedModules.length === 0
-        || !Number.isInteger(browserKit.servedModuleCount) || browserKit.servedModuleCount !== browserKit.servedModules.length) {
-        errors.push('browser-served kit module bytes are missing');
+      if (browserKit.identityBasis !== 'chrome-debugger-executed-module-source'
+        || !Array.isArray(browserKit.executedModules) || browserKit.executedModules.length === 0
+        || !Number.isInteger(browserKit.executedModuleCount) || browserKit.executedModuleCount !== browserKit.executedModules.length) {
+        errors.push('Chrome-executed kit module sources are missing');
       } else {
-        for (const module of browserKit.servedModules) {
+        for (const module of browserKit.executedModules) {
           if (typeof module.url !== 'string' || !module.url.includes('/node_modules/')
+            || typeof module.scriptId !== 'string' || !module.scriptId
             || !Number.isInteger(module.bytes) || module.bytes <= 0
             || !/^[0-9a-f]{64}$/i.test(module.sha256 ?? '')) {
-            errors.push('browser-served kit module bytes are missing or invalid');
+            errors.push('Chrome-executed kit module source is missing or invalid');
             break;
           }
         }
       }
-      if (!/^[0-9a-f]{64}$/i.test(browserKit.servedModuleSetSha256 ?? '')) errors.push('browser-served kit module set digest is missing or invalid');
+      const actualKitModuleCount = browserKit.executedModules?.filter(module => /@kaminos_webgpu-inference-kit|\/node_modules\/@kaminos\/webgpu-inference-kit\//.test(module.url ?? '')).length ?? 0;
+      if (actualKitModuleCount < 1 || !Number.isInteger(browserKit.kitModuleCount) || browserKit.kitModuleCount !== actualKitModuleCount) errors.push('Chrome-executed kit module source is missing or miscounted');
+      if (!/^[0-9a-f]{64}$/i.test(browserKit.executedModuleSetSha256 ?? '')) errors.push('Chrome-executed module set digest is missing or invalid');
       if (typeof browserKit.witnessModuleUrl !== 'string' || !browserKit.witnessModuleUrl) errors.push('browser kit witness module URL is missing');
     }
     if (route.invocation === 'producer.run') {

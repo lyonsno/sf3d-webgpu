@@ -37,6 +37,7 @@ import crypto from 'node:crypto';
 import { spawn, execSync } from 'node:child_process';
 import { createParentPhaseJournal, replayParentPhaseJournal } from './parent_phase_journal.mjs';
 import { readImageInput, sha256Tree } from './witness_source_identity.mjs';
+import { createBrowserExecutedKitModuleCapture } from './browser_executed_module_identity.mjs';
 import {
   CANONICAL_DEMO_CHAIR_DUTY_COUNTS,
   CANONICAL_DEMO_CHAIR_GLB_SHA256,
@@ -180,6 +181,7 @@ let commit = null, dirty = null, kitVersion = null;
 const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch { /* gone */ } } };
 let browser = null;
+let browserModuleCapture = null;
 let terminalStatus = 'failed';
 let terminalError = null;
 let failureDocument = null;
@@ -324,6 +326,9 @@ try {
   }, 5000);
   memoryHeartbeat.unref();
   const page = await browser.newPage();
+  const cdp = await page.createCDPSession();
+  browserModuleCapture = createBrowserExecutedKitModuleCapture(cdp, { baseUrl: `http://127.0.0.1:${port}/` });
+  await cdp.send('Debugger.enable');
   await page.exposeFunction('__sf3dParentPhase', (event) => {
     if (!event || typeof event !== 'object' || Array.isArray(event)) {
       throw new TypeError('browser phase event must be an object');
@@ -367,6 +372,7 @@ try {
   }
   if (!ready) throw new Error('app did not reach Ready within 240s');
   completePhase('page-load', { status: 'Ready' });
+  const executedKitModules = await browserModuleCapture.snapshot();
   await page.evaluate(() => {
     const device = window._sf3d_device;
     if (device?.lost && window.__sf3dParentPhase) {
@@ -385,7 +391,7 @@ try {
 
   // --- The witnessed run ---
   enterPhase('witness');
-  const raw = await page.evaluate(async ({ armSpec, contend, contendSame, expectedDutyCounts }) => {
+  const raw = await page.evaluate(async ({ armSpec, contend, contendSame, expectedDutyCounts, executedKitModules }) => {
     await window.__sf3dParentPhase({ type: 'phase-entered', phase: 'product-route' });
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const {
@@ -402,7 +408,7 @@ try {
     if (!device || !weights || !pipelines || !img) throw new Error('page state missing (device/weights/pipelines/image)');
     if (!producer) throw new Error('page state missing (_sf3d_producer) for producer route identity');
     if (producer.device !== device) throw new Error('producer device is not window._sf3d_device; refusing route identity substitution');
-    const browserKit = await readBrowserKitIdentity();
+    const browserKit = await readBrowserKitIdentity({ executedModules: executedKitModules });
     const producerRoute = {
       invocation: contendSame ? 'producer.run' : 'direct-full-pipeline',
       deviceRelation: producer.device === device ? 'producer-device===window._sf3d_device' : 'mismatch',
@@ -618,7 +624,7 @@ try {
         userAgent: navigator.userAgent,
       },
     };
-  }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME, expectedDutyCounts: EXPECTED_DUTY_COUNTS });
+  }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME, expectedDutyCounts: EXPECTED_DUTY_COUNTS, executedKitModules });
 
   if (pageErrors.length) throw new Error(`page errors during run: ${pageErrors.join(' | ')}`);
   completePhase('witness', { outputSha256: raw.output.glbSha256, outputBytes: raw.output.glbBytes });
@@ -696,6 +702,7 @@ try {
   process.exitCode = 1;
 } finally {
   if (memoryHeartbeat) clearInterval(memoryHeartbeat);
+  browserModuleCapture?.dispose();
   if (browser) {
     try {
       await browser.close();
