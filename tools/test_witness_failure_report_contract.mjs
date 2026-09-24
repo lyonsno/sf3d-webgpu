@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readImageInput, sha256Tree } from './witness_source_identity.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf3d-failure-report-'));
@@ -33,6 +34,36 @@ const sha256File = (filePath) => new Promise((resolve, reject) => {
   stream.on('error', reject);
   stream.on('end', () => resolve(hash.digest('hex')));
 });
+
+// Source identity must stay bound to the exact captured bytes even if the
+// pathname changes after capture, because those same bytes feed the browser.
+{
+  const imagePath = path.join(tmp, 'mutable-image.png');
+  const capturedBytes = Buffer.from('image bytes used for identity and browser submission');
+  fs.writeFileSync(imagePath, capturedBytes);
+  const captured = readImageInput(imagePath);
+  fs.writeFileSync(imagePath, Buffer.from('replacement bytes at same path'));
+  assert.equal(captured.sha256, createHash('sha256').update(capturedBytes).digest('hex'));
+  assert.equal(Buffer.from(captured.bytes.toString('base64'), 'base64').compare(capturedBytes), 0,
+    'browser encoding uses the captured image bytes rather than rereading the path');
+  assert.notEqual(captured.sha256, await sha256File(imagePath), 'later path contents cannot silently inherit the captured digest');
+}
+
+// A package-tree digest must distinguish same-version installed files, not
+// merely package.json/version identity.
+{
+  const kitRoot = path.join(tmp, 'kit-tree-fixture');
+  fs.mkdirSync(path.join(kitRoot, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(kitRoot, 'package.json'), JSON.stringify({ name: '@kaminos/webgpu-inference-kit', version: '0.1.52' }));
+  fs.writeFileSync(path.join(kitRoot, 'dist', 'entry.js'), 'export const mode = "before";');
+  const original = await sha256Tree(kitRoot);
+  fs.writeFileSync(path.join(kitRoot, 'dist', 'entry.js'), 'export const mode = "after";');
+  const changed = await sha256Tree(kitRoot);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(kitRoot, 'package.json'), 'utf8')).version, '0.1.52');
+  assert.notEqual(changed.sha256, original.sha256,
+    'changed installed file changes tree identity while package version remains constant');
+  assert.deepEqual(changed.files, original.files, 'the difference is file content, not package layout');
+}
 
 // --- Product-route witness ---
 const cases = [

@@ -36,6 +36,7 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { spawn, execSync } from 'node:child_process';
 import { createParentPhaseJournal, replayParentPhaseJournal } from './parent_phase_journal.mjs';
+import { readImageInput, sha256Tree } from './witness_source_identity.mjs';
 import {
   CANONICAL_DEMO_CHAIR_DUTY_COUNTS,
   CANONICAL_DEMO_CHAIR_GLB_SHA256,
@@ -173,34 +174,8 @@ function sha256File(filePath) {
   });
 }
 
-async function sha256Tree(root) {
-  const files = [];
-  const visit = (directory) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const absolute = path.join(directory, entry.name);
-      if (entry.isDirectory()) visit(absolute);
-      else if (entry.isFile()) files.push(absolute);
-      else throw new Error(`unsupported installed-package entry: ${absolute}`);
-    }
-  };
-  visit(root);
-  files.sort();
-  const hash = crypto.createHash('sha256');
-  for (const file of files) {
-    hash.update(path.relative(root, file));
-    hash.update('\0');
-    await new Promise((resolve, reject) => {
-      const stream = fs.createReadStream(file);
-      stream.on('data', chunk => hash.update(chunk));
-      stream.on('error', reject);
-      stream.on('end', resolve);
-    });
-    hash.update('\0');
-  }
-  return { sha256: hash.digest('hex'), files: files.map(file => path.relative(root, file)) };
-}
-
 let source = null;
+let imageInput = null;
 let commit = null, dirty = null, kitVersion = null;
 const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch { /* gone */ } } };
@@ -238,8 +213,7 @@ try {
   enterPhase('source-identity');
   commit = execSync('git rev-parse HEAD', { cwd: REPO }).toString().trim();
   dirty = execSync('git status --porcelain', { cwd: REPO }).toString().trim().length > 0;
-  const inputStat = fs.statSync(IMAGE);
-  const inputSha256 = await sha256File(IMAGE);
+  imageInput = readImageInput(IMAGE);
   const weightsPath = path.join(REPO, 'public/weights.bin');
   const weightsStat = fs.existsSync(weightsPath) ? fs.statSync(weightsPath) : null;
   source = {
@@ -249,7 +223,7 @@ try {
     hostname: os.hostname(),
     node: process.version,
     label: LABEL || null,
-    input: { path: fs.realpathSync(IMAGE), bytes: inputStat.size, sha256: inputSha256 },
+    input: { path: imageInput.path, bytes: imageInput.bytes.length, sha256: imageInput.sha256 },
     weightArtifact: weightsStat ? {
     path: fs.realpathSync(weightsPath),
     bytes: weightsStat.size,
@@ -402,10 +376,12 @@ try {
     }
   });
 
-  const imageB64 = fs.readFileSync(IMAGE).toString('base64');
+  const imageB64 = imageInput.bytes.toString('base64');
+  enterPhase('image-submission');
   await page.evaluate(async (b64) => {
     await new Promise((res, rej) => { const img = new Image(); img.onload = () => { window._witnessImage = img; res(); }; img.onerror = rej; img.src = 'data:image/png;base64,' + b64; });
   }, imageB64);
+  completePhase('image-submission', { bytes: imageInput.bytes.length, sha256: imageInput.sha256, encoding: 'base64-data-url' });
 
   // --- The witnessed run ---
   enterPhase('witness');
