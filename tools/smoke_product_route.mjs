@@ -25,7 +25,8 @@
  * Usage:
  *   node tools/smoke_product_route.mjs [--arm product-default|no-workers|workers-only|monolithic|'{json overrides}']
  *     [--contend | --contend-same-device] [--image P] [--report P] [--expected-glb-sha SHA|none]
- *     [--expected-weights-sha SHA] [--protocol-timeout-ms N] [--max-gap-budget-ms N] [--allow-dirty] [--label TEXT]
+ *     [--expected-commit SHA] [--expected-image-sha SHA] [--expected-weights-sha SHA]
+ *     [--expected-kit-tree-sha256 SHA] [--protocol-timeout-ms N] [--max-gap-budget-ms N] [--allow-dirty] [--label TEXT]
  */
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
@@ -62,6 +63,9 @@ const JOURNAL_PATH = path.resolve(argVal('--journal', path.join(
 const expectedShaArg = argVal('--expected-glb-sha', CANONICAL_DEMO_CHAIR_GLB_SHA256);
 const EXPECTED_GLB_SHA = expectedShaArg === 'none' ? null : expectedShaArg;
 const EXPECTED_WEIGHTS_SHA256 = argVal('--expected-weights-sha', null);
+const EXPECTED_COMMIT = argVal('--expected-commit', null);
+const EXPECTED_IMAGE_SHA256 = argVal('--expected-image-sha', null);
+const EXPECTED_KIT_TREE_SHA256 = argVal('--expected-kit-tree-sha256', null);
 // Puppeteer's 180 s protocol default is shorter than the authorized producer
 // route. Zero explicitly disables that hidden deadline; callers may set a
 // measured finite value when their execution contract has one.
@@ -110,6 +114,15 @@ function validateInvocation() {
   if (EXPECTED_WEIGHTS_SHA256 != null && !/^[0-9a-f]{64}$/i.test(EXPECTED_WEIGHTS_SHA256)) {
     throw new Error('--expected-weights-sha must be a 64-character SHA-256 hex digest');
   }
+  if (EXPECTED_COMMIT != null && !/^[0-9a-f]{40}$/i.test(EXPECTED_COMMIT)) {
+    throw new Error('--expected-commit must be a 40-character git commit SHA');
+  }
+  if (EXPECTED_IMAGE_SHA256 != null && !/^[0-9a-f]{64}$/i.test(EXPECTED_IMAGE_SHA256)) {
+    throw new Error('--expected-image-sha must be a 64-character SHA-256 hex digest');
+  }
+  if (EXPECTED_KIT_TREE_SHA256 != null && !/^[0-9a-f]{64}$/i.test(EXPECTED_KIT_TREE_SHA256)) {
+    throw new Error('--expected-kit-tree-sha256 must be a 64-character SHA-256 hex digest');
+  }
   enterPhase('input');
   if (!fs.existsSync(IMAGE)) throw new Error(`image not found: ${IMAGE}`);
 }
@@ -120,7 +133,7 @@ function writeFailure(failurePhase, error, partial = {}) {
     ok: false,
     arm: ARM_NAME,
     failurePhase,
-    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, expectedGlbSha: EXPECTED_GLB_SHA, expectedWeightsSha256: EXPECTED_WEIGHTS_SHA256, protocolTimeoutMs: PROTOCOL_TIMEOUT_MS, report: REPORT_PATH, journal: JOURNAL_PATH },
+    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, expectedCommit: EXPECTED_COMMIT, expectedImageSha256: EXPECTED_IMAGE_SHA256, expectedKitTreeSha256: EXPECTED_KIT_TREE_SHA256, expectedGlbSha: EXPECTED_GLB_SHA, expectedWeightsSha256: EXPECTED_WEIGHTS_SHA256, protocolTimeoutMs: PROTOCOL_TIMEOUT_MS, report: REPORT_PATH, journal: JOURNAL_PATH },
     // Effective identity as far as it was established when the run died.
     source: source ?? null,
     error: { message: error?.message || String(error), stack: error?.stack || null },
@@ -209,6 +222,9 @@ try {
       image: IMAGE,
       reportPath: REPORT_PATH,
       journalPath: JOURNAL_PATH,
+      expectedCommit: EXPECTED_COMMIT,
+      expectedImageSha256: EXPECTED_IMAGE_SHA256,
+      expectedKitTreeSha256: EXPECTED_KIT_TREE_SHA256,
       expectedGlbSha256: EXPECTED_GLB_SHA,
       expectedWeightsSha256: EXPECTED_WEIGHTS_SHA256,
       protocolTimeoutMs: PROTOCOL_TIMEOUT_MS,
@@ -259,6 +275,12 @@ try {
     harnessRouteClass: 'sf3d.image-to-mesh.webgpu-local.v0',
     effectiveProducerDeviceRoute: { status: 'unobserved', reason: 'pre-navigation identity checkpoint' },
   });
+  if (EXPECTED_COMMIT && commit.toLowerCase() !== EXPECTED_COMMIT.toLowerCase()) {
+    throw new Error(`source commit ${commit} does not match requested ${EXPECTED_COMMIT}`);
+  }
+  if (EXPECTED_IMAGE_SHA256 && source.input.sha256.toLowerCase() !== EXPECTED_IMAGE_SHA256.toLowerCase()) {
+    throw new Error(`input image SHA-256 ${source.input.sha256} does not match requested ${EXPECTED_IMAGE_SHA256}`);
+  }
   if (EXPECTED_WEIGHTS_SHA256 && !weightsStat) throw new Error('requested --expected-weights-sha but public/weights.bin is missing');
   if (EXPECTED_WEIGHTS_SHA256 && source.weightArtifact.sha256.toLowerCase() !== EXPECTED_WEIGHTS_SHA256.toLowerCase()) {
     throw new Error(`weights.bin SHA-256 ${source.weightArtifact.sha256} does not match requested ${EXPECTED_WEIGHTS_SHA256}`);
@@ -286,6 +308,9 @@ try {
     },
   };
   journal.append('effective-package-identity', source.kitIdentity);
+  if (EXPECTED_KIT_TREE_SHA256 && installedKitTree.sha256.toLowerCase() !== EXPECTED_KIT_TREE_SHA256.toLowerCase()) {
+    throw new Error(`installed kit tree SHA-256 ${installedKitTree.sha256} does not match requested ${EXPECTED_KIT_TREE_SHA256}`);
+  }
   completePhase('kit-identity', source.kitIdentity);
 
   // --- Serve the checkout ---
@@ -622,6 +647,9 @@ try {
   durable.execution = {
     requestedProtocolTimeoutMs: PROTOCOL_TIMEOUT_MS,
     effectiveProtocolTimeout: PROTOCOL_TIMEOUT_MS === 0 ? 'disabled' : 'finite',
+    expectedCommit: EXPECTED_COMMIT,
+    expectedImageSha256: EXPECTED_IMAGE_SHA256,
+    expectedKitTreeSha256: EXPECTED_KIT_TREE_SHA256,
     expectedWeightsSha256: EXPECTED_WEIGHTS_SHA256,
     effectiveWeightsSha256: source.weightArtifact?.sha256 ?? null,
   };

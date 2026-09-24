@@ -43,17 +43,24 @@ const cases = [
   ['vite start', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'vite-start' }, 'vite-start', /injected failure at vite-start/],
   ['browser launch', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'browser-launch' }, 'browser-launch', /injected failure at browser-launch/],
   ['browser evaluation', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'browser-evaluation' }, 'browser-evaluation', /injected failure at browser-evaluation/],
+  // Fail-first source/input/package identity assertions. The pre-fix harness
+  // ignores these expectations and is stopped safely at vite-start, before
+  // Chromium launches or any model/GPU work can begin.
+  ['wrong expected source revision', ['--allow-dirty', '--expected-commit', '0'.repeat(40)], { SF3D_WITNESS_INJECT_FAILURE: 'vite-start' }, 'source-identity', /source commit .* does not match requested/],
+  ['wrong expected input digest', ['--allow-dirty', '--expected-image-sha', '0'.repeat(64)], { SF3D_WITNESS_INJECT_FAILURE: 'vite-start' }, 'source-identity', /input image SHA-256 .* does not match requested/],
+  ['wrong expected installed kit tree', ['--allow-dirty', '--expected-kit-tree-sha256', '0'.repeat(64)], { SF3D_WITNESS_INJECT_FAILURE: 'vite-start' }, 'kit-identity', /installed kit tree SHA-256 .* does not match requested/],
 ];
 for (const [name, args, env, phase, re] of cases) {
-  const report = path.join(tmp, `product-${phase}.json`);
-  const journal = path.join(journalRoot, `product-${phase}.jsonl`);
+  const caseSlug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const report = path.join(tmp, `product-${caseSlug}.json`);
+  const journal = path.join(journalRoot, `product-${caseSlug}.jsonl`);
   const r = run('smoke_product_route.mjs', [...args, '--report', report, '--journal', journal], env);
   assert.notEqual(r.status, 0, `${name}: harness must fail`);
   assert.ok(fs.existsSync(report), `${name}: failure report must exist (stderr: ${r.stderr.slice(0, 300)})`);
   const d = readReport(report);
   assert.equal(d.ok, false); assert.equal(d.schema, 'sf3d.product-route-witness-failure.v0');
-  assert.equal(d.failurePhase, phase, `${name}: names its phase`);
-  assert.match(d.error.message, re);
+  assert.equal(d.failurePhase, phase, `${name}: names its phase (stderr: ${r.stderr.slice(0, 500)})`);
+  assert.match(d.error.message, re, `${name}: reports its expected failure (stderr: ${r.stderr.slice(0, 500)})`);
   assert.equal(d.requested.report, report, 'requested report path recorded');
   if (phase === 'kit-identity' || phase === 'vite-start' || phase === 'browser-launch' || phase === 'browser-evaluation') {
     assert.match(d.source.commit, /^[0-9a-f]{40}$/, `${name}: effective source identity recorded once established`);
@@ -93,6 +100,22 @@ for (const [name, args, env, phase, re] of cases) {
     assert.equal(identity.harnessRouteClass, 'sf3d.image-to-mesh.webgpu-local.v0');
     assert.equal(identity.routeId, undefined, 'pre-navigation state must not assert an effective route id');
     assert.equal(identity.effectiveProducerDeviceRoute?.status, 'unobserved');
+  }
+  if (name === 'wrong expected source revision') {
+    assert.equal(d.requested.expectedCommit, '0'.repeat(40));
+    assert.match(d.source.commit, /^[0-9a-f]{40}$/);
+    assert.notEqual(d.source.commit, d.requested.expectedCommit);
+  }
+  if (name === 'wrong expected input digest') {
+    assert.equal(d.requested.expectedImageSha256, '0'.repeat(64));
+    assert.match(d.source.input.sha256, /^[0-9a-f]{64}$/);
+    assert.notEqual(d.source.input.sha256, d.requested.expectedImageSha256);
+  }
+  if (name === 'wrong expected installed kit tree') {
+    assert.equal(d.requested.expectedKitTreeSha256, '0'.repeat(64));
+    assert.match(d.source.kitIdentity.installedTreeSha256, /^[0-9a-f]{64}$/);
+    assert.equal(d.source.kitIdentity.version, d.source.kitVersion, 'tree identity disambiguates same-version installs');
+    assert.notEqual(d.source.kitIdentity.installedTreeSha256, d.requested.expectedKitTreeSha256);
   }
   console.log(`ok  product-route witness: ${name} → durable report at phase ${phase}`);
 }
