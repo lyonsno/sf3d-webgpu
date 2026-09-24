@@ -372,7 +372,13 @@ try {
   }
   if (!ready) throw new Error('app did not reach Ready within 240s');
   completePhase('page-load', { status: 'Ready' });
-  const executedKitModules = await browserModuleCapture.snapshot();
+  enterPhase('browser-kit-identity-capture');
+  await page.evaluate(() => import('/tools/browser_kit_identity.js'));
+  const executedKitModuleCapture = await browserModuleCapture.snapshot();
+  completePhase('browser-kit-identity-capture', {
+    moduleCount: executedKitModuleCapture.modules.length,
+    producerBinding: executedKitModuleCapture.producerBinding,
+  });
   await page.evaluate(() => {
     const device = window._sf3d_device;
     if (device?.lost && window.__sf3dParentPhase) {
@@ -391,7 +397,7 @@ try {
 
   // --- The witnessed run ---
   enterPhase('witness');
-  const raw = await page.evaluate(async ({ armSpec, contend, contendSame, expectedDutyCounts, executedKitModules }) => {
+  const raw = await page.evaluate(async ({ armSpec, contend, contendSame, expectedDutyCounts, executedKitModuleCapture }) => {
     await window.__sf3dParentPhase({ type: 'phase-entered', phase: 'product-route' });
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const {
@@ -408,7 +414,7 @@ try {
     if (!device || !weights || !pipelines || !img) throw new Error('page state missing (device/weights/pipelines/image)');
     if (!producer) throw new Error('page state missing (_sf3d_producer) for producer route identity');
     if (producer.device !== device) throw new Error('producer device is not window._sf3d_device; refusing route identity substitution');
-    const browserKit = await readBrowserKitIdentity({ executedModules: executedKitModules });
+    const browserKit = await readBrowserKitIdentity({ executedModuleCapture: executedKitModuleCapture });
     const producerRoute = {
       invocation: contendSame ? 'producer.run' : 'direct-full-pipeline',
       deviceRelation: producer.device === device ? 'producer-device===window._sf3d_device' : 'mismatch',
@@ -624,7 +630,7 @@ try {
         userAgent: navigator.userAgent,
       },
     };
-  }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME, expectedDutyCounts: EXPECTED_DUTY_COUNTS, executedKitModules });
+  }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME, expectedDutyCounts: EXPECTED_DUTY_COUNTS, executedKitModuleCapture });
 
   if (pageErrors.length) throw new Error(`page errors during run: ${pageErrors.join(' | ')}`);
   completePhase('witness', { outputSha256: raw.output.glbSha256, outputBytes: raw.output.glbBytes });

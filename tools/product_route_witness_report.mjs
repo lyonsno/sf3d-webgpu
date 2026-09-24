@@ -16,7 +16,7 @@
  *   - a non-finite gap; a max-gap budget breach.
  */
 
-export const PRODUCT_ROUTE_WITNESS_SCHEMA = 'sf3d.product-route-witness.v1';
+export const PRODUCT_ROUTE_WITNESS_SCHEMA = 'sf3d.product-route-witness.v2';
 export const CANONICAL_DEMO_CHAIR_GLB_SHA256 =
   'e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7';
 /** Measured cooperative duty counts for the product route on demo_chair.png (kit submittedGpuDutyCount). */
@@ -327,6 +327,7 @@ export function acceptProductRouteWitness(report, expectations = {}) {
         for (const module of browserKit.executedModules) {
           if (typeof module.url !== 'string' || !module.url.includes('/node_modules/')
             || typeof module.scriptId !== 'string' || !module.scriptId
+            || !Number.isInteger(module.executionContextId)
             || !Number.isInteger(module.bytes) || module.bytes <= 0
             || !/^[0-9a-f]{64}$/i.test(module.sha256 ?? '')) {
             errors.push('Chrome-executed kit module source is missing or invalid');
@@ -335,7 +336,25 @@ export function acceptProductRouteWitness(report, expectations = {}) {
         }
       }
       const actualKitModuleCount = browserKit.executedModules?.filter(module => /@kaminos_webgpu-inference-kit|\/node_modules\/@kaminos\/webgpu-inference-kit\//.test(module.url ?? '')).length ?? 0;
-      if (actualKitModuleCount < 1 || !Number.isInteger(browserKit.kitModuleCount) || browserKit.kitModuleCount !== actualKitModuleCount) errors.push('Chrome-executed kit module source is missing or miscounted');
+      const binding = browserKit.producerBinding;
+      const kitRecord = browserKit.executedModules?.find(module => module.scriptId === binding?.kitModuleScriptId);
+      if (actualKitModuleCount !== 1 || !Number.isInteger(browserKit.kitModuleCount) || browserKit.kitModuleCount !== actualKitModuleCount
+        || !binding || binding.linkBasis !== 'same-context-static-import-url'
+        || !Number.isInteger(binding.executionContextId)
+        || binding.producerModuleExecutionContextId !== binding.executionContextId
+        || binding.identityHelperExecutionContextId !== binding.executionContextId
+        || typeof binding.producerModuleScriptId !== 'string' || !binding.producerModuleScriptId
+        || typeof binding.identityHelperScriptId !== 'string' || !binding.identityHelperScriptId
+        || typeof binding.kitModuleUrl !== 'string' || binding.kitModuleUrl !== kitRecord?.url
+        || binding.producerImportsKitModuleUrl !== kitRecord?.url
+        || binding.identityHelperImportsKitModuleUrl !== kitRecord?.url
+        || !binding.producerModuleUrl?.endsWith('/src/lib/sf3d_producer.js')
+        || !binding.identityHelperModuleUrl?.endsWith('/tools/browser_kit_identity.js')) {
+        errors.push('Chrome-executed producer kit-module binding is missing, ambiguous, or invalid');
+      }
+      if (kitRecord && browserKit.executedModules.some(module => module.executionContextId !== binding.executionContextId)) {
+        errors.push('Chrome-executed kit module set spans multiple execution contexts');
+      }
       if (!/^[0-9a-f]{64}$/i.test(browserKit.executedModuleSetSha256 ?? '')) errors.push('Chrome-executed module set digest is missing or invalid');
       if (typeof browserKit.witnessModuleUrl !== 'string' || !browserKit.witnessModuleUrl) errors.push('browser kit witness module URL is missing');
     }
