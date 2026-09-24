@@ -52,6 +52,22 @@ function parseHeader(buffer) {
   return { tensors, headerSize };
 }
 
+export function summarizeWeightRepresentation(tensors) {
+  const source = { fp32: { tensorCount: 0, bytes: 0 }, fp16: { tensorCount: 0, bytes: 0 } };
+  for (const [name, info] of tensors) {
+    const format = info.dtype === 0 ? 'fp32' : info.dtype === 1 ? 'fp16' : null;
+    if (!format) throw new Error(`Unsupported tensor dtype ${info.dtype} for ${name}`);
+    source[format].tensorCount += 1;
+    source[format].bytes += info.size;
+  }
+  return {
+    status: 'observed-from-loaded-weight-header',
+    sourceEncoding: source,
+    gpuStorage: { format: 'fp32', bytesPerElement: 4, note: 'FP16 payloads are expanded to FP32 by extractTensor before GPU upload' },
+    lazyRawPayload: { format: 'source-encoded', note: 'unconsumed and lazy-reader tensors may remain in source encoding' },
+  };
+}
+
 function fp16ToFp32(h) {
   const sign = (h >> 15) & 1;
   const exp = (h >> 10) & 0x1f;
@@ -188,7 +204,7 @@ function extractBytes(chunkedBuffer, offset, size) {
 /**
  * Load SF3D weights and organize into component structure.
  */
-export async function loadWeights(device, url, onProgress) {
+export async function loadWeights(device, url, onProgress, onRepresentation) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Failed to fetch weights: ${response.status}`);
 
@@ -214,6 +230,7 @@ export async function loadWeights(device, url, onProgress) {
   const headerBytes = extractBytes(chunkedBuffer, 0, Math.min(received, 1024 * 1024));
   const headerBuf = headerBytes.slice().buffer;
   const { tensors } = parseHeader(headerBuf);
+  if (onRepresentation) await onRepresentation(summarizeWeightRepresentation(tensors));
 
   const ownedBuffers = new Set();
   try {

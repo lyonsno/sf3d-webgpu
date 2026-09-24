@@ -228,13 +228,33 @@ export async function createSf3dProducer({
   weightsUrl = 'weights.bin',
   workers = null,
   onWeightsProgress = null,
+  onPhase = null,
   commit = (typeof __COMMIT_HASH__ !== 'undefined' ? __COMMIT_HASH__ : 'dev'),
 } = {}) {
+  const phase = async (name, state, details = {}) => {
+    if (typeof onPhase === 'function') {
+      await onPhase({ phase: name, state, atMs: performance.now(), ...details });
+    }
+  };
+  await phase('gpu-device-init', 'entered', { deviceInjected: Boolean(device) });
   const gpu = await initGPU(device ? { device, adapter } : {});
+  await phase('gpu-device-init', 'completed', { deviceInjected: gpu.injected });
   const dev = gpu.device;
+  await phase('backend-description', 'entered');
   const backend = await describeBackend(gpu.adapter, dev);
+  await phase('backend-description', 'completed', {
+    adapterName: backend.info.description || backend.info.device || null,
+    limits: backend.limits,
+  });
   const ownsWeights = weights == null;
-  const modelWeights = weights ?? await loadWeights(dev, weightsUrl, onWeightsProgress || undefined);
+  await phase('weight-load', 'entered', { source: ownsWeights ? 'producer' : 'host-injected', weightsUrl: ownsWeights ? resolveWeightsUrl(weightsUrl) : null });
+  const modelWeights = weights ?? await loadWeights(
+    dev,
+    weightsUrl,
+    onWeightsProgress || undefined,
+    (representation) => phase('weight-representation', 'observed', representation),
+  );
+  await phase('weight-load', 'completed', { source: ownsWeights ? 'producer' : 'host-injected' });
   modelWeights._assertActive?.(dev);
   // Explicit resource identity for a mounting host: where the weights came
   // from and which worker module URLs must be reachable from the artifact.
@@ -251,8 +271,12 @@ export async function createSf3dProducer({
   let foreground;
   let retainedClipPrepWorker = false;
   try {
+    await phase('pipeline-construction', 'entered');
     pipelines = initPipelines(dev);
+    await phase('pipeline-construction', 'completed', { pipelineNames: Object.keys(pipelines) });
+    await phase('worker-construction', 'entered', { source: workers == null ? 'producer' : 'host-injected' });
     routeWorkers = workers ?? createProductRouteWorkers();
+    await phase('worker-construction', 'completed', { workerNames: Object.keys(routeWorkers ?? {}) });
     if (routeWorkers?.clipPrepWorker) {
       retainClipPrepWorker(routeWorkers.clipPrepWorker, modelWeights);
       retainedClipPrepWorker = true;
@@ -310,7 +334,7 @@ export async function createSf3dProducer({
     },
     foregroundSnapshot() { return foreground.snapshot(); },
 
-    async run(image, { runId = null, onProgress = null, routeOverrides = {}, signal = null } = {}) {
+    async run(image, { runId = null, onProgress = null, onPhase: runPhase = onPhase, routeOverrides = {}, signal = null } = {}) {
       if (image == null) throw new Error('sf3d run requires an image (HTMLImageElement/ImageBitmap-like)');
       if (signal?.aborted) throw new Error('sf3d run aborted before start');
       runSequence += 1;
@@ -329,7 +353,7 @@ export async function createSf3dProducer({
       const startedAtMs = performance.now();
       const progress = (message) => { lastProgress = String(message); if (onProgress) onProgress(message); };
       try {
-        result = await runFullPipelineToGlb(dev, pipelines, modelWeights, image, options, progress);
+        result = await runFullPipelineToGlb(dev, pipelines, modelWeights, image, { ...options, onPhase: runPhase }, progress);
       } catch (error) {
         await finishProducerRunWithEvidence({ prepared, pipelineFailed: true, pipelineError: error,
           runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit });

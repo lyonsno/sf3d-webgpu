@@ -171,6 +171,11 @@ export function initPipelines(device) {
  */
 export async function runInference(device, pipelines, weights, imageElement, onProgress, options = {}) {
   const report = (msg) => { if (onProgress) onProgress(msg); console.log(msg); };
+  const phase = async (name, state, details = {}) => {
+    if (typeof options.onPhase === 'function') {
+      await options.onPhase({ phase: name, state, atMs: performance.now(), ...details });
+    }
+  };
   const _stageTimings = {};
   let _stageStart;
 
@@ -234,6 +239,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   const _markSpan = (name, start) => { if (_spans) _spans.push({ name, start, end: performance.now() }); };
 
   // 1. Preprocess image (CPU)
+  await phase('image-preprocess', 'entered');
   _stageStart = performance.now();
   report('Preprocessing image...');
   const imageData = await withForegroundScope(options,
@@ -278,8 +284,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   _stageTimings['image-preprocess'] = performance.now() - _stageStart;
   _markSpan('image-preprocess', _stageStart);
+  await phase('image-preprocess', 'completed', { durationMs: _stageTimings['image-preprocess'] });
 
   // 3. DINOv2 image tokenization (GPU)
+  await phase('dinov2-tokenizer', 'entered', { cooperative: cooperativeDino, schedulingMode: dinoSchedulingMode, chunkBlocks: dinoChunkBlocks });
   _stageStart = performance.now();
   let dinov2Result;
   if (cooperativeDino) {
@@ -350,8 +358,18 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   _stageTimings['dinov2-tokenizer'] = performance.now() - _stageStart;
   _markSpan('dinov2-tokenizer', _stageStart);
+  await phase('dinov2-tokenizer', 'completed', {
+    durationMs: _stageTimings['dinov2-tokenizer'],
+    tokenShape: { count: dinov2Result.N, width: 1024 },
+  });
 
   // 4. Two-stream backbone (GPU)
+  await phase('two-stream-backbone', 'entered', {
+    cooperative: cooperativeTwoStream,
+    schedulingMode: twoStreamSchedulingMode,
+    dutyGranularity: twoStreamDutyGranularity,
+    linearRowsPerDuty: twoStreamLinearRowsPerDuty,
+  });
   _stageStart = performance.now();
   report('Running two-stream backbone...');
 
@@ -522,8 +540,16 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   _stageTimings['two-stream-backbone'] = performance.now() - _stageStart;
   _markSpan('two-stream-backbone', _stageStart);
+  await phase('two-stream-backbone', 'completed', { durationMs: _stageTimings['two-stream-backbone'] });
 
   // 5. PixelShuffle post-processing (counted as part of triplane-decode)
+  await phase('post-processor', 'entered', {
+    cooperative: cooperativePostProcessor,
+    schedulingMode: postProcessorSchedulingMode,
+    dutyGranularity: postProcessorDutyGranularity,
+    completionPolicy: postProcessorCompletionPolicy,
+    channelsPerDuty: postProcessorChannelsPerDuty,
+  });
   _stageStart = performance.now();
   let triplaneResult;
   if (cooperativePostProcessor) {
@@ -565,6 +591,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     await device.queue.onSubmittedWorkDone();
   }
   _markSpan('post-processor', _stageStart);
+  await phase('post-processor', 'completed', { durationMs: performance.now() - _stageStart });
 
   // Diagnostic: check backbone output
   if (DEBUG) {
@@ -627,6 +654,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
 
   // 6. Triplane query + decoder (GPU) — still part of triplane-decode timing
+  await phase('triplane-decode', 'entered');
   report('Querying triplane and decoding...');
 
   // Load tet grid data: the whole grid for the inline marching tet, or only
@@ -708,8 +736,10 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   _stageTimings['triplane-decode'] = performance.now() - _stageStart;
   _markSpan('triplane-decode', _stageStart);
+  await phase('triplane-decode', 'completed', { durationMs: _stageTimings['triplane-decode'] });
 
   // 7. Marching tetrahedra (CPU)
+  await phase('marching-tet', 'entered', { worker: options.marchingTetWorker ? 'worker' : 'main' });
   _stageStart = performance.now();
   report('Extracting mesh...');
   // Grid vertices need to be in model space with deformation applied
@@ -730,6 +760,11 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   _stageTimings['marching-tet'] = performance.now() - _stageStart;
   _markSpan('marching-tet', _stageStart);
+  await phase('marching-tet', 'completed', {
+    durationMs: _stageTimings['marching-tet'],
+    numVertices: mesh.numVertices,
+    numFaces: mesh.numFaces,
+  });
 
   // Mesh vertices are already in bbox space (from gridPositions which was pre-scaled)
   return {

@@ -55,6 +55,11 @@ async function runUvUnwrap(vertices, faces, numVertices, numFaces, worker, worke
 
 export async function runFullPipelineToGlb(device, pipelines, weights, inputImage, options = {}, onProgress) {
   const report = (msg) => { if (onProgress) onProgress(msg); };
+  const phase = async (name, state, details = {}) => {
+    if (typeof options.onPhase === 'function') {
+      await options.onPhase({ phase: name, state, atMs: performance.now(), ...details });
+    }
+  };
   const t0 = performance.now();
 
   // Absolute-timestamp stage spans on the same performance.now() clock as any
@@ -66,11 +71,14 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   const timed = async (name, fn) => { const s = performance.now(); const r = await fn(); mark(name, s, performance.now()); return r; };
 
   // Step 1: inference → untextured mesh + triplane data (+ optional DINO payload)
+  await phase('inference', 'entered');
   const meshResult = await runInference(
     device, pipelines, weights, inputImage, report,
     { ...options, recordStageSpans: spans });
+  await phase('inference', 'completed');
 
   // Step 2: CLIP material estimation (exact PyTorch preprocessing order)
+  await phase('clip-material-estimate', 'entered');
   const clipStart = performance.now();
   const clipCanvas = document.createElement('canvas');
   clipCanvas.width = COND_SIZE;
@@ -84,20 +92,25 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     device, clipRaw, COND_SIZE, COND_SIZE, weights,
     { clipPrepWorker: options.clipPrepWorker, workerTimeoutMs: options.workerTimeoutMs, withForeground: options.withForeground });
   mark('clip-material-estimate', clipStart, performance.now());
+  await phase('clip-material-estimate', 'completed');
 
   // Step 3: UV unwrap (CPU). Optionally offloaded to a Web Worker
   // (options.uvUnwrapWorker) — the second-largest CPU foreground gap (~216ms);
   // byte-identical output (same unwrapUV code).
+  await phase('uv-unwrap', 'entered');
   const uvResult = await timed('uv-unwrap', () => withForegroundScope(options,
     options.uvUnwrapWorker ? 'uv-unwrap-worker' : 'uv-unwrap',
     () => runUvUnwrap(
       meshResult.vertices, meshResult.faces, meshResult.numVertices, meshResult.numFaces,
       options.uvUnwrapWorker, options.workerTimeoutMs)));
+  await phase('uv-unwrap', 'completed');
 
   // Step 4: rasterize UV → per-texel 3D positions (CPU, synchronous)
+  await phase('uv-rasterize', 'entered');
   const rasterResult = await timed('uv-rasterize', () => withForegroundScope(options, 'uv-rasterize', () => rasterizeUV(
     uvResult.uvs, uvResult.newVertices, uvResult.newFaces,
     uvResult.newNumFaces, TEX_RESOLUTION, uvResult.faceAssignment)));
+  await phase('uv-rasterize', 'completed');
 
   // Step 5: texture bake (GPU triplane query). Optionally cooperative — batch
   // the per-texel decode into yieldable GPU duties (options.cooperativeBake).
@@ -130,6 +143,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     meshResult._decoderWeights, rasterResult.positions3D, rasterResult.mask,
     rasterResult.tbnData, TEX_RESOLUTION, bakeOptions);
   let arenaSnapshot = null;
+  await phase('texture-bake', 'entered');
   const bakeResult = await timed('texture-bake', async () => {
     if (options.decoderArena && options.cooperativeBake) {
       const maxBatch = options.bakeBatchTexels || 16384;
@@ -143,6 +157,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     }
     return runBake();
   });
+  await phase('texture-bake', 'completed', { arenaSnapshot });
   if (bakeReport && bakeOptions.finalizeTelemetry) {
     bakeReport = Object.freeze({
       ...bakeReport,
@@ -154,11 +169,13 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   }
 
   // Step 6: GLB export
+  await phase('glb-export', 'entered');
   const glb = await timed('glb-export', () => withForegroundScope(options, 'glb-export', () => exportGLB(
     uvResult.newVertices, uvResult.newNormals, uvResult.newFaces, uvResult.uvs,
     bakeResult.albedo, bakeResult.normalMap,
     uvResult.newNumVertices, uvResult.newNumFaces, TEX_RESOLUTION,
     roughness, metallic)));
+  await phase('glb-export', 'completed', { glbBytes: glb.byteLength });
 
   // Which CPU phases ran off the main thread. Every worker dispatcher is
   // fail-loud (callWorker never falls back silently), so a requested worker is

@@ -19,6 +19,9 @@ import { createHash } from 'node:crypto';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf3d-failure-report-'));
+const journalParent = path.join(os.homedir(), '.local/state/sf3d');
+fs.mkdirSync(journalParent, { recursive: true });
+const journalRoot = fs.mkdtempSync(path.join(journalParent, 'test-witness-journal-'));
 const run = (script, args, env = {}) => spawnSync(process.execPath, [path.join(REPO, 'tools', script), ...args], {
   cwd: REPO, env: { ...process.env, ...env }, encoding: 'utf8', timeout: 120000,
 });
@@ -35,7 +38,8 @@ const cases = [
 ];
 for (const [name, args, env, phase, re] of cases) {
   const report = path.join(tmp, `product-${phase}.json`);
-  const r = run('smoke_product_route.mjs', [...args, '--report', report], env);
+  const journal = path.join(journalRoot, `product-${phase}.jsonl`);
+  const r = run('smoke_product_route.mjs', [...args, '--report', report, '--journal', journal], env);
   assert.notEqual(r.status, 0, `${name}: harness must fail`);
   assert.ok(fs.existsSync(report), `${name}: failure report must exist (stderr: ${r.stderr.slice(0, 300)})`);
   const d = readReport(report);
@@ -46,7 +50,31 @@ for (const [name, args, env, phase, re] of cases) {
   if (phase === 'kit-identity' || phase === 'vite-start' || phase === 'browser-launch') {
     assert.match(d.source.commit, /^[0-9a-f]{40}$/, `${name}: effective source identity recorded once established`);
   }
+  if (phase === 'browser-launch') {
+    assert.ok(fs.existsSync(journal), 'parent journal survives a browser-launch failure before primary output');
+    const events = fs.readFileSync(journal, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+    assert.equal(events[0].type, 'invocation-requested');
+    assert.ok(events.some(event => event.type === 'effective-identity'));
+    const effectiveKit = events.find(event => event.type === 'effective-package-identity');
+    assert.match(effectiveKit.payload.installedTreeSha256, /^[0-9a-f]{64}$/);
+    assert.equal(effectiveKit.payload.version, d.source.kitVersion);
+    assert.ok(events.some(event => event.type === 'phase-completed' && event.payload.phase === 'kit-identity'));
+    assert.ok(events.some(event => event.type === 'phase-entered' && event.payload.phase === 'browser-launch'));
+    assert.ok(events.some(event => event.payload.phase === 'browser-launch' && event.payload.memoryObservation?.method));
+    assert.equal(events.at(-1).type, 'terminal');
+    assert.equal(events.at(-1).payload.failurePhase, 'browser-launch');
+    assert.equal(events.at(-1).payload.status, 'failed');
+    assert.equal(d.parentPhaseJournal.lastEnteredPhase, 'browser-launch');
+    assert.equal(d.parentPhaseJournal.lastCompletedPhase, 'vite-start');
+    assert.equal(d.parentPhaseJournal.integrityOk, true);
+  }
   console.log(`ok  product-route witness: ${name} → durable report at phase ${phase}`);
+}
+
+if (process.env.SF3D_FAILURE_REPORT_PRODUCT_ONLY === '1') {
+  fs.rmSync(journalRoot, { recursive: true, force: true });
+  console.log('\nPRODUCT WITNESS FAILURE-JOURNAL CONTRACT PASSED');
+  process.exit(0);
 }
 
 // --- Parity smoke ---
@@ -134,3 +162,4 @@ function writeBoundReference(prefix, { tamper = null } = {}) {
 }
 
 console.log('\nWITNESS FAILURE REPORT CONTRACT PASSED');
+fs.rmSync(journalRoot, { recursive: true, force: true });

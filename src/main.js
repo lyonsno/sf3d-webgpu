@@ -41,6 +41,9 @@ async function init() {
     const t0 = performance.now();
     let announced = false;
     producer = await createSf3dProducer({
+      onPhase: typeof window.__sf3dParentPhase === 'function'
+        ? (event) => window.__sf3dParentPhase(event)
+        : null,
       onWeightsProgress: (received, total) => {
         if (!announced) { announced = true; }
         if (total > 0) {

@@ -32,7 +32,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
+import crypto from 'node:crypto';
 import { spawn, execSync } from 'node:child_process';
+import { createParentPhaseJournal, replayParentPhaseJournal } from './parent_phase_journal.mjs';
 import {
   CANONICAL_DEMO_CHAIR_DUTY_COUNTS,
   CANONICAL_DEMO_CHAIR_GLB_SHA256,
@@ -53,6 +55,10 @@ const IMAGE = path.resolve(argVal('--image', path.join(REPO, 'public/demo_chair.
 const LABEL = argVal('--label', '');
 const ARM_NAME = `${ARM.startsWith('{') ? 'custom' : ARM}${CONTEND ? '+contend' : ''}${CONTEND_SAME ? '+contend-same-device' : ''}`;
 const REPORT_PATH = path.resolve(argVal('--report', `/tmp/sf3d-product-route-witness-${ARM_NAME}.json`));
+const INVOCATION_ID = `sf3d-witness-${Date.now()}-${process.pid}`;
+const JOURNAL_PATH = path.resolve(argVal('--journal', path.join(
+  os.homedir(), '.local/state/sf3d/parent-phase-journals', `${INVOCATION_ID}.jsonl`,
+)));
 const expectedShaArg = argVal('--expected-glb-sha', CANONICAL_DEMO_CHAIR_GLB_SHA256);
 const EXPECTED_GLB_SHA = expectedShaArg === 'none' ? null : expectedShaArg;
 // The product-default arm on the canonical image must also reproduce the
@@ -68,10 +74,21 @@ const KNOWN_ARMS = ['product-default', 'no-workers', 'workers-only', 'monolithic
 // its start, before doing any real work.
 const INJECT_FAILURE = process.env.SF3D_WITNESS_INJECT_FAILURE || null;
 let phase = 'arguments';
-const enterPhase = (name) => {
+let journal = null;
+const memoryObservation = () => ({
+  scope: 'witness-node-process-and-host',
+  method: 'process.memoryUsage().rss and os.freemem/os.totalmem',
+  units: 'bytes',
+  processRssBytes: process.memoryUsage().rss,
+  hostFreeBytes: os.freemem(),
+  hostTotalBytes: os.totalmem(),
+});
+const enterPhase = (name, details = {}) => {
   phase = name;
+  journal?.append('phase-entered', { phase: name, ...details, memoryObservation: memoryObservation() });
   if (INJECT_FAILURE === name) throw new Error(`injected failure at ${name}`);
 };
+const completePhase = (name, details = {}) => journal?.append('phase-completed', { phase: name, ...details, memoryObservation: memoryObservation() });
 function validateInvocation() {
   enterPhase('arguments');
   if (!KNOWN_ARMS.includes(ARM) && !ARM.startsWith('{')) {
@@ -91,15 +108,26 @@ function writeFailure(failurePhase, error, partial = {}) {
     ok: false,
     arm: ARM_NAME,
     failurePhase,
-    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, expectedGlbSha: EXPECTED_GLB_SHA, report: REPORT_PATH },
+    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, expectedGlbSha: EXPECTED_GLB_SHA, report: REPORT_PATH, journal: JOURNAL_PATH },
     // Effective identity as far as it was established when the run died.
     source: source ?? null,
     error: { message: error?.message || String(error), stack: error?.stack || null },
     partial,
     generatedAt: new Date().toISOString(),
   };
+  failureDocument = failure;
   fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
   fs.writeFileSync(REPORT_PATH, JSON.stringify(failure, null, 2));
+  if (journal) {
+    journal.append('failure-recorded', {
+      failurePhase,
+      errorName: error?.name || null,
+      message: failure.error.message,
+      stack: error?.stack || null,
+      source: source ?? null,
+      partial,
+    });
+  }
   console.error(`\nWITNESS FAILED at ${phase}: ${failure.error.message}\nreport: ${REPORT_PATH}`);
 }
 
@@ -110,26 +138,122 @@ function allocatePort() {
   });
 }
 
+function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+async function sha256Tree(root) {
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) files.push(absolute);
+      else throw new Error(`unsupported installed-package entry: ${absolute}`);
+    }
+  };
+  visit(root);
+  files.sort();
+  const hash = crypto.createHash('sha256');
+  for (const file of files) {
+    hash.update(path.relative(root, file));
+    hash.update('\0');
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(file);
+      stream.on('data', chunk => hash.update(chunk));
+      stream.on('error', reject);
+      stream.on('end', resolve);
+    });
+    hash.update('\0');
+  }
+  return { sha256: hash.digest('hex'), files: files.map(file => path.relative(root, file)) };
+}
+
 let source = null;
 let commit = null, dirty = null, kitVersion = null;
 const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch { /* gone */ } } };
 let browser = null;
+let terminalStatus = 'failed';
+let terminalError = null;
+let failureDocument = null;
+let memoryHeartbeat = null;
 
 try {
+  journal = createParentPhaseJournal({
+    journalPath: JOURNAL_PATH,
+    invocationId: INVOCATION_ID,
+    requested: {
+      routeId: 'sf3d.image-to-mesh.webgpu-local.v0',
+      arm: ARM,
+      contend: CONTEND,
+      contendSameDevice: CONTEND_SAME,
+      image: IMAGE,
+      reportPath: REPORT_PATH,
+      journalPath: JOURNAL_PATH,
+      expectedGlbSha256: EXPECTED_GLB_SHA,
+    },
+  });
   validateInvocation();
+  completePhase('arguments');
+  completePhase('input', { imagePath: IMAGE, bytes: fs.statSync(IMAGE).size });
 
   // --- Source identity (effective, not requested) ---
   enterPhase('source-identity');
   commit = execSync('git rev-parse HEAD', { cwd: REPO }).toString().trim();
   dirty = execSync('git status --porcelain', { cwd: REPO }).toString().trim().length > 0;
-  source = { commit, dirty, kitVersion: null, hostname: os.hostname(), node: process.version, label: LABEL || null };
+  const inputStat = fs.statSync(IMAGE);
+  const inputSha256 = await sha256File(IMAGE);
+  const weightsPath = path.join(REPO, 'public/weights.bin');
+  const weightsStat = fs.existsSync(weightsPath) ? fs.statSync(weightsPath) : null;
+  source = {
+    commit,
+    dirty,
+    kitVersion: null,
+    hostname: os.hostname(),
+    node: process.version,
+    label: LABEL || null,
+    input: { path: fs.realpathSync(IMAGE), bytes: inputStat.size, sha256: inputSha256 },
+    weightArtifact: weightsStat ? {
+      path: fs.realpathSync(weightsPath),
+      bytes: weightsStat.size,
+      modifiedAtMs: weightsStat.mtimeMs,
+      sha256: null,
+      sha256Status: 'not-computed',
+    } : { path: weightsPath, status: 'missing-before-browser-load' },
+    weightRepresentation: { status: 'not-exposed-by-current-loader', format: null },
+  };
+  journal.append('effective-identity', { ...source, routeId: 'sf3d.image-to-mesh.webgpu-local.v0' });
+  completePhase('source-identity', { commit, dirty });
   if (dirty && !ALLOW_DIRTY) {
     throw new Error('worktree is dirty; commit first or pass --allow-dirty (the report will still record dirty=true)');
   }
   enterPhase('kit-identity');
-  kitVersion = JSON.parse(fs.readFileSync(path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit/package.json'), 'utf8')).version;
-  source = { ...source, kitVersion };
+  const kitPath = path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit');
+  const installedKit = JSON.parse(fs.readFileSync(path.join(kitPath, 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(REPO, 'package-lock.json'), 'utf8'));
+  const lockKit = lock.packages?.['node_modules/@kaminos/webgpu-inference-kit'] ?? null;
+  const installedKitTree = await sha256Tree(kitPath);
+  kitVersion = installedKit.version;
+  source = {
+    ...source,
+    kitVersion,
+    kitIdentity: {
+      version: installedKit.version,
+      resolved: lockKit?.resolved ?? null,
+      integrity: lockKit?.integrity ?? null,
+      installedTreeSha256: installedKitTree.sha256,
+      installedFiles: installedKitTree.files,
+    },
+  };
+  journal.append('effective-package-identity', source.kitIdentity);
+  completePhase('kit-identity', source.kitIdentity);
 
   // --- Serve the checkout ---
   enterPhase('vite-start');
@@ -141,6 +265,7 @@ try {
     vite.stdout.on('data', d => { if (/Local:|ready/.test(d.toString())) { clearTimeout(to); res(); } });
     vite.on('error', e => { clearTimeout(to); rej(e); });
   });
+  completePhase('vite-start', { port });
 
   enterPhase('browser-launch');
   browser = await puppeteer.launch({
@@ -152,7 +277,38 @@ try {
       '--no-first-run', '--no-default-browser-check',
     ],
   });
+  completePhase('browser-launch', { browserPid: browser.process()?.pid ?? null });
+  memoryHeartbeat = setInterval(() => {
+    try {
+      journal.append('resource-observation', {
+        phase,
+        observedAt: new Date().toISOString(),
+        memoryObservation: memoryObservation(),
+      });
+    } catch (error) {
+      console.error(`Parent memory observation failed: ${error.message}`);
+    }
+  }, 5000);
+  memoryHeartbeat.unref();
   const page = await browser.newPage();
+  await page.exposeFunction('__sf3dParentPhase', (event) => {
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      throw new TypeError('browser phase event must be an object');
+    }
+    const { type, ...payload } = event;
+    const eventType = type
+      || (event.state === 'entered' ? 'phase-entered' : null)
+      || (event.state === 'completed' ? 'phase-completed' : null)
+      || 'browser-phase-event';
+    if (eventType === 'phase-entered' && typeof event.phase === 'string') phase = event.phase;
+    if (event.phase === 'weight-representation' && event.state === 'observed') {
+      source = { ...source, weightRepresentation: event };
+    }
+    journal.append(eventType, {
+      ...payload,
+      memoryObservation: memoryObservation(),
+    });
+  });
   const pageErrors = [];
   page.on('pageerror', e => { pageErrors.push(e.message); console.error('[pageerror]', e.message); });
   page.on('console', m => { if (m.type() === 'error') console.error('[console.error]', m.text().slice(0, 300)); });
@@ -168,6 +324,15 @@ try {
     await new Promise(r => setTimeout(r, 500));
   }
   if (!ready) throw new Error('app did not reach Ready within 240s');
+  completePhase('page-load', { status: 'Ready' });
+  await page.evaluate(() => {
+    const device = window._sf3d_device;
+    if (device?.lost && window.__sf3dParentPhase) {
+      device.lost.then(info => window.__sf3dParentPhase({
+        type: 'device-lost', reason: info.reason ?? null, message: info.message ?? null,
+      }));
+    }
+  });
 
   const imageB64 = fs.readFileSync(IMAGE).toString('base64');
   await page.evaluate(async (b64) => {
@@ -177,6 +342,7 @@ try {
   // --- The witnessed run ---
   enterPhase('witness');
   const raw = await page.evaluate(async ({ armSpec, contend, contendSame, expectedDutyCounts }) => {
+    await window.__sf3dParentPhase({ type: 'phase-entered', phase: 'product-route' });
     const { runFullPipelineToGlb } = await import('/src/lib/full_pipeline.js');
     const {
       createProductRouteOptions, createProductRouteWorkers, describeProductRouteOptions, terminateProductRouteWorkers,
@@ -310,9 +476,21 @@ try {
     const startMs = performance.now();
     let out, runError = null;
     try {
+      await window.__sf3dParentPhase({
+        type: 'phase-entered', phase: 'full-pipeline',
+        requested: { arm: armSpec, contend, contendSameDevice: contendSame },
+        resolvedRouteOptions: describeProductRouteOptions(options),
+      });
       out = contendSame
         ? await producer.run(img, { runId: `witness:${armSpec.startsWith('{') ? 'custom' : armSpec}`, onProgress: (m) => progress.push(String(m)), routeOverrides: overrides })
-        : await runFullPipelineToGlb(device, pipelines, weights, img, options, (m) => progress.push(String(m)));
+        : await runFullPipelineToGlb(device, pipelines, weights, img, {
+          ...options,
+          onPhase: (event) => window.__sf3dParentPhase(event),
+        }, (m) => progress.push(String(m)));
+      await window.__sf3dParentPhase({
+        type: 'phase-completed', phase: 'full-pipeline',
+        effectiveRouteOptions: describeProductRouteOptions(options),
+      });
     } catch (e) { runError = e; }
     const endMs = performance.now();
     on = false;
@@ -373,6 +551,7 @@ try {
   }, { armSpec: ARM, contend: CONTEND, contendSame: CONTEND_SAME, expectedDutyCounts: EXPECTED_DUTY_COUNTS });
 
   if (pageErrors.length) throw new Error(`page errors during run: ${pageErrors.join(' | ')}`);
+  completePhase('witness', { outputSha256: raw.output.glbSha256, outputBytes: raw.output.glbBytes });
 
   // --- Assemble + judge ---
   enterPhase('assemble');
@@ -399,6 +578,8 @@ try {
   const durable = { ...report, verdict: { ok: verdict.ok, errors: [...verdict.errors] } };
   fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
   fs.writeFileSync(REPORT_PATH, JSON.stringify(durable, null, 2));
+  completePhase('assemble', { verdict: verdict.ok ? 'accepted' : 'rejected' });
+  terminalStatus = verdict.ok ? 'succeeded' : 'rejected';
 
   // --- Summary ---
   const wr = report.cadence.wholeRoute;
@@ -430,9 +611,40 @@ try {
     console.log('\nWITNESS ACCEPTED');
   }
 } catch (err) {
+  terminalError = err;
   writeFailure(phase, err);
   process.exitCode = 1;
 } finally {
-  if (browser) await browser.close().catch(() => {});
+  if (memoryHeartbeat) clearInterval(memoryHeartbeat);
+  if (browser) {
+    try {
+      await browser.close();
+      journal?.append('browser-teardown', { status: 'closed' });
+    } catch (error) {
+      terminalStatus = 'failed';
+      terminalError ??= error;
+      journal?.append('browser-teardown', { status: 'failed', error: error?.message || String(error) });
+    }
+  }
   cleanup();
+  if (journal) {
+    journal.append('terminal', {
+      status: terminalStatus,
+      failurePhase: terminalError ? phase : null,
+      errorName: terminalError?.name || null,
+      message: terminalError?.message || null,
+      reportPath: REPORT_PATH,
+    });
+    journal.close();
+    try {
+      const replay = replayParentPhaseJournal(JOURNAL_PATH);
+      if (fs.existsSync(REPORT_PATH)) {
+        const report = failureDocument ?? JSON.parse(fs.readFileSync(REPORT_PATH, 'utf8'));
+        report.parentPhaseJournal = replay;
+        fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
+      }
+    } catch (error) {
+      console.error(`Could not attach journal replay to final report: ${error.message}`);
+    }
+  }
 }
