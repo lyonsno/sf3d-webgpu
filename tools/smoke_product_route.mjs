@@ -406,6 +406,7 @@ try {
     const producerRoute = {
       invocation: contendSame ? 'producer.run' : 'direct-full-pipeline',
       deviceRelation: producer.device === device ? 'producer-device===window._sf3d_device' : 'mismatch',
+      producerResourcesMatchApp: producer.weights === weights && producer.pipelines === pipelines,
       rendererDeviceRelationship: 'not-observed-by-this-witness',
       producer: {
         routeId: producer.routeId,

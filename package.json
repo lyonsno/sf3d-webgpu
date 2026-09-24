@@ -31,6 +31,7 @@
     "test:bounded-prefix-acceptance": "node tools/test_bounded_prefix_acceptance_contract.mjs",
     "test:partial-arm-failure": "node tools/test_partial_arm_failure_contract.mjs",
     "test:product-route": "node tools/test_product_route_contract.mjs",
+    "test:vite-commit-identity": "node tools/test_vite_commit_identity.mjs",
     "test:clip-prep": "node tools/test_clip_prep_contract.mjs",
     "test:clip-pipeline-cache": "node tools/test_clip_pipeline_cache_contract.mjs",
     "test:marching-tet-worker": "node tools/test_marching_tet_worker_contract.mjs",

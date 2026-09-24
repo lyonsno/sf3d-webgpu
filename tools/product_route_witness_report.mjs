@@ -231,6 +231,7 @@ export function assembleProductRouteWitness(input) {
       producerRoute: producerRoute ? Object.freeze({
         invocation: producerRoute.invocation ?? null,
         deviceRelation: producerRoute.deviceRelation ?? null,
+        producerResourcesMatchApp: producerRoute.producerResourcesMatchApp ?? null,
         rendererDeviceRelationship: producerRoute.rendererDeviceRelationship ?? 'not-observed-by-this-witness',
         producer: Object.freeze({
           routeId: producerRoute.producer?.routeId ?? null,
@@ -302,6 +303,7 @@ export function acceptProductRouteWitness(report, expectations = {}) {
   else {
     if (!['direct-full-pipeline', 'producer.run'].includes(route.invocation)) errors.push(`producer invocation ${route.invocation ?? 'missing'} is unsupported`);
     if (route.deviceRelation !== 'producer-device===window._sf3d_device') errors.push(`producer/window device relation ${route.deviceRelation ?? 'missing'} != producer-device===window._sf3d_device`);
+    if (route.producerResourcesMatchApp !== true) errors.push('producer weights/pipelines do not match the app resources');
     if (route.rendererDeviceRelationship !== 'not-observed-by-this-witness') errors.push(`renderer device relationship ${route.rendererDeviceRelationship ?? 'missing'} is outside this witness contract`);
     const producer = route.producer || {};
     if (producer.routeId !== SF3D_ROUTE_ID) errors.push(`producer routeId ${producer.routeId ?? 'missing'} != expected ${SF3D_ROUTE_ID}`);
@@ -317,6 +319,20 @@ export function acceptProductRouteWitness(report, expectations = {}) {
       if (browserKit.packageName !== '@kaminos/webgpu-inference-kit') errors.push(`browser kit package ${browserKit.packageName ?? 'missing'} != @kaminos/webgpu-inference-kit`);
       if (browserKit.exportedVersion !== report.source?.kitVersion) errors.push(`browser kit version ${browserKit.exportedVersion ?? 'missing'} != installed kit version ${report.source?.kitVersion ?? 'missing'}`);
       if (!/^[0-9a-f]{64}$/i.test(browserKit.exportFingerprint ?? '')) errors.push('browser kit export fingerprint is missing or invalid');
+      if (!Array.isArray(browserKit.servedModules) || browserKit.servedModules.length === 0
+        || !Number.isInteger(browserKit.servedModuleCount) || browserKit.servedModuleCount !== browserKit.servedModules.length) {
+        errors.push('browser-served kit module bytes are missing');
+      } else {
+        for (const module of browserKit.servedModules) {
+          if (typeof module.url !== 'string' || !module.url.includes('/node_modules/')
+            || !Number.isInteger(module.bytes) || module.bytes <= 0
+            || !/^[0-9a-f]{64}$/i.test(module.sha256 ?? '')) {
+            errors.push('browser-served kit module bytes are missing or invalid');
+            break;
+          }
+        }
+      }
+      if (!/^[0-9a-f]{64}$/i.test(browserKit.servedModuleSetSha256 ?? '')) errors.push('browser-served kit module set digest is missing or invalid');
       if (typeof browserKit.witnessModuleUrl !== 'string' || !browserKit.witnessModuleUrl) errors.push('browser kit witness module URL is missing');
     }
     if (route.invocation === 'producer.run') {

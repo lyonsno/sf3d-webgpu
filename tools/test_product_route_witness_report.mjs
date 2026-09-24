@@ -74,13 +74,22 @@ function validInput(over = {}) {
       invocation: 'direct-full-pipeline',
       deviceRelation: 'producer-device===window._sf3d_device',
       rendererDeviceRelationship: 'not-observed-by-this-witness',
+      producerResourcesMatchApp: true,
       producer: {
         routeId: SF3D_ROUTE_ID, commit: 'abc123', kitVersion: '0.1.48', deviceInjected: true,
         deviceTopology: 'host-injected-device',
         backend: { kind: 'webgpu-local', runtime: 'browser', adapterName: 'Apple M4 Max', browser: 'Chrome', features: [], limits: { maxBufferSize: 1 }, timestampQuery: 'unavailable' },
       },
       runIdentity: null,
-      browserKit: { packageName: '@kaminos/webgpu-inference-kit', exportedVersion: '0.1.48', exportFingerprint: 'a'.repeat(64), witnessModuleUrl: 'http://127.0.0.1:4173/tools/browser_kit_identity.js' },
+      browserKit: {
+        packageName: '@kaminos/webgpu-inference-kit', exportedVersion: '0.1.48', exportFingerprint: 'a'.repeat(64),
+        servedModuleSetSha256: 'b'.repeat(64), servedModuleCount: 2,
+        servedModules: [
+          { url: '/node_modules/.vite/deps/@kaminos_webgpu-inference-kit.js?v=abc', bytes: 1200, sha256: 'c'.repeat(64) },
+          { url: '/node_modules/.vite/deps/chunk-abc.js', bytes: 800, sha256: 'd'.repeat(64) },
+        ],
+        witnessModuleUrl: 'http://127.0.0.1:4173/tools/browser_kit_identity.js',
+      },
     },
     requestedOptions: {
       cooperativeDino: true, cooperativeTwoStream: true, cooperativePostProcessor: true, cooperativeBake: true,
@@ -114,6 +123,7 @@ assert.deepEqual([...accepted.errors], [], 'valid witness must be accepted');
 assert.equal(accepted.ok, true);
 assert.ok(good.effective.producerRoute, 'assembly must preserve effective producer route identity');
 assert.equal(good.effective.producerRoute.invocation, 'direct-full-pipeline');
+assert.equal(good.effective.producerRoute.producerResourcesMatchApp, true, 'route projection preserves the producer/app resource identity');
 assert.equal(good.effective.producerRoute.rendererDeviceRelationship, 'not-observed-by-this-witness');
 const producerRunInput = validInput({ producerRoute: {
   ...validInput().producerRoute,
@@ -125,10 +135,14 @@ const routeFalsifiers = [
   ['missing producer route identity', validInput({ producerRoute: null }), /producer route identity is missing/],
   ['wrong producer route', validInput({ producerRoute: { ...validInput().producerRoute, producer: { ...validInput().producerRoute.producer, routeId: 'other.route' } } }), /producer routeId other.route != expected/],
   ['fallback device mismatch', validInput({ producerRoute: { ...validInput().producerRoute, deviceRelation: 'mismatch' } }), /producer\/window device relation mismatch != producer-device===window\._sf3d_device/],
+  ['direct resources substituted', validInput({ producerRoute: { ...validInput().producerRoute, producerResourcesMatchApp: false } }), /producer weights\/pipelines do not match the app resources/],
   ['renderer device overclaim', validInput({ producerRoute: { ...validInput().producerRoute, rendererDeviceRelationship: 'same-device' } }), /renderer device relationship same-device is outside this witness contract/],
   ['browser kit version mismatch', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, exportedVersion: '0.1.47' } } }), /browser kit version 0.1.47 != installed kit version 0.1.48/],
   ['producer kit version mismatch', validInput({ producerRoute: { ...validInput().producerRoute, producer: { ...validInput().producerRoute.producer, kitVersion: '0.1.47' } } }), /producer kit version 0.1.47 != installed kit version 0.1.48/],
   ['missing served kit identity', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: null } }), /browser-executed kit identity is missing/],
+  ['browser kit implementation bytes missing', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, servedModules: [] } } }), /browser-served kit module bytes are missing/],
+  ['browser kit implementation digest missing', validInput({ producerRoute: { ...validInput().producerRoute, browserKit: { ...validInput().producerRoute.browserKit, servedModuleSetSha256: null } } }), /browser-served kit module set digest is missing or invalid/],
+  ['producer build commit fallback', validInput({ producerRoute: { ...validInput().producerRoute, producer: { ...validInput().producerRoute.producer, commit: 'dev' } } }), /producer commit dev != source commit abc123/],
   ['producer-run route mismatch', validInput({ producerRoute: { ...producerRunInput.producerRoute, runIdentity: { ...producerRunInput.producerRoute.runIdentity, routeId: 'other.route' } } }), /producer run routeId other.route != producer routeId/],
   ['producer-run topology mismatch', validInput({ producerRoute: { ...producerRunInput.producerRoute, runIdentity: { ...producerRunInput.producerRoute.runIdentity, deviceTopology: 'producer-owned-device' } } }), /producer run deviceTopology producer-owned-device != producer deviceTopology/],
 ];
