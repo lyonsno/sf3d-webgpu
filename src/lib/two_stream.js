@@ -1045,6 +1045,22 @@ export class TwoStreamBackbone {
   }
 
   _dispatchForwardFinal(encoder, state) {
+    const projected = this.projectCurrentTriplane(encoder, state);
+    this._diagnosticBuffers['projOutBuf'] = projected.projOutBuf;
+    this._diagnosticBuffers['projOutPermBuf'] = projected.buffer;
+    this._diagnosticBuffers['rearrangedEmb'] = state.weights.tokenizer_embeddings_buf;
+    state.result = {
+      buffer: projected.buffer,
+      C: CONFIG.dim,
+      N: CONFIG.triplaneTokens,
+      planeSize: CONFIG.planeSize,
+    };
+  }
+
+  projectCurrentTriplane(encoder, state) {
+    if (!state.currentTriplane || !state.weights?.tokenizer_embeddings_buf) {
+      throw new Error('two-stream triplane state is not projectable');
+    }
     const device = this.device;
     const D = CONFIG.dim;
     const N_tri = CONFIG.triplaneTokens;
@@ -1060,15 +1076,7 @@ export class TwoStreamBackbone {
       D * N_tri,
     );
 
-    this._diagnosticBuffers['projOutBuf'] = projOutBuf;
-    this._diagnosticBuffers['projOutPermBuf'] = projOutPermBuf;
-    this._diagnosticBuffers['rearrangedEmb'] = state.weights.tokenizer_embeddings_buf;
-    state.result = {
-      buffer: projOutPermBuf,
-      C: D,
-      N: N_tri,
-      planeSize: CONFIG.planeSize,
-    };
+    return { buffer: projOutPermBuf, projOutBuf };
   }
 
   // --- FuseBlock: cross-attention fuse(z ← x) + GEGLU FFN ---

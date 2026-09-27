@@ -19,4 +19,8 @@ assert.throws(() => acceptPreviewAssay({ ...valid, result: {
 assert.throws(() => acceptPreviewAssay({ ...valid, result: {
   ...valid.result, browserErrors: ['device lost'],
 } }), /browser errors/);
+assert.throws(() => acceptPreviewAssay({
+  requested: { intermediateStage: 'block-0-fuse-out' },
+  result: { ...valid.result, previewMesh: null, intermediatePreview: null },
+}), /intermediate preview/);
 console.log('preview assay rejects empty final output and missing candidate');

@@ -79,6 +79,7 @@ export function defineTwoStreamManifest(options = {}) {
 export async function driveTwoStreamBoundary(cooperative, options) {
   const {
     encodeStage,
+    onStageComplete,
     now = () => globalThis.performance?.now?.() ?? Date.now(),
   } = options;
   if (options.submitStage != null) {
@@ -129,6 +130,7 @@ export async function driveTwoStreamBoundary(cooperative, options) {
     timing.dutyCompletedAtMs = now();
     timing.dutyMs = timing.dutyCompletedAtMs - timing.dutyStartedAtMs;
     telemetry.push(Object.freeze(timing));
+    if (onStageComplete) await onStageComplete({ stageIndex, stageId });
   }
 
   if (gpu.nextRange() != null) {
@@ -225,6 +227,7 @@ export async function runCooperativeTwoStream(options) {
     dutyGranularity = 'stage',
     linearRowsPerDuty = 128,
     onProgress,
+    onStageComplete,
     signal,
     invocationId = `sf3d:two-stream:${schedulingMode}`,
   } = options;
@@ -297,6 +300,9 @@ export async function runCooperativeTwoStream(options) {
       })
       : await driveTwoStreamBoundary(cooperative, {
         now,
+        onStageComplete: onStageComplete
+          ? ({ stageIndex, stageId }) => onStageComplete({ stageIndex, stageId, state, backbone })
+          : null,
         encodeStage({ stageIndex, stageId }) {
           activeStage = { stageIndex, stageId };
           const encoder = device.createCommandEncoder({

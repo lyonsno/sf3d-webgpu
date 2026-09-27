@@ -218,6 +218,17 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   if (options.onBackboneTriplane != null && typeof options.onBackboneTriplane !== 'function') {
     throw new TypeError('onBackboneTriplane must be a function');
   }
+  if (options.onIntermediateTriplane != null) {
+    if (typeof options.onIntermediateTriplane !== 'function') {
+      throw new TypeError('onIntermediateTriplane must be a function');
+    }
+    if (!cooperativeTwoStream || twoStreamDutyGranularity !== 'stage') {
+      throw new RangeError('onIntermediateTriplane requires cooperative two-stream stage duties');
+    }
+    if (!/^block-[0-3]-fuse-out$/.test(options.intermediateStageId ?? '')) {
+      throw new RangeError('intermediateStageId must name a completed block fuse-out');
+    }
+  }
   if (options.onPartialTriplane != null) {
     if (typeof options.onPartialTriplane !== 'function') {
       throw new TypeError('onPartialTriplane must be a function');
@@ -471,6 +482,31 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       dutyGranularity: twoStreamDutyGranularity,
       linearRowsPerDuty: twoStreamLinearRowsPerDuty,
       signal: options.signal,
+      onStageComplete: options.onIntermediateTriplane
+        ? async ({ stageId, state, backbone }) => {
+          if (stageId !== options.intermediateStageId) return;
+          const previewStart = performance.now();
+          const previewEncoder = device.createCommandEncoder({ label: `preview:${stageId}` });
+          const projected = backbone.projectCurrentTriplane(previewEncoder, state);
+          const previewPlanes = dispatchPostProcessor(
+            device, previewEncoder, projected.buffer, weights.postProcessor);
+          device.queue.submit([previewEncoder.finish()]);
+          try {
+            await device.queue.onSubmittedWorkDone();
+            await options.onIntermediateTriplane({
+              stageId,
+              triplanesBuf: previewPlanes.buffer,
+              decoder: pipelines.triplaneDecoder,
+              decoderWeights: weights.decoder,
+              projectionMs: performance.now() - previewStart,
+            });
+          } finally {
+            previewPlanes.buffer.destroy();
+            projected.buffer.destroy();
+            projected.projOutBuf.destroy();
+          }
+        }
+        : null,
       onProgress: (p) => {
         if (p.percent != null) {
           report(

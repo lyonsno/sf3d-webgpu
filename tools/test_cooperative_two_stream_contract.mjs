@@ -103,6 +103,19 @@ assert.ok(driven.telemetry.every(entry => entry.submitMs === null && entry.submi
   'submit timing is kit-owned (null) since 0.1.41');
 console.log('ok  driver encodes every two-stream stage exactly once and lets the kit submit');
 
+const observedStages = [];
+await driveTwoStreamBoundary(makeCooperative(), {
+  encodeStage: ({ stageIndex }) => ({ stageIndex }),
+  onStageComplete: async ({ stageIndex, stageId }) => {
+    if (stageId.endsWith('fuse-out')) {
+      observedStages.push(stageIndex);
+      assert.equal(events.at(-1), `kit-submit:${stageIndex}`);
+    }
+  },
+});
+assert.deepEqual(observedStages, [5, 10, 15, 20]);
+console.log('ok  completed-block observations run after settled stage duties');
+
 await assert.rejects(
   driveTwoStreamBoundary(makeCooperative(21), {
     encodeStage: ({ stageIndex }) => ({ stageIndex }),

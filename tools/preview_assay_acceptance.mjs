@@ -9,6 +9,10 @@ export function acceptPreviewAssay(report) {
     if (!result.partialPreviews?.some(state => state.mesh?.faces > 0)) {
       throw new Error('all partial previews are missing or empty');
     }
+  } else if (requested.intermediateStage) {
+    if (!result.intermediatePreview?.mesh?.faces) {
+      throw new Error('intermediate preview is missing or empty');
+    }
   } else if (!result.previewMesh?.faces) {
     throw new Error('final triplane preview is missing or empty');
   }
