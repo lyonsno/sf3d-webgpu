@@ -27,6 +27,7 @@ const report = {
 };
 let vite;
 let browser;
+let page;
 const write = () => fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n');
 write();
 
@@ -39,6 +40,20 @@ function freePort() {
       server.close(() => resolve(port));
     });
   });
+}
+
+async function closeWithin(operation, label) {
+  let timer;
+  try {
+    await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} did not settle within 30 seconds`)), 30000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 try {
@@ -55,7 +70,7 @@ try {
     executablePath: chromePath, headless: false,
     args: ['--enable-unsafe-webgpu', '--use-angle=metal', '--no-first-run', '--no-default-browser-check'],
   });
-  const page = await browser.newPage();
+  page = await browser.newPage();
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text().slice(0, 500)); });
@@ -103,6 +118,9 @@ try {
               vertices: Array.from(candidate.mesh.vertices), faces: Array.from(candidate.mesh.faces),
             };
           } catch (error) { reducedError = error.message; }
+          window._reducedPreviewStatus = reducedPreview
+            ? { availableMs: reducedPreview.availableMs, metrics: reducedPreview.metrics }
+            : { error: reducedError };
         } : null,
         cooperativePostProcessor: partial,
         postProcessorDutyGranularity: 'plane',
@@ -116,7 +134,7 @@ try {
             partialPreviews.push({ plane, availableMs, error: error.message });
           }
         } : null,
-        onFinalTriplane: partial ? null : async ({ triplanesBuf, decoder, decoderWeights }) => {
+        onFinalTriplane: partial || reducedFactor ? null : async ({ triplanesBuf, decoder, decoderWeights }) => {
           preview = await decodePreviewMesh(device, triplanesBuf, decoder, decoderWeights, res);
           previewAvailableMs = performance.now() - before;
         },
@@ -161,28 +179,38 @@ try {
     reducedPreview: reducedSummary,
     previewMesh: vertices ? { vertices: vertices.length / 3, faces: faces.length / 3 } : null,
     browserErrors: errors };
+  report.candidateOk = reducedFactor == null || reducedSummary != null;
   report.phase = 'teardown';
   write();
   console.log(JSON.stringify(report.result, null, 2));
 } catch (error) {
+  if (page) report.intermediate = await page.evaluate(() => window._reducedPreviewStatus ?? null).catch(() => null);
   report.error = { message: error.message, stack: error.stack };
   write();
   console.error(`${report.phase}: ${error.stack || error}`);
   process.exitCode = 1;
 } finally {
+  const teardownErrors = [];
   try {
-    await browser?.close();
-    await vite?.close();
-    if (!report.error) {
-      report.ok = true;
-      report.phase = 'complete';
-      write();
-    }
+    if (browser) await closeWithin(browser.close(), 'Chrome close');
   } catch (error) {
+    browser?.process()?.kill('SIGTERM');
+    teardownErrors.push(error.message);
+  }
+  try {
+    if (vite) await closeWithin(vite.close(), 'Vite close');
+  } catch (error) {
+    teardownErrors.push(error.message);
+  }
+  if (teardownErrors.length) {
+    report.teardownErrors = teardownErrors;
     report.ok = false;
     report.phase = 'teardown';
-    report.error = { message: error.message, stack: error.stack };
-    write();
     process.exitCode = 1;
+  } else if (!report.error) {
+    report.ok = report.candidateOk;
+    report.phase = report.ok ? 'complete' : 'candidate-failed';
+    if (!report.ok) process.exitCode = 1;
   }
+  write();
 }
