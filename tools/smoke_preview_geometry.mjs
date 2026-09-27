@@ -6,6 +6,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'vite';
+import { acceptPreviewAssay } from './preview_assay_acceptance.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const args = process.argv.slice(2);
@@ -179,7 +180,13 @@ try {
     reducedPreview: reducedSummary,
     previewMesh: vertices ? { vertices: vertices.length / 3, faces: faces.length / 3 } : null,
     browserErrors: errors };
-  report.candidateOk = reducedFactor == null || reducedSummary != null;
+  try {
+    acceptPreviewAssay(report);
+    report.candidateOk = true;
+  } catch (error) {
+    report.candidateOk = false;
+    report.acceptanceError = error.message;
+  }
   report.phase = 'teardown';
   write();
   console.log(JSON.stringify(report.result, null, 2));
