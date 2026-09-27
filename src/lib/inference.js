@@ -24,6 +24,7 @@ import { TwoStreamBackbone } from './two_stream.js';
 import { runCooperativeTwoStream } from './cooperative_two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
 import { submitPreviewAndRetire } from './preview_submission.js';
+import { runOptionalPreview } from './preview_policy.js';
 import { getDummyBias } from './shader_ops.js';
 import { runCooperativePostProcessor } from './cooperative_post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
@@ -496,37 +497,42 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       onStageComplete: options.onIntermediateTriplane
         ? async ({ stageId, state, backbone }) => {
           if (!intermediateStageIds.includes(stageId)) return;
-          const previewStart = performance.now();
-          const previewEncoder = device.createCommandEncoder({ label: `preview:${stageId}` });
-          getDummyBias(device);
-          const directAllocations = [];
-          let captured;
-          try {
-            captured = captureGpuBufferAllocations(() => {
-              const projected = backbone.projectCurrentTriplane(previewEncoder, state);
-              return dispatchPostProcessor(
-                device, previewEncoder, projected.buffer, weights.postProcessor, {
-                  onTransientBuffer(buffer, size) {
-                    directAllocations.push({ buffer, size });
-                  },
-                });
-            });
-          } catch (error) {
-            for (const { buffer } of directAllocations) buffer.destroy();
-            throw error;
+          const outcome = await runOptionalPreview(stageId, async () => {
+            const previewStart = performance.now();
+            const previewEncoder = device.createCommandEncoder({ label: `preview:${stageId}` });
+            getDummyBias(device);
+            const directAllocations = [];
+            let captured;
+            try {
+              captured = captureGpuBufferAllocations(() => {
+                const projected = backbone.projectCurrentTriplane(previewEncoder, state);
+                return dispatchPostProcessor(
+                  device, previewEncoder, projected.buffer, weights.postProcessor, {
+                    onTransientBuffer(buffer, size) {
+                      directAllocations.push({ buffer, size });
+                    },
+                  });
+              });
+            } catch (error) {
+              for (const { buffer } of directAllocations) buffer.destroy();
+              throw error;
+            }
+            const { value: previewPlanes, allocations } = captured;
+            const ownedAllocations = [...allocations, ...directAllocations];
+            await submitPreviewAndRetire(device, previewEncoder, ownedAllocations,
+              () => options.onIntermediateTriplane({
+                stageId,
+                triplanesBuf: previewPlanes.buffer,
+                decoder: pipelines.triplaneDecoder,
+                decoderWeights: weights.decoder,
+                projectionMs: performance.now() - previewStart,
+                projectionTransientBytes: ownedAllocations.reduce((sum, item) => sum + item.size, 0),
+                projectionTransientBuffers: ownedAllocations.length,
+              }));
+          }, options.onIntermediatePreviewError);
+          if (outcome.status === 'skipped') {
+            report(`Preview ${stageId} unavailable: ${outcome.error?.message || outcome.error}`);
           }
-          const { value: previewPlanes, allocations } = captured;
-          const ownedAllocations = [...allocations, ...directAllocations];
-          await submitPreviewAndRetire(device, previewEncoder, ownedAllocations,
-            () => options.onIntermediateTriplane({
-              stageId,
-              triplanesBuf: previewPlanes.buffer,
-              decoder: pipelines.triplaneDecoder,
-              decoderWeights: weights.decoder,
-              projectionMs: performance.now() - previewStart,
-              projectionTransientBytes: ownedAllocations.reduce((sum, item) => sum + item.size, 0),
-              projectionTransientBuffers: ownedAllocations.length,
-            }));
         }
         : null,
       onProgress: (p) => {
