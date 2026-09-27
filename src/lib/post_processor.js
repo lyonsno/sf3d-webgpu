@@ -87,6 +87,7 @@ export function dispatchPostProcessorPlane(
   weights,
   output,
   plane,
+  options = {},
 ) {
   const state = createPostProcessorPlaneState(
     device,
@@ -96,7 +97,7 @@ export function dispatchPostProcessorPlane(
     plane,
   );
   for (let stageIndex = 0; stageIndex < POST_PROCESSOR_PLANE_STAGE_IDS.length; stageIndex++) {
-    dispatchPostProcessorPlaneStage(device, encoder, state, stageIndex);
+    dispatchPostProcessorPlaneStage(device, encoder, state, stageIndex, options);
   }
 }
 
@@ -286,7 +287,7 @@ export function dispatchPostProcessorChannelDuty(device, encoder, state, duty) {
  * and submit after each stage (cooperative route). State enforces the dependency
  * order so skipped, repeated, or out-of-order command duties fail loud.
  */
-export function dispatchPostProcessorPlaneStage(device, encoder, state, stageIndex) {
+export function dispatchPostProcessorPlaneStage(device, encoder, state, stageIndex, options = {}) {
   if (device !== state?.device) {
     throw new Error('postprocessor plane state belongs to a different GPUDevice');
   }
@@ -323,6 +324,7 @@ export function dispatchPostProcessorPlaneStage(device, encoder, state, stageInd
       planeSize * planeSize * 3,
       state.plane * planePixels,
       planePixels,
+      options.onTransientBuffer,
     );
     state.current = {
       buffer: planeBuf,
@@ -404,13 +406,13 @@ export function dispatchPostProcessorPlaneStage(device, encoder, state, stageInd
   };
 }
 
-export function dispatchPostProcessor(device, encoder, triplanesBuf, weights) {
+export function dispatchPostProcessor(device, encoder, triplanesBuf, weights, options = {}) {
   const output = createPostProcessorOutput(device);
 
   // Preserve the legacy route exactly: all three planes are still encoded into
   // the caller's one command encoder and submitted by the caller as one buffer.
   for (let plane = 0; plane < output.numPlanes; plane++) {
-    dispatchPostProcessorPlane(device, encoder, triplanesBuf, weights, output, plane);
+    dispatchPostProcessorPlane(device, encoder, triplanesBuf, weights, output, plane, options);
   }
 
   return output;
@@ -420,7 +422,7 @@ export function dispatchPostProcessor(device, encoder, triplanesBuf, weights) {
 
 let _gatherPipeline = null;
 
-function _dispatchGatherPlane(device, encoder, srcBuf, dstBuf, numChannels, totalSpatial, spatialOffset, spatialSize) {
+function _dispatchGatherPlane(device, encoder, srcBuf, dstBuf, numChannels, totalSpatial, spatialOffset, spatialSize, onTransientBuffer) {
   // Gather: for each channel c and spatial index s in [0, spatialSize):
   //   dst[c * spatialSize + s] = src[c * totalSpatial + spatialOffset + s]
   if (!_gatherPipeline) {
@@ -459,6 +461,7 @@ function _dispatchGatherPlane(device, encoder, srcBuf, dstBuf, numChannels, tota
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     mappedAtCreation: true,
   });
+  onTransientBuffer?.(params, 20);
   new Uint32Array(params.getMappedRange()).set([numChannels, totalSpatial, spatialOffset, spatialSize, wgX]);
   params.unmap();
 

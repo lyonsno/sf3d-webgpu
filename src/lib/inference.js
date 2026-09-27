@@ -23,6 +23,7 @@ import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
 import { runCooperativeTwoStream } from './cooperative_two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
+import { submitPreviewAndRetire } from './preview_submission.js';
 import { getDummyBias } from './shader_ops.js';
 import { runCooperativePostProcessor } from './cooperative_post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
@@ -498,26 +499,34 @@ export async function runInference(device, pipelines, weights, imageElement, onP
           const previewStart = performance.now();
           const previewEncoder = device.createCommandEncoder({ label: `preview:${stageId}` });
           getDummyBias(device);
-          const { value: previewPlanes, allocations } = captureGpuBufferAllocations(() => {
-            const projected = backbone.projectCurrentTriplane(previewEncoder, state);
-            return dispatchPostProcessor(
-              device, previewEncoder, projected.buffer, weights.postProcessor);
-          });
-          device.queue.submit([previewEncoder.finish()]);
+          const directAllocations = [];
+          let captured;
           try {
-            await device.queue.onSubmittedWorkDone();
-            await options.onIntermediateTriplane({
+            captured = captureGpuBufferAllocations(() => {
+              const projected = backbone.projectCurrentTriplane(previewEncoder, state);
+              return dispatchPostProcessor(
+                device, previewEncoder, projected.buffer, weights.postProcessor, {
+                  onTransientBuffer(buffer, size) {
+                    directAllocations.push({ buffer, size });
+                  },
+                });
+            });
+          } catch (error) {
+            for (const { buffer } of directAllocations) buffer.destroy();
+            throw error;
+          }
+          const { value: previewPlanes, allocations } = captured;
+          const ownedAllocations = [...allocations, ...directAllocations];
+          await submitPreviewAndRetire(device, previewEncoder, ownedAllocations,
+            () => options.onIntermediateTriplane({
               stageId,
               triplanesBuf: previewPlanes.buffer,
               decoder: pipelines.triplaneDecoder,
               decoderWeights: weights.decoder,
               projectionMs: performance.now() - previewStart,
-              projectionTransientBytes: allocations.reduce((sum, item) => sum + item.size, 0),
-              projectionTransientBuffers: allocations.length,
-            });
-          } finally {
-            for (const { buffer } of allocations) buffer.destroy();
-          }
+              projectionTransientBytes: ownedAllocations.reduce((sum, item) => sum + item.size, 0),
+              projectionTransientBuffers: ownedAllocations.length,
+            }));
         }
         : null,
       onProgress: (p) => {
