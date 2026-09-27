@@ -32,6 +32,7 @@ const report = {
 let vite;
 let browser;
 let page;
+const browserEvents = [];
 const write = () => {
   const body = JSON.stringify(report, null, 2) + '\n';
   try {
@@ -95,9 +96,20 @@ try {
     args: ['--enable-unsafe-webgpu', '--use-angle=metal', '--no-first-run', '--no-default-browser-check'],
   });
   page = await browser.newPage();
-  const errors = [];
-  page.on('pageerror', (error) => errors.push(error.message));
-  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text().slice(0, 500)); });
+  page.on('pageerror', (error) => browserEvents.push({ type: 'pageerror', message: error.message }));
+  page.on('error', (error) => browserEvents.push({ type: 'page-crash', message: error.message }));
+  page.on('close', () => browserEvents.push({ type: 'page-close' }));
+  page.on('console', (message) => {
+    if (message.type() === 'error') browserEvents.push({ type: 'console-error', message: message.text() });
+  });
+  page.on('requestfailed', (request) => browserEvents.push({
+    type: 'request-failed', url: request.url(), failure: request.failure()?.errorText ?? null,
+  }));
+  page.on('response', (response) => {
+    if (response.status() >= 400) browserEvents.push({
+      type: 'http-error', url: response.url(), status: response.status(),
+    });
+  });
   const url = `http://127.0.0.1:${port}/`;
   report.effective = { url, chromePath, imagePath, resolution, partial, intermediateStage, intermediateStages,
     kitVersion: JSON.parse(fs.readFileSync(path.join(root, 'node_modules/@kaminos/webgpu-inference-kit/package.json'))).version };
@@ -204,7 +216,9 @@ try {
     intermediatePreview: intermediateStages ? null : intermediateSummary[0] ?? null,
     intermediatePreviews: intermediateSummary,
     previewMesh: vertices ? { vertices: vertices.length / 3, faces: faces.length / 3 } : null,
-    browserErrors: errors };
+    browserErrors: browserEvents.filter(event =>
+      ['pageerror', 'page-crash', 'console-error'].includes(event.type)) };
+  report.browserDiagnostics = { events: browserEvents };
   try {
     acceptPreviewAssay(report);
     report.integrityOk = true;
@@ -216,6 +230,17 @@ try {
   write();
   console.log(JSON.stringify(report.result, null, 2));
 } catch (error) {
+  report.browserDiagnostics = {
+    events: browserEvents,
+    pageClosed: page?.isClosed() ?? null,
+    browserConnected: browser?.isConnected() ?? null,
+    lastStatus: page && !page.isClosed()
+      ? await closeWithin(
+        page.evaluate(() => document.querySelector('#status')?.textContent ?? null),
+        'page status capture',
+      ).catch(() => null)
+      : null,
+  };
   report.error = { message: error.message, stack: error.stack };
   write();
   console.error(`${report.phase}: ${error.stack || error}`);

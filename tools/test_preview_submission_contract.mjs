@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { submitPreviewAndRetire } from '../src/lib/preview_submission.js';
 
-function fixture({ submitError = null, callbackError = null, finishError = null } = {}) {
+function fixture({ submitError = null, callbackError = null, finishError = null,
+  secondFenceError = null } = {}) {
   const events = [];
   let pendingCallbackWork = false;
+  let fences = 0;
   const device = { queue: {
     submit() {
       events.push('submit');
@@ -11,7 +13,9 @@ function fixture({ submitError = null, callbackError = null, finishError = null 
     },
     async onSubmittedWorkDone() {
       events.push('fence');
+      fences++;
       pendingCallbackWork = false;
+      if (fences === 2 && secondFenceError) throw secondFenceError;
     },
   } };
   const encoder = { finish() {
@@ -44,4 +48,12 @@ for (const fault of ['submitError', 'callbackError', 'finishError']) {
   );
   assert.equal(failed.events.at(-1), 'destroy', `${fault} must retire preview allocations`);
 }
+const originalFailure = new Error('callback failed');
+const settlementFailure = new Error('second fence failed');
+const competing = fixture({ callbackError: originalFailure, secondFenceError: settlementFailure });
+await assert.rejects(
+  submitPreviewAndRetire(competing.device, competing.encoder, competing.allocations, competing.consume),
+  error => error === originalFailure && error.previewSettlementError === settlementFailure,
+);
+assert.equal(competing.events.at(-1), 'destroy');
 console.log('preview allocation retirement survives submit, callback, and finish failure');
