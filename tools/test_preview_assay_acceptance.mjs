@@ -23,4 +23,10 @@ assert.throws(() => acceptPreviewAssay({
   requested: { intermediateStage: 'block-0-fuse-out' },
   result: { ...valid.result, previewMesh: null, intermediatePreview: null },
 }), /intermediate preview/);
+assert.throws(() => acceptPreviewAssay({
+  requested: { intermediateStages: ['block-0-fuse-out', 'block-1-fuse-out'] },
+  result: { ...valid.result, previewMesh: null, intermediatePreviews: [
+    { stageId: 'block-0-fuse-out', mesh: { faces: 3200 } },
+  ] },
+}), /missing intermediate preview block-1-fuse-out/);
 console.log('preview assay rejects empty final output and missing candidate');

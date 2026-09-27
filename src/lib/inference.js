@@ -219,6 +219,13 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   if (options.onBackboneTriplane != null && typeof options.onBackboneTriplane !== 'function') {
     throw new TypeError('onBackboneTriplane must be a function');
   }
+  const intermediateStageIds = options.intermediateStageIds
+    ?? (options.intermediateStageId ? [options.intermediateStageId] : []);
+  if (!Array.isArray(intermediateStageIds)
+      || intermediateStageIds.some(stageId => !/^block-[0-3]-fuse-out$/.test(stageId))
+      || new Set(intermediateStageIds).size !== intermediateStageIds.length) {
+    throw new RangeError('intermediateStageIds must be unique completed block fuse-out ids');
+  }
   if (options.onIntermediateTriplane != null) {
     if (typeof options.onIntermediateTriplane !== 'function') {
       throw new TypeError('onIntermediateTriplane must be a function');
@@ -226,9 +233,11 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     if (!cooperativeTwoStream || twoStreamDutyGranularity !== 'stage') {
       throw new RangeError('onIntermediateTriplane requires cooperative two-stream stage duties');
     }
-    if (!/^block-[0-3]-fuse-out$/.test(options.intermediateStageId ?? '')) {
-      throw new RangeError('intermediateStageId must name a completed block fuse-out');
+    if (!intermediateStageIds.length) {
+      throw new RangeError('onIntermediateTriplane requires at least one completed block stage id');
     }
+  } else if (intermediateStageIds.length) {
+    throw new RangeError('intermediate stage ids require onIntermediateTriplane');
   }
   if (options.onPartialTriplane != null) {
     if (typeof options.onPartialTriplane !== 'function') {
@@ -485,7 +494,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       signal: options.signal,
       onStageComplete: options.onIntermediateTriplane
         ? async ({ stageId, state, backbone }) => {
-          if (stageId !== options.intermediateStageId) return;
+          if (!intermediateStageIds.includes(stageId)) return;
           const previewStart = performance.now();
           const previewEncoder = device.createCommandEncoder({ label: `preview:${stageId}` });
           getDummyBias(device);

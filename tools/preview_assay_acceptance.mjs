@@ -9,6 +9,12 @@ export function acceptPreviewAssay(report) {
     if (!result.partialPreviews?.some(state => state.mesh?.faces > 0)) {
       throw new Error('all partial previews are missing or empty');
     }
+  } else if (requested.intermediateStages?.length) {
+    for (const stageId of requested.intermediateStages) {
+      if (!result.intermediatePreviews?.some(state => state.stageId === stageId && state.mesh?.faces > 0)) {
+        throw new Error(`missing intermediate preview ${stageId}`);
+      }
+    }
   } else if (requested.intermediateStage) {
     if (!result.intermediatePreview?.mesh?.faces) {
       throw new Error('intermediate preview is missing or empty');
