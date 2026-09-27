@@ -60,6 +60,9 @@ const result = await drivePostProcessorCooperativeBoundary(cooperative, {
     assert.equal(plane, nextPlane++);
     return { plane };
   },
+  onPlaneComplete({ plane }) {
+    events.push(`preview:${plane}`);
+  },
   // kit >=0.1.41: encode returns the buffer; the kit owns submission, so the
   // driver no longer accepts a submitPlane callback and no producer-side
   // 'submitted' event is observable.
@@ -67,9 +70,9 @@ const result = await drivePostProcessorCooperativeBoundary(cooperative, {
 
 assert.deepEqual(result, { completedPlanes: 3, totalPlanes: 3 });
 assert.deepEqual(events, [
-  'range:0-1', 'encoded:0', 'fenced:0',
-  'range:1-2', 'encoded:1', 'fenced:1',
-  'range:2-3', 'encoded:2', 'fenced:2',
+  'range:0-1', 'encoded:0', 'fenced:0', 'preview:0',
+  'range:1-2', 'encoded:1', 'fenced:1', 'preview:1',
+  'range:2-3', 'encoded:2', 'fenced:2', 'preview:2',
 ]);
 assert.equal(ranges.length, 0);
 console.log('ok  driver encodes, submits, and settles every plane exactly once');

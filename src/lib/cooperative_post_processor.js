@@ -231,6 +231,7 @@ export async function drivePostProcessorCooperativeBoundary(cooperative, options
   const {
     numPlanes = POST_PROCESSOR_PLANE_COUNT,
     encodePlane,
+    onPlaneComplete,
   } = options;
   const gpu = cooperative.startBoundary(POST_PROCESSOR_BOUNDARY_ID);
   let completedPlanes = 0;
@@ -252,6 +253,7 @@ export async function drivePostProcessorCooperativeBoundary(cooperative, options
       encode: () => encodePlane({ plane, range }),
     });
     completedPlanes++;
+    if (onPlaneComplete) await onPlaneComplete({ plane, completedPlanes, totalPlanes: numPlanes });
   }
 
   if (gpu.nextRange() != null) {
@@ -402,6 +404,7 @@ export async function runCooperativePostProcessor(options) {
     dutyGranularity = 'plane',
     channelsPerDuty = 16,
     onProgress,
+    onPlaneComplete,
     signal,
     invocationId = `sf3d:post-processor:${schedulingMode}`,
     // Bounded-prefix completion (kit >=0.1.41): allow up to maxInFlightGpuDuties
@@ -416,6 +419,9 @@ export async function runCooperativePostProcessor(options) {
   } = options;
   if (!['plane', 'layer', 'channel-range'].includes(dutyGranularity)) {
     throw new RangeError(`unsupported postprocessor duty granularity: ${dutyGranularity}`);
+  }
+  if (onPlaneComplete && dutyGranularity !== 'plane') {
+    throw new RangeError('onPlaneComplete requires plane duty granularity');
   }
   if (!Number.isSafeInteger(channelsPerDuty) || channelsPerDuty <= 0) {
     throw new TypeError('channelsPerDuty must be a positive safe integer');
@@ -532,6 +538,9 @@ export async function runCooperativePostProcessor(options) {
 
     await drivePostProcessorCooperativeBoundary(cooperative, {
       numPlanes: output.numPlanes,
+      onPlaneComplete: onPlaneComplete
+        ? (progress) => onPlaneComplete({ ...progress, output })
+        : null,
       encodePlane({ plane }) {
         const encoder = device.createCommandEncoder({
           label: `post-processor-plane-${plane}`,

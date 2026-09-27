@@ -212,6 +212,18 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       + `got ${postProcessorDutyGranularity}`,
     );
   }
+  if (options.onFinalTriplane != null && typeof options.onFinalTriplane !== 'function') {
+    throw new TypeError('onFinalTriplane must be a function');
+  }
+  if (options.onPartialTriplane != null) {
+    if (typeof options.onPartialTriplane !== 'function') {
+      throw new TypeError('onPartialTriplane must be a function');
+    }
+    if (!cooperativePostProcessor || postProcessorSchedulingMode === 'disabled'
+        || postProcessorDutyGranularity !== 'plane') {
+      throw new RangeError('onPartialTriplane requires cooperative plane postprocessing');
+    }
+  }
   // Bounded-prefix completion for the fixed channel-range postprocessor boundary
   // (kit >=0.1.41). Default strict-prefix preserves prior behavior; validation
   // lives in runCooperativePostProcessor (channel-range + cooperative only).
@@ -551,6 +563,14 @@ export async function runInference(device, pipelines, weights, imageElement, onP
           );
         }
       },
+      onPlaneComplete: options.onPartialTriplane
+        ? ({ plane, completedPlanes, totalPlanes, output }) => options.onPartialTriplane({
+          plane, completedPlanes, totalPlanes,
+          triplanesBuf: output.buffer,
+          decoder: pipelines.triplaneDecoder,
+          decoderWeights: weights.decoder,
+        })
+        : null,
     });
     triplaneResult = result;
     _cooperativeReports['post-processor'] = postProcessorReport;
@@ -565,6 +585,14 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     await device.queue.onSubmittedWorkDone();
   }
   _markSpan('post-processor', _stageStart);
+
+  if (options.onFinalTriplane != null) {
+    await options.onFinalTriplane({
+      triplanesBuf: triplaneResult.buffer,
+      decoder: pipelines.triplaneDecoder,
+      decoderWeights: weights.decoder,
+    });
+  }
 
   // Diagnostic: check backbone output
   if (DEBUG) {
