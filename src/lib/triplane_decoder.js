@@ -192,10 +192,13 @@ export class TriplaneDecoder {
    * @param {string[]} heads - which heads to run (default: all)
    * @returns {Object} - { density, features, perturb_normal, vertex_offset } buffers
    */
-  decode(encoder, positionsBuf, triplanesBuf, N, weights, heads) {
+  decode(encoder, positionsBuf, triplanesBuf, N, weights, heads, planeSize = 384) {
     const device = this.device;
     const C = DECODER_CONFIG.planeChannels; // 40
-    const H = 384, W = 384;
+    if (!Number.isSafeInteger(planeSize) || planeSize <= 0) {
+      throw new RangeError('triplane decoder planeSize must be a positive integer');
+    }
+    const H = planeSize, W = planeSize;
     const radius = DECODER_CONFIG.radius;
 
     // 1. Scale positions from model space to [-1, 1] for grid_sample
@@ -210,10 +213,10 @@ export class TriplaneDecoder {
     const gridYZ = this._dispatchExtractGrid(encoder, scaledPosBuf, N, 1, 2, 'grid:YZ'); // y, z
 
     // 3. Grid sample each plane
-    const planeSize = C * H * W * 4; // bytes per plane
+    const planeBytes = C * H * W * 4;
     const sampledXY = this._dispatchGridSample(encoder, triplanesBuf, 0, gridXY, C, H, W, N, 'sampled:XY');
-    const sampledXZ = this._dispatchGridSample(encoder, triplanesBuf, planeSize, gridXZ, C, H, W, N, 'sampled:XZ');
-    const sampledYZ = this._dispatchGridSample(encoder, triplanesBuf, planeSize * 2, gridYZ, C, H, W, N, 'sampled:YZ');
+    const sampledXZ = this._dispatchGridSample(encoder, triplanesBuf, planeBytes, gridXZ, C, H, W, N, 'sampled:XZ');
+    const sampledYZ = this._dispatchGridSample(encoder, triplanesBuf, planeBytes * 2, gridYZ, C, H, W, N, 'sampled:YZ');
 
     // 4. Concatenate: [N, 40] × 3 → [N, 120]
     const featuresBuf = this._dispatchConcatPlanes(encoder, sampledXY, sampledXZ, sampledYZ, N, C, 'concatFeatures');

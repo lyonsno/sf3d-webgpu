@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
-import { createPreviewTetGrid, extractPreviewMesh } from '../src/lib/preview_geometry.js';
+import { createPreviewTetGrid, createReducedTriplanePlan, extractPreviewMesh } from '../src/lib/preview_geometry.js';
 import { marchingTetrahedra, scaleTensor } from '../src/lib/marching_tet.js';
 
 assert.throws(() => createPreviewTetGrid(0), /resolution/);
 assert.throws(() => createPreviewTetGrid(2.5), /resolution/);
+assert.deepEqual(createReducedTriplanePlan(4), {
+  sourceSize: 96, inputSize: 24, outputSize: 96, factor: 4,
+});
+assert.equal(createReducedTriplanePlan(2).outputSize, 192);
+assert.throws(() => createReducedTriplanePlan(5), /divide/);
 
 const grid = createPreviewTetGrid(4);
 assert.equal(grid.numVertices, 125);

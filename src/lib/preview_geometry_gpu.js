@@ -3,7 +3,7 @@ import { scaleTensor } from './marching_tet.js';
 import { createPreviewTetGrid, extractPreviewMesh } from './preview_geometry.js';
 
 /** Decode a final SF3D triplane on a coarse, independent tetrahedral grid. */
-export async function decodePreviewMesh(device, triplanesBuf, decoder, decoderWeights, resolution = 40) {
+export async function decodePreviewMesh(device, triplanesBuf, decoder, decoderWeights, resolution = 40, planeSize = 384) {
   const started = performance.now();
   const grid = createPreviewTetGrid(resolution);
   const positions = scaleTensor(grid.gridVertices, [0, 1], [-0.87, 0.87]);
@@ -11,7 +11,7 @@ export async function decodePreviewMesh(device, triplanesBuf, decoder, decoderWe
     const positionsBuf = createStorageBuffer(device, positions, 0, 'preview:positions');
     const encoder = device.createCommandEncoder();
     const decoded = decoder.decode(encoder, positionsBuf, triplanesBuf, grid.numVertices,
-      decoderWeights, ['density', 'vertex_offset']);
+      decoderWeights, ['density', 'vertex_offset'], planeSize);
     device.queue.submit([encoder.finish()]);
     return decoded;
   });
@@ -27,6 +27,7 @@ export async function decodePreviewMesh(device, triplanesBuf, decoder, decoderWe
       mesh,
       metrics: {
         resolution,
+        planeSize,
         queryVertices: grid.numVertices,
         tetrahedra: grid.numTets,
         submitMs: submitted - started,

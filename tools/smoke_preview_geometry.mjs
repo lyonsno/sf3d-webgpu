@@ -13,6 +13,7 @@ const value = (name, fallback) => args.includes(name) ? args[args.indexOf(name) 
 const outputDir = path.resolve(value('--output-dir', path.join(os.tmpdir(), 'sf3d-preview-geometry')));
 const resolution = Number(value('--resolution', '40'));
 const partial = args.includes('--partial');
+const reducedFactor = args.includes('--reduced-factor') ? Number(value('--reduced-factor', '4')) : null;
 const imagePath = path.resolve(value('--image', path.join(root, 'public/demo_chair.png')));
 const chromePath = value('--chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
 const reportPath = path.join(outputDir, 'report.json');
@@ -21,7 +22,7 @@ const report = {
   schema: 'sf3d.preview-geometry-assay.v0',
   ok: false,
   phase: 'preflight',
-  requested: { resolution, partial, imagePath, outputDir },
+  requested: { resolution, partial, reducedFactor, imagePath, outputDir },
   source: { repo: root, commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim() },
 };
 let vite;
@@ -59,7 +60,7 @@ try {
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text().slice(0, 500)); });
   const url = `http://127.0.0.1:${port}/`;
-  report.effective = { url, chromePath, imagePath, resolution, partial,
+  report.effective = { url, chromePath, imagePath, resolution, partial, reducedFactor,
     kitVersion: JSON.parse(fs.readFileSync(path.join(root, 'node_modules/@kaminos/webgpu-inference-kit/package.json'))).version };
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
   report.phase = 'model-load'; write();
@@ -78,17 +79,31 @@ try {
     });
   }, imageB64);
   report.phase = 'inference'; write();
-  const result = await page.evaluate(async ({ res, partial }) => {
+  const result = await page.evaluate(async ({ res, partial, reducedFactor }) => {
     const { runInference } = await import('/src/lib/inference.js');
     const { decodePreviewMesh } = await import('/src/lib/preview_geometry_gpu.js');
+    const { decodeReducedBackbonePreviewMesh } = await import('/src/lib/reduced_triplane_preview.js');
     const device = window._sf3d_device;
     const input = window._previewImage;
     const before = performance.now();
     let preview;
     let previewAvailableMs = null;
     const partialPreviews = [];
+    let reducedPreview = null;
+    let reducedError = null;
     const final = await runInference(device, window._sf3d_pipelines, window._sf3d_weights,
       input, () => {}, {
+        onBackboneTriplane: reducedFactor ? async (source) => {
+          try {
+            const candidate = await decodeReducedBackbonePreviewMesh({ device, ...source,
+              factor: reducedFactor, resolution: res });
+            reducedPreview = {
+              availableMs: performance.now() - before,
+              metrics: candidate.metrics,
+              vertices: Array.from(candidate.mesh.vertices), faces: Array.from(candidate.mesh.faces),
+            };
+          } catch (error) { reducedError = error.message; }
+        } : null,
         cooperativePostProcessor: partial,
         postProcessorDutyGranularity: 'plane',
         onPartialTriplane: partial ? async ({ plane, triplanesBuf, decoder, decoderWeights }) => {
@@ -107,7 +122,7 @@ try {
         },
       });
     const inferenceMs = performance.now() - before;
-    if (!partial && (!preview || previewAvailableMs == null)) {
+    if (!partial && !reducedFactor && (!preview || previewAvailableMs == null)) {
       throw new Error('final triplane preview callback was not invoked');
     }
     if (partial && partialPreviews.length !== 3) throw new Error(`expected 3 partial previews, got ${partialPreviews.length}`);
@@ -119,8 +134,10 @@ try {
       vertices: preview ? Array.from(preview.mesh.vertices) : null,
       faces: preview ? Array.from(preview.mesh.faces) : null,
       partialPreviews,
+      reducedPreview,
+      reducedError,
     };
-  }, { res: resolution, partial });
+  }, { res: resolution, partial, reducedFactor });
   report.phase = 'artifact'; write();
   const writeObj = (name, vertices, faces) => {
     const obj = [];
@@ -128,13 +145,20 @@ try {
     for (let i = 0; i < faces.length; i += 3) obj.push(`f ${faces[i] + 1} ${faces[i + 1] + 1} ${faces[i + 2] + 1}`);
     fs.writeFileSync(path.join(outputDir, name), obj.join('\n') + '\n');
   };
-  const { vertices, faces, partialPreviews, ...summary } = result;
+  const { vertices, faces, partialPreviews, reducedPreview, ...summary } = result;
   if (vertices) writeObj('preview.obj', vertices, faces);
   const partialSummary = partialPreviews.map(({ vertices: pv, faces: pf, ...state }) => {
     if (pv) writeObj(`plane-${state.plane + 1}.obj`, pv, pf);
     return { ...state, mesh: pv ? { vertices: pv.length / 3, faces: pf.length / 3 } : null };
   });
+  let reducedSummary = null;
+  if (reducedPreview) {
+    const { vertices: rv, faces: rf, ...state } = reducedPreview;
+    writeObj('reduced.obj', rv, rf);
+    reducedSummary = { ...state, mesh: { vertices: rv.length / 3, faces: rf.length / 3 } };
+  }
   report.result = { ...summary, partialPreviews: partialSummary,
+    reducedPreview: reducedSummary,
     previewMesh: vertices ? { vertices: vertices.length / 3, faces: faces.length / 3 } : null,
     browserErrors: errors };
   report.phase = 'teardown';

@@ -1,5 +1,13 @@
 import { marchingTetrahedra, scaleTensor } from './marching_tet.js';
 
+export function createReducedTriplanePlan(factor) {
+  const sourceSize = 96;
+  if (!Number.isSafeInteger(factor) || factor < 1 || sourceSize % factor !== 0) {
+    throw new RangeError('reduced triplane factor must divide 96');
+  }
+  return { sourceSize, inputSize: sourceSize / factor, outputSize: sourceSize * 4 / factor, factor };
+}
+
 export function createPreviewTetGrid(resolution) {
   if (!Number.isSafeInteger(resolution) || resolution < 2) {
     throw new RangeError('preview grid resolution must be an integer of at least 2');

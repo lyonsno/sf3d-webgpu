@@ -215,6 +215,9 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   if (options.onFinalTriplane != null && typeof options.onFinalTriplane !== 'function') {
     throw new TypeError('onFinalTriplane must be a function');
   }
+  if (options.onBackboneTriplane != null && typeof options.onBackboneTriplane !== 'function') {
+    throw new TypeError('onBackboneTriplane must be a function');
+  }
   if (options.onPartialTriplane != null) {
     if (typeof options.onPartialTriplane !== 'function') {
       throw new TypeError('onPartialTriplane must be a function');
@@ -534,6 +537,18 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   _stageTimings['two-stream-backbone'] = performance.now() - _stageStart;
   _markSpan('two-stream-backbone', _stageStart);
+
+  if (options.onBackboneTriplane) {
+    const previewStart = performance.now();
+    await options.onBackboneTriplane({
+      backboneBuf: backboneResult.buffer,
+      postProcessorWeights: weights.postProcessor,
+      decoder: pipelines.triplaneDecoder,
+      decoderWeights: weights.decoder,
+    });
+    _stageTimings['backbone-preview'] = performance.now() - previewStart;
+    _markSpan('backbone-preview', previewStart);
+  }
 
   // 5. PixelShuffle post-processing (counted as part of triplane-decode)
   _stageStart = performance.now();
