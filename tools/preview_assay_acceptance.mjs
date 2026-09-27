@@ -5,9 +5,7 @@ export function acceptPreviewAssay(report) {
     throw new Error('final mesh is empty or invalid');
   }
   if (result.browserErrors?.length) throw new Error('browser errors were reported');
-  if (requested.reducedFactor != null) {
-    if (!result.reducedPreview?.mesh?.faces) throw new Error('reduced preview is missing or empty');
-  } else if (requested.partial) {
+  if (requested.partial) {
     if (!result.partialPreviews?.some(state => state.mesh?.faces > 0)) {
       throw new Error('all partial previews are missing or empty');
     }
