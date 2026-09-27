@@ -38,12 +38,14 @@ function cachedUniform(device, data) {
 }
 
 // Cache for dummy bias buffers (one per device)
-let dummyBiasBuf = null;
-function getDummyBias(device) {
-  if (!dummyBiasBuf) {
-    dummyBiasBuf = createStorageBuffer(device, new Float32Array([0]));
+const dummyBiasBuffers = new WeakMap();
+export function getDummyBias(device) {
+  let buffer = dummyBiasBuffers.get(device);
+  if (!buffer) {
+    buffer = createStorageBuffer(device, new Float32Array([0]), 0, 'shader-ops:dummy-bias');
+    dummyBiasBuffers.set(device, buffer);
   }
-  return dummyBiasBuf;
+  return buffer;
 }
 
 /**

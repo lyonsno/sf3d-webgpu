@@ -13,7 +13,7 @@
  * Steps 1 run on CPU. Steps 2-6 run on GPU. Step 7 runs on CPU.
  */
 
-import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import { captureGpuBufferAllocations, createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
 import { validatePreprocessReply } from './worker_reply_validation.js';
 import { resizeBlendNormalize } from './preprocess_core.js';
 import { callWorker } from './worker_call.js';
@@ -23,6 +23,7 @@ import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
 import { runCooperativeTwoStream } from './cooperative_two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
+import { getDummyBias } from './shader_ops.js';
 import { runCooperativePostProcessor } from './cooperative_post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
 import { loadTetData, loadTetGridVertices, marchingTetrahedra, runMarchingTetOnWorker, scaleTensor } from './marching_tet.js';
@@ -487,9 +488,12 @@ export async function runInference(device, pipelines, weights, imageElement, onP
           if (stageId !== options.intermediateStageId) return;
           const previewStart = performance.now();
           const previewEncoder = device.createCommandEncoder({ label: `preview:${stageId}` });
-          const projected = backbone.projectCurrentTriplane(previewEncoder, state);
-          const previewPlanes = dispatchPostProcessor(
-            device, previewEncoder, projected.buffer, weights.postProcessor);
+          getDummyBias(device);
+          const { value: previewPlanes, allocations } = captureGpuBufferAllocations(() => {
+            const projected = backbone.projectCurrentTriplane(previewEncoder, state);
+            return dispatchPostProcessor(
+              device, previewEncoder, projected.buffer, weights.postProcessor);
+          });
           device.queue.submit([previewEncoder.finish()]);
           try {
             await device.queue.onSubmittedWorkDone();
@@ -499,11 +503,11 @@ export async function runInference(device, pipelines, weights, imageElement, onP
               decoder: pipelines.triplaneDecoder,
               decoderWeights: weights.decoder,
               projectionMs: performance.now() - previewStart,
+              projectionTransientBytes: allocations.reduce((sum, item) => sum + item.size, 0),
+              projectionTransientBuffers: allocations.length,
             });
           } finally {
-            previewPlanes.buffer.destroy();
-            projected.buffer.destroy();
-            projected.projOutBuf.destroy();
+            for (const { buffer } of allocations) buffer.destroy();
           }
         }
         : null,

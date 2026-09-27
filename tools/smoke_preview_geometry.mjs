@@ -130,17 +130,19 @@ try {
         twoStreamDutyGranularity: 'stage',
         intermediateStageId: intermediateStage,
         onIntermediateTriplane: intermediateStage ? async ({ stageId, triplanesBuf, decoder,
-          decoderWeights, projectionMs }) => {
+          decoderWeights, projectionMs, projectionTransientBytes, projectionTransientBuffers }) => {
           const availableMs = performance.now() - before;
           try {
             const candidate = await decodePreviewMesh(
               device, triplanesBuf, decoder, decoderWeights, res);
             intermediatePreview = { stageId, availableMs, projectionMs,
+              projectionTransientBytes, projectionTransientBuffers,
               metrics: candidate.metrics,
               vertices: Array.from(candidate.mesh.vertices),
               faces: Array.from(candidate.mesh.faces) };
           } catch (error) {
-            intermediatePreview = { stageId, availableMs, projectionMs, error: error.message };
+            intermediatePreview = { stageId, availableMs, projectionMs,
+              projectionTransientBytes, projectionTransientBuffers, error: error.message };
           }
         } : null,
         postProcessorDutyGranularity: 'plane',
