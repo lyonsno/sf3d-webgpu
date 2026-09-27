@@ -36,6 +36,7 @@ import { loadWeights } from './weights.js';
 import { initPipelines } from './inference.js';
 import { retainClipPrepWorker, releaseClipPrepWorker } from './clip_estimator.js';
 import { runFullPipelineToGlb } from './full_pipeline.js';
+export { decodePreviewMesh as decodeSf3dPreviewMesh } from './preview_geometry_gpu.js';
 import {
   createProductRouteOptions,
   createProductRouteWorkers,
