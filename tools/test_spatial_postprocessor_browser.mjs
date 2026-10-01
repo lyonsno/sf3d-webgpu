@@ -10,13 +10,18 @@ const outputDir = arg('--output-dir'), chrome = arg('--chrome');
 assert.ok(outputDir && chrome);
 fs.mkdirSync(outputDir, { recursive: true });
 const report = { ok: false, phase: 'startup', executable: chrome,
-  sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
-  sourceDiff: execFileSync('git', ['diff'], { encoding: 'utf8' }),
+  sourceCommit: null,
   route: 'native-webgpu-spatial-postprocessor' };
 const write = () => fs.writeFileSync(path.join(outputDir, 'report.json'), JSON.stringify(report, null, 2));
 write();
 let server, browser;
 try {
+  report.phase = 'source-preflight'; write();
+  const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
+  report.sourceCommit = git('rev-parse', 'HEAD');
+  report.sourceStatus = git('status', '--porcelain', '--untracked-files=all');
+  if (report.sourceStatus) throw new Error('native parity requires clean committed source');
+  if (!process.argv.includes('--source-preflight-only')) {
   assert.ok(!chrome.startsWith('/Applications/Google Chrome.app/'));
   server = await createServer({ configFile: false, server: { host: '127.0.0.1', port: 0 } });
   await server.listen();
@@ -90,10 +95,8 @@ try {
         reference.push(await gpu.readBuffer(device, current, current.size));
       }
       const regions = [];
-      let borrowed;
       await streamPostProcessor(device, sourceBuffer, { convLayers }, { config, rowsPerRegion: 5,
         onRegion: async ({ buffer, completedRows }) => {
-          borrowed = buffer;
           const actual = await gpu.readBuffer(device, buffer, buffer.size);
           for (let plane = 0; plane < 3; plane++) for (let c = 0; c < 2; c++) {
             for (let y = 0; y < width; y++) for (let x = 0; x < width; x++) {
@@ -112,6 +115,10 @@ try {
       return { rowKernelExact: true, untouchedRowsPreserved: true, fullNetworkExact: true, regions, errors };
     } finally { device.destroy(); }
   });
+  }
+  report.phase = 'source-postflight'; write();
+  assert.equal(git('rev-parse', 'HEAD'), report.sourceCommit, 'source revision changed during parity test');
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'source changed during parity test');
   report.ok = true; report.phase = 'complete'; write();
   console.log(JSON.stringify(report.result));
 } catch (error) { report.error = error.stack; write(); console.error(error); process.exitCode = 1; }

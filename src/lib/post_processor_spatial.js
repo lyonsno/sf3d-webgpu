@@ -76,6 +76,7 @@ export async function streamPostProcessor(device, input, weights, {
     dispatchLayout(device, encoder, state.buffers[4], output, config, state.plane, start, end, 'shuffle');
     state.ends = ends;
   };
+  let primaryError, failed = false;
   try {
     const xy = makePlane(0);
     await submit(encoder => { gather(encoder, xy); advance(encoder, xy, size); });
@@ -87,9 +88,24 @@ export async function streamPostProcessor(device, input, weights, {
       await onRegion({ buffer: output, completedRows: end * scale, totalRows: size * scale });
       if (end === size) break;
     }
-  } finally {
-    // Consumer queries may have submitted work before throwing.
-    try { await device.queue.onSubmittedWorkDone(); }
-    finally { for (const { buffer } of owned) buffer.destroy(); }
+  } catch (error) {
+    primaryError = error;
+    failed = true;
   }
+  // Consumer queries may have submitted work before throwing.
+  let settlementError;
+  try { await device.queue.onSubmittedWorkDone(); } catch (error) { settlementError = error; }
+  const retirementErrors = [];
+  for (const { buffer } of owned) {
+    try { buffer.destroy(); } catch (error) { retirementErrors.push(error); }
+  }
+  if (failed) {
+    try {
+      if (settlementError) primaryError.previewSettlementError = settlementError;
+      if (retirementErrors.length) primaryError.previewRetirementErrors = retirementErrors;
+    } catch { /* Frozen or primitive failures still retain their primary identity. */ }
+    throw primaryError;
+  }
+  if (settlementError) throw settlementError;
+  if (retirementErrors.length) throw new AggregateError(retirementErrors, 'spatial preview retirement failed');
 }
