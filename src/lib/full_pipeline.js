@@ -23,6 +23,7 @@ import { estimateMaterials } from './clip_estimator.js';
 import { makeCooperativeTextureBake, withDecoderArenaLease } from './cooperative_texture_bake.js';
 import { callWorker } from './worker_call.js';
 import { withForegroundScope } from './foreground_scope.js';
+import { runOptionalPreview } from './preview_policy.js';
 
 const COND_SIZE = 512;
 const TEX_RESOLUTION = 1024;
@@ -69,6 +70,13 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   const meshResult = await runInference(
     device, pipelines, weights, inputImage, report,
     { ...options, recordStageSpans: spans });
+
+  if (typeof options.onMeshExtracted === 'function') {
+    await timed('mesh-observation', () => runOptionalPreview('mesh-extracted', () => options.onMeshExtracted({
+      vertices: meshResult.vertices.slice(), faces: meshResult.faces.slice(),
+      numVertices: meshResult.numVertices, numFaces: meshResult.numFaces,
+    }), options.onObservationError));
+  }
 
   // Step 2: CLIP material estimation (exact PyTorch preprocessing order)
   const clipStart = performance.now();

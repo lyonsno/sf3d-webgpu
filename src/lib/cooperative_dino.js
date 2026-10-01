@@ -305,6 +305,8 @@ export async function runCooperativeDino(opts) {
       // queue.submit; no producer-side submit callback.
       encodeTokenizer: (driver) => tokenizer.encodeCooperative({
         imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver,
+        onBlockTokens: opts.onBlockTokens,
+        onPreviewError: opts.onPreviewError,
       }),
     });
   });

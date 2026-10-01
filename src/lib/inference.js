@@ -25,6 +25,7 @@ import { runCooperativeTwoStream } from './cooperative_two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
 import { submitPreviewAndRetire } from './preview_submission.js';
 import { runOptionalPreview } from './preview_policy.js';
+import { readTokenSimilarity } from './token_similarity.js';
 import { getDummyBias } from './shader_ops.js';
 import { runCooperativePostProcessor } from './cooperative_post_processor.js';
 import { TriplaneDecoder } from './triplane_decoder.js';
@@ -332,6 +333,17 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       numBlocks: CONFIG.numEncoderLayers,
       chunkBlocks: dinoChunkBlocks,
       schedulingMode: dinoSchedulingMode,
+      onBlockTokens: typeof options.onEncoderFeatures === 'function' ? async (state) => {
+        const startedAt = performance.now();
+        const patchIndex = options.encoderReferencePatch ?? Math.floor(state.height / 2) * state.width + Math.floor(state.width / 2);
+        const values = await readTokenSimilarity(device, state.tokensBuf, { ...state, patchIndex });
+        await options.onEncoderFeatures({
+          values, width: state.width, height: state.height, patchIndex,
+          completedBlocks: state.completedBlocks, totalBlocks: state.totalBlocks,
+          observationMs: performance.now() - startedAt,
+        });
+      } : null,
+      onPreviewError: options.onObservationError,
       onProgress: (p) => {
         if (p.percent != null) report(`DINOv2 blocks ${p.completedItems}/${p.totalItems} (${p.percent.toFixed(0)}%)`);
       },

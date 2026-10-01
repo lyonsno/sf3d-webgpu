@@ -13,6 +13,7 @@
  */
 
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import { runOptionalPreview } from './preview_policy.js';
 
 import patchEmbedWGSL from '../shaders/patch_embed_dinov2.wgsl?raw';
 import layerNormWGSL from '../shaders/layernorm_vit.wgsl?raw';
@@ -183,7 +184,7 @@ export class SF3DImageTokenizer {
    * @param {number} o.chunkBlocks
    * @param {(blockStart:number, blockEnd:number, encodeChunk:(enc:GPUCommandEncoder)=>void)=>Promise<void>} o.driver
    */
-  async encodeCooperative({ imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver }) {
+  async encodeCooperative({ imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver, onBlockTokens, onPreviewError }) {
     if (numBlocks !== VIT_CONFIG.numLayers) {
       throw new Error(
         `encodeCooperative numBlocks ${numBlocks} must equal VIT_CONFIG.numLayers ${VIT_CONFIG.numLayers}`,
@@ -210,6 +211,14 @@ export class SF3DImageTokenizer {
           result = this._finalizeEncode(encoder, ctx, weights);
         }
       });
+      // Internal observation boundary: await consumption before ping-pong buffers
+      // are overwritten. The public observer receives only a reduced CPU map.
+      if (onBlockTokens) {
+        await runOptionalPreview(`dino-block-${end}`, () => onBlockTokens({
+          tokensBuf: ctx.currentTokens, dim: ctx.D, width: ctx.tokenW, height: ctx.tokenH,
+          completedBlocks: end, totalBlocks: numBlocks,
+        }), onPreviewError);
+      }
     }
 
     if (!result) throw new Error('encodeCooperative produced no result');
