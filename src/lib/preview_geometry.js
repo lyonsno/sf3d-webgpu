@@ -58,6 +58,7 @@ export function extractPreviewMesh(grid, density, vertexOffsets, {
   threshold = 10,
   sourceResolution = 160,
   radius = 0.87,
+  completedLayers = grid.resolution + 1,
 } = {}) {
   if (density.length !== grid.numVertices) throw new RangeError('preview density length mismatch');
   if (vertexOffsets && vertexOffsets.length !== grid.numVertices * 3) {
@@ -66,11 +67,20 @@ export function extractPreviewMesh(grid, density, vertexOffsets, {
   if (!Number.isFinite(threshold) || !Number.isFinite(radius) || radius <= 0) {
     throw new RangeError('preview threshold and radius must be finite');
   }
+  if (!Number.isSafeInteger(completedLayers) || completedLayers < 1 || completedLayers > grid.resolution + 1) {
+    throw new RangeError('preview completedLayers outside grid');
+  }
+  // A cell is eligible only after both of its z planes have been decoded.
+  // Unknown samples are never interpreted as outside/zero density.
+  const knownVertices = completedLayers * (grid.resolution + 1) ** 2;
+  const knownTets = (completedLayers - 1) * grid.resolution ** 2 * 6;
+  density = density.subarray(0, knownVertices);
+  vertexOffsets = vertexOffsets?.subarray(0, knownVertices * 3);
   for (const value of density) if (!Number.isFinite(value)) throw new Error('preview density contains non-finite values');
   if (vertexOffsets) {
     for (const value of vertexOffsets) if (!Number.isFinite(value)) throw new Error('preview offsets contain non-finite values');
   }
-  const positions = scaleTensor(grid.gridVertices, [0, 1], [-radius, radius]);
+  const positions = scaleTensor(grid.gridVertices.subarray(0, knownVertices * 3), [0, 1], [-radius, radius]);
   const sdf = Float32Array.from(density, (value) => value - threshold);
-  return marchingTetrahedra(positions, sdf, grid.indices, vertexOffsets, sourceResolution);
+  return marchingTetrahedra(positions, sdf, grid.indices.subarray(0, knownTets * 4), vertexOffsets, sourceResolution);
 }
