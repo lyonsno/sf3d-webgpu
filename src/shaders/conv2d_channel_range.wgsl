@@ -17,6 +17,8 @@ struct ConvRangeParams {
   channelStart: u32,
   channelCount: u32,
   applyRelu: u32,
+  rowStart: u32,
+  rowCount: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: ConvRangeParams;
@@ -34,13 +36,14 @@ fn conv2d_channel_range_main(
   @builtin(workgroup_id) wgid: vec3<u32>,
 ) {
   let outX = gid.x;
-  let outY = gid.y;
+  let outY = params.rowStart + gid.y;
   let localOutCh = wgid.z;
   let outCh = params.channelStart + localOutCh;
 
   if (
     outX >= params.outW
     || outY >= params.outH
+    || gid.y >= params.rowCount
     || localOutCh >= params.channelCount
     || outCh >= params.outC
   ) {

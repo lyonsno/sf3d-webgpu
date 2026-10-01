@@ -23,6 +23,7 @@ import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
 import { runCooperativeTwoStream } from './cooperative_two_stream.js';
 import { dispatchPostProcessor } from './post_processor.js';
+import { streamPostProcessor } from './post_processor_spatial.js';
 import { submitPreviewAndRetire } from './preview_submission.js';
 import { runOptionalPreview } from './preview_policy.js';
 import { readTokenSimilarity } from './token_similarity.js';
@@ -224,6 +225,11 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   }
   const intermediateStageIds = options.intermediateStageIds
     ?? (options.intermediateStageId ? [options.intermediateStageId] : []);
+  if (options.intermediateSpatialRows != null
+      && (!Number.isSafeInteger(options.intermediateSpatialRows) || options.intermediateSpatialRows <= 0
+        || typeof options.onIntermediateTriplane !== 'function')) {
+    throw new RangeError('intermediateSpatialRows requires a positive row count and an intermediate observer');
+  }
   if (!Array.isArray(intermediateStageIds)
       || intermediateStageIds.some(stageId => !/^block-[0-3]-fuse-out$/.test(stageId))
       || new Set(intermediateStageIds).size !== intermediateStageIds.length) {
@@ -513,6 +519,20 @@ export async function runInference(device, pipelines, weights, imageElement, onP
             const previewStart = performance.now();
             const previewEncoder = device.createCommandEncoder({ label: `preview:${stageId}` });
             getDummyBias(device);
+            if (options.intermediateSpatialRows != null) {
+              const { value: projected, allocations } = captureGpuBufferAllocations(
+                () => backbone.projectCurrentTriplane(previewEncoder, state));
+              await submitPreviewAndRetire(device, previewEncoder, allocations,
+                () => options.onIntermediateTriplane({
+                  stageId,
+                  decoder: pipelines.triplaneDecoder,
+                  decoderWeights: weights.decoder,
+                  produceRegions: onRegion => streamPostProcessor(device, projected.buffer, weights.postProcessor, {
+                    rowsPerRegion: options.intermediateSpatialRows, onRegion,
+                  }),
+                }));
+              return;
+            }
             const directAllocations = [];
             let captured;
             try {

@@ -55,4 +55,18 @@ await assert.rejects(decodePreviewMesh(device, null, decoder, {}, 6, 384, {
   layersPerSlab: 2, onSlab: () => { throw new Error('observer broke'); },
 }), /observer broke/);
 assert.ok(allocations.every(buffer => buffer.destroyed), 'observer failure retires current slab');
+let produced = 0;
+const regionUpdates = [];
+const regions = await decodePreviewMesh(device, null, decoder, {}, 6, 24, {
+  onSlab: sample => regionUpdates.push(sample.completedLayers),
+  produceRegions: async consume => {
+    for (const completedRows of [8, 16, 24]) {
+      produced++;
+      await consume({ buffer: null, completedRows, totalRows: 24 });
+    }
+  },
+});
+assert.equal(produced, 3, 'query must be driven by completed feature regions');
+assert.deepEqual(regionUpdates, [2, 4, 7]);
+assert.deepEqual(regions.mesh, whole.mesh);
 console.log('Spatial construction: actual sequential slabs, no unknown-space caps, exact final mesh, cleanup');

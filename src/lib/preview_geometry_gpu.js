@@ -47,24 +47,26 @@ export async function decodePreviewMesh(device, triplanesBuf, decoder, decoderWe
 }
 
 async function decodeConstruction(device, triplanesBuf, decoder, weights, grid, positions, planeSize, {
-  onSlab, layersPerSlab = 4,
+  onSlab, layersPerSlab = 4, produceRegions = null,
 }, started) {
   if (!Number.isSafeInteger(layersPerSlab) || layersPerSlab < 1) throw new RangeError('layersPerSlab must be a positive integer');
+  if (produceRegions != null && typeof produceRegions !== 'function') throw new TypeError('produceRegions must be a function');
   const side = grid.resolution + 1;
   const planeVertices = side ** 2;
   const density = new Float32Array(grid.numVertices);
   const offsets = new Float32Array(grid.numVertices * 3);
   let mesh;
   let submitMs = 0, readbackMs = 0, marchingMs = 0, observationMs = 0, peakBufferBytes = 0;
-  for (let startLayer = 0; startLayer < side; startLayer += layersPerSlab) {
-    const endLayer = Math.min(side, startLayer + layersPerSlab);
+  let startLayer = 0, slabs = 0, lastRows = 0;
+  const decodeThrough = async (buffer, endLayer) => {
+    if (endLayer <= startLayer) return;
     const first = startLayer * planeVertices;
     const count = (endLayer - startLayer) * planeVertices;
     const begin = performance.now();
     const { value, allocations } = captureGpuBufferAllocations(() => {
       const input = createStorageBuffer(device, positions.subarray(first * 3, (first + count) * 3), 0, 'preview:slab');
       const encoder = device.createCommandEncoder();
-      const decoded = decoder.decode(encoder, input, triplanesBuf, count, weights, ['density', 'vertex_offset'], planeSize);
+      const decoded = decoder.decode(encoder, input, buffer, count, weights, ['density', 'vertex_offset'], planeSize);
       device.queue.submit([encoder.finish()]);
       return decoded;
     });
@@ -91,10 +93,35 @@ async function decodeConstruction(device, triplanesBuf, decoder, weights, grid, 
       elapsedMs: extracted - started,
     });
     observationMs += performance.now() - extracted;
+    startLayer = endLayer;
+    slabs++;
+  };
+  if (produceRegions) {
+    await produceRegions(async ({ buffer, completedRows, totalRows }) => {
+      if (totalRows !== planeSize || !Number.isSafeInteger(completedRows)
+          || completedRows <= lastRows || completedRows > totalRows) {
+        throw new RangeError('feature-plane frontier must advance within the declared plane');
+      }
+      lastRows = completedRows;
+      let endLayer = startLayer;
+      while (endLayer < side) {
+        const z = positions[(endLayer * planeVertices) * 3 + 2];
+        const pixel = (z / .87 + 1) * .5 * (planeSize - 1);
+        // Include both bilinear neighbors; the small margin is conservative at
+        // integer boundaries where GPU f32 normalization can round upward.
+        if (completedRows < planeSize && Math.floor(pixel + 1e-4) + 1 >= completedRows) break;
+        endLayer++;
+      }
+      await decodeThrough(buffer, endLayer);
+    });
+    if (startLayer !== side) throw new Error('feature-plane production ended before geometry was complete');
+  } else {
+    while (startLayer < side) await decodeThrough(triplanesBuf, Math.min(side, startLayer + layersPerSlab));
   }
   if (!mesh.numVertices || !mesh.numFaces) throw new Error('preview mesh is empty');
   return { mesh, metrics: { resolution: grid.resolution, planeSize, queryVertices: grid.numVertices,
     tetrahedra: grid.numTets, submitMs, readbackMs, marchingMs, observationMs,
     totalMs: performance.now() - started, transientBufferBytes: peakBufferBytes,
-    slabs: Math.ceil(side / layersPerSlab), layersPerSlab } };
+    slabs, layersPerSlab: produceRegions ? null : layersPerSlab,
+    featureDriven: !!produceRegions } };
 }

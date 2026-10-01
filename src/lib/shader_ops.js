@@ -152,6 +152,12 @@ export function dispatchConv2dChannelRange(
     conv2dChannelRangeWGSL,
     'conv2d_channel_range_main',
   );
+  const { rowStart = 0, rowCount = outH } = range;
+  if (!Number.isSafeInteger(rowStart) || rowStart < 0
+      || !Number.isSafeInteger(rowCount) || rowCount <= 0
+      || rowStart + rowCount > outH) {
+    throw new RangeError(`invalid Conv2d output-row range ${rowStart}+${rowCount}/${outH}`);
+  }
   const uniformData = new Uint32Array([
     inC,
     inH,
@@ -169,6 +175,8 @@ export function dispatchConv2dChannelRange(
     channelStart,
     channelCount,
     params.applyRelu === true ? 1 : 0,
+    rowStart,
+    rowCount,
   ]);
   const uniformBuf = cachedUniform(device, uniformData);
   const dummyBias = biasBuf || getDummyBias(device);
@@ -185,7 +193,7 @@ export function dispatchConv2dChannelRange(
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(ceil(outW, 16), ceil(outH, 16), channelCount);
+  pass.dispatchWorkgroups(ceil(outW, 16), ceil(rowCount, 16), channelCount);
   pass.end();
   return { buffer: outputBuf, outC, outH, outW };
 }
