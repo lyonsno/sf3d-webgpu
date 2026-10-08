@@ -22,7 +22,7 @@ import { unwrapUV, rasterizeUV, bakeTexture, exportGLB } from './texture_baker.j
 import { estimateMaterials } from './clip_estimator.js';
 import { makeCooperativeTextureBake, withDecoderArenaLease } from './cooperative_texture_bake.js';
 import { callWorker } from './worker_call.js';
-import { withForegroundScope } from './foreground_scope.js';
+import { runInferenceDuty, withForegroundScope } from './foreground_scope.js';
 
 const COND_SIZE = 512;
 const TEX_RESOLUTION = 1024;
@@ -72,17 +72,17 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
 
   // Step 2: CLIP material estimation (exact PyTorch preprocessing order)
   const clipStart = performance.now();
-  const clipCanvas = document.createElement('canvas');
-  clipCanvas.width = COND_SIZE;
-  clipCanvas.height = COND_SIZE;
-  const clipCtx = clipCanvas.getContext('2d');
-  clipCtx.drawImage(inputImage, 0, 0, COND_SIZE, COND_SIZE);
-  const clipRaw = clipCtx.getImageData(0, 0, COND_SIZE, COND_SIZE).data;
-  // Blend / resize / patch-embed run in clip_prep_core — on the main thread, or
-  // on options.clipPrepWorker with byte-identical output.
-  const { roughness, metallic } = await estimateMaterials(
-    device, clipRaw, COND_SIZE, COND_SIZE, weights,
-    { clipPrepWorker: options.clipPrepWorker, workerTimeoutMs: options.workerTimeoutMs, withForeground: options.withForeground });
+  const { roughness, metallic } = await runInferenceDuty(options, async () => {
+    const clipCanvas = document.createElement('canvas');
+    clipCanvas.width = COND_SIZE;
+    clipCanvas.height = COND_SIZE;
+    const clipCtx = clipCanvas.getContext('2d');
+    clipCtx.drawImage(inputImage, 0, 0, COND_SIZE, COND_SIZE);
+    const clipRaw = clipCtx.getImageData(0, 0, COND_SIZE, COND_SIZE).data;
+    // CLIP has no nested kit duties. Keep its GPU/worker leaves in one admission.
+    return estimateMaterials(device, clipRaw, COND_SIZE, COND_SIZE, weights,
+      { clipPrepWorker: options.clipPrepWorker, workerTimeoutMs: options.workerTimeoutMs, withForeground: options.withForeground });
+  });
   mark('clip-material-estimate', clipStart, performance.now());
 
   // Step 3: UV unwrap (CPU). Optionally offloaded to a Web Worker
@@ -109,6 +109,8 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
       foregroundOpportunities: options.foregroundOpportunities ?? null,
       batchTexels: options.bakeBatchTexels || 16384,
       schedulingMode: options.bakeSchedulingMode === 'disabled' ? 'disabled' : 'cooperative',
+      signal: options.signal,
+      inferenceControl: options.inferenceControl,
       onProgress: (p) => { if (p.percent != null) report(`Texture bake ${p.completedItems}/${p.totalItems} (${p.percent.toFixed(0)}%)`); },
     });
     bakeOptions.cooperativeBatch = async (numOccupied, makeBatch) => { bakeReport = await cooperativeBatch(numOccupied, makeBatch); };
@@ -121,6 +123,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
     bakeOptions.workerTimeoutMs = options.workerTimeoutMs;
   }
   bakeOptions.withForeground = options.withForeground;
+  bakeOptions.inferenceControl = options.inferenceControl;
   // Optional decoder scratch arena (options.decoderArena): removes ~1.015GB
   // per-route decode allocation churn by reusing one buffer per slot across
   // ranges, held under the phase-resource working-set lease. maxBatch is the
@@ -133,7 +136,9 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
   const bakeResult = await timed('texture-bake', async () => {
     if (options.decoderArena && options.cooperativeBake) {
       const maxBatch = options.bakeBatchTexels || 16384;
-      return await withDecoderArenaLease(device, { maxBatch }, async (arena, snap) => {
+      return await withDecoderArenaLease(device, {
+        maxBatch, signal: options.signal, inferenceControl: options.inferenceControl,
+      }, async (arena, snap) => {
         bakeOptions.arena = arena;
         arenaSnapshot = snap;
         const r = await runBake();

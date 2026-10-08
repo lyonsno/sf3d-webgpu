@@ -15,8 +15,8 @@
  * offload workers); routeOverrides adjust it per run.
  *
  * Honest boundaries: one run at a time per producer (the pipelines and decoder
- * arena are not reentrant); `signal` is checked at run start only (no mid-run
- * cancellation of SF3D GPU work); the route receipt's artifact hashes are
+ * arena are not reentrant); AbortSignal stops admission at cooperative/leaf
+ * duty boundaries, not an already submitted GPU command; the route receipt's artifact hashes are
  * 'not-computed' as in the app (the witness harness hashes the GLB).
  * `dispose()` refuses new work synchronously and returns a stable completion
  * promise. That completion settles only after admitted foreground work drains,
@@ -36,6 +36,7 @@ import { loadWeights } from './weights.js';
 import { initPipelines } from './inference.js';
 import { retainClipPrepWorker, releaseClipPrepWorker } from './clip_estimator.js';
 import { runFullPipelineToGlb } from './full_pipeline.js';
+import { createWebGpuInferenceControl } from '@kaminos/webgpu-inference-kit/core';
 import {
   createProductRouteOptions,
   createProductRouteWorkers,
@@ -157,6 +158,30 @@ export async function finishProducerRunWithEvidence({
   terminalError.sf3dRun = evidence;
   throw terminalError;
 }
+
+/** One invocation control; close it before the caller finishes the foreground run. */
+export async function runControlledPipeline({ queue, signal, withForeground, options, execute, onControl }) {
+  const control = createWebGpuInferenceControl({ queue, signal, withForeground });
+  onControl?.(control);
+  let result;
+  let failure = null;
+  try {
+    result = await execute({ ...options, signal, inferenceControl: control });
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    await control.close();
+  } catch (error) {
+    failure = failure
+      ? new AggregateError([failure, error], 'SF3D inference and pause control close both failed', { cause: failure })
+      : error;
+  } finally {
+    onControl?.(null);
+  }
+  if (failure) throw failure;
+  return result;
+}
 export const SF3D_REQUIRED_RECEIPT_STAGES = Object.freeze([
   'image-preprocess', 'dinov2-tokenizer', 'two-stream-backbone',
   'triplane-decode', 'marching-tet', 'texture-bake', 'glb-export',
@@ -270,6 +295,7 @@ export async function createSf3dProducer({
   }
 
   let runSequence = 0;
+  let activeControl = null;
   // One run at a time; dispose() during a run defers the release until the
   // run ends and refuses everything new meanwhile (producer_lifecycle.js).
   const lifecycle = createProducerLifecycle({
@@ -302,6 +328,15 @@ export async function createSf3dProducer({
     get activeRunId() { return lifecycle.activeRunId; },
     get disposed() { return lifecycle.disposed; },
     get quarantined() { return lifecycle.quarantined; },
+    pauseSnapshot() { return activeControl?.snapshot() ?? null; },
+    async pause() {
+      if (!activeControl) throw new Error('SF3D has no active inference control to pause');
+      return activeControl.pause();
+    },
+    async resume() {
+      if (!activeControl) throw new Error('SF3D has no active inference control to resume');
+      return activeControl.resume();
+    },
 
     /** Host (kiln) frames: kit-shaped { requestId, run(ctx), metadata } → { requestId, completion, cancel }. */
     requestForegroundOpportunity(request) {
@@ -326,14 +361,23 @@ export async function createSf3dProducer({
       let result;
       let foregroundOpportunityReport = null;
       let lastProgress = null;
+      let pipelineError = null;
       const startedAtMs = performance.now();
       const progress = (message) => { lastProgress = String(message); if (onProgress) onProgress(message); };
       try {
-        result = await runFullPipelineToGlb(dev, pipelines, modelWeights, image, options, progress);
+        result = await runControlledPipeline({
+          queue: dev.queue,
+          signal,
+          withForeground: prepared.foregroundRun.withForeground,
+          options,
+          onControl: control => { activeControl = control; },
+          execute: runOptions => runFullPipelineToGlb(dev, pipelines, modelWeights, image, runOptions, progress),
+        });
       } catch (error) {
-        await finishProducerRunWithEvidence({ prepared, pipelineFailed: true, pipelineError: error,
-          runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit });
+        pipelineError = error;
       }
+      if (pipelineError) await finishProducerRunWithEvidence({ prepared, pipelineFailed: true, pipelineError,
+        runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit });
       foregroundOpportunityReport = await finishProducerRunWithEvidence({ prepared, pipelineFailed: false,
         runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit });
       const finishedAtMs = performance.now();

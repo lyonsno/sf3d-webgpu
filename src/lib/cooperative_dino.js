@@ -269,6 +269,7 @@ export async function runCooperativeDino(opts) {
     schedulingMode = 'cooperative',
     onProgress,
     signal,
+    inferenceControl,
     invocationId = `sf3d:dino:${schedulingMode}`,
   } = opts;
 
@@ -283,6 +284,7 @@ export async function runCooperativeDino(opts) {
     schedulingMode,
     onProgress,
     signal,
+    inferenceControl,
   });
 
   let result = null;

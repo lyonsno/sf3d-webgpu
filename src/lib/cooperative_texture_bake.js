@@ -39,7 +39,7 @@ export const DECODER_ARENA_RESOURCE_ID = 'sf3d.decoder-scratch-arena';
  * @param {object} o { maxBatch, signal }
  * @param {(arena, workingSetSnapshot)=>Promise<any>} fn
  */
-export async function withDecoderArenaLease(device, { maxBatch, signal }, fn) {
+export async function withDecoderArenaLease(device, { maxBatch, signal, inferenceControl }, fn) {
   const declaredBytes = decoderArenaCapacityBytes(maxBatch);
   let arena = null;
   const workingSet = createWebGpuPhaseResourceWorkingSet({
@@ -63,7 +63,11 @@ export async function withDecoderArenaLease(device, { maxBatch, signal }, fn) {
     residencySnapshot: () => (arena ? arena.snapshot() : { slotCount: 0, totalBytes: 0 }),
   });
   try {
-    await workingSet.transitionToPhase('texture-bake', { signal });
+    if (inferenceControl) {
+      await inferenceControl.runDuty(() => workingSet.transitionToPhase('texture-bake', { signal }));
+    } else {
+      await workingSet.transitionToPhase('texture-bake', { signal });
+    }
     return await fn(arena, workingSet.snapshot());
   } finally {
     workingSet.close();
@@ -127,6 +131,7 @@ export function makeCooperativeTextureBake(device, opts = {}) {
     schedulingMode = 'cooperative',
     onProgress,
     signal,
+    inferenceControl,
     invocationId = `sf3d:texture-bake:${schedulingMode}`,
     onBrowserYield,
   } = opts;
@@ -213,7 +218,7 @@ export function makeCooperativeTextureBake(device, opts = {}) {
       },
     });
     const execution = createWebGpuCooperativeExecution({
-      runtime, manifest, invocationId, schedulingMode, onProgress, signal,
+      runtime, manifest, invocationId, schedulingMode, onProgress, signal, inferenceControl,
     });
 
     try {
@@ -223,7 +228,9 @@ export function makeCooperativeTextureBake(device, opts = {}) {
         while ((range = gpu.nextRange()) != null) {
           const start = range.itemStart, end = range.itemEnd;
           const prepareEncodeStartedAtMs = now();
-          const b = await makeBatch(start, end);
+          const b = inferenceControl
+            ? await inferenceControl.runDuty(() => makeBatch(start, end))
+            : await makeBatch(start, end);
           const resources = Array.isArray(b.scratchResources) ? b.scratchResources : [];
           for (const resource of resources) {
             if (!Number.isFinite(resource?.size) || resource.size < 0) {

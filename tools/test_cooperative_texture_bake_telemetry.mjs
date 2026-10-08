@@ -16,7 +16,7 @@ function makeScratch(label, size) {
   };
 }
 
-async function runArm(schedulingMode) {
+async function runArm(schedulingMode, inferenceControl = null) {
   const submitted = [];
   const scratch = [];
   const device = {
@@ -31,6 +31,7 @@ async function runArm(schedulingMode) {
     batchTexels: 2,
     schedulingMode,
     invocationId: `test:texture-bake:${schedulingMode}`,
+    inferenceControl,
   });
 
   const report = await cooperativeBatch(4, async (start, end) => {
@@ -91,5 +92,11 @@ async function runArm(schedulingMode) {
 
 await runArm('cooperative');
 await runArm('disabled');
+
+let admitted = 0;
+await runArm('cooperative', {
+  async runDuty(work) { admitted += 1; return work(); },
+});
+assert.ok(admitted >= 4, 'both batch preparation and GPU submission must be controlled');
 
 console.log('cooperative texture-bake telemetry contract passed');

@@ -117,7 +117,7 @@ function makeFakeWeights() {
 }
 
 // --- 2. Cooperative dispatch sequence === legacy, for several chunk sizes ---
-async function recordCooperative(chunkBlocks, schedulingMode) {
+async function recordCooperative(chunkBlocks, schedulingMode, inferenceControl = null) {
   const log = [];
   const encRef = { value: null };
   const tok = createRecordingTokenizer(log, encRef);
@@ -147,6 +147,7 @@ async function recordCooperative(chunkBlocks, schedulingMode) {
     numBlocks: NUM_BLOCKS,
     chunkBlocks,
     schedulingMode,
+    inferenceControl,
     onProgress: (p) => progressEvents.push(p),
     invocationId: `test:${schedulingMode}:${chunkBlocks}`,
   });
@@ -215,6 +216,16 @@ for (const chunkBlocks of [1, 2, 3, 4, 8, 24]) {
   assert.equal(calls.filter(c => c === 'fence').length, 1,
     'disabled A/B must take exactly one terminal queue fence');
   console.log('ok  disabled A/B: identical work, single terminal fence');
+}
+
+// The producer's invocation control must reach the actual Kit duty facade.
+{
+  let admitted = 0;
+  await recordCooperative(24, 'cooperative', {
+    async runDuty(work) { admitted += 1; return work(); },
+  });
+  assert.ok(admitted > 0, 'DINO duties must pass through inference control');
+  console.log('ok  DINO duty facade consumes invocation control');
 }
 
 console.log('\nALL COOPERATIVE DINO CONTRACT CHECKS PASSED');

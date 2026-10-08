@@ -13,11 +13,11 @@
  * Steps 1 run on CPU. Steps 2-6 run on GPU. Step 7 runs on CPU.
  */
 
-import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import { createStorageBuffer, createEmptyBuffer, readBuffer as readGpuBuffer } from './gpu.js';
 import { validatePreprocessReply } from './worker_reply_validation.js';
 import { resizeBlendNormalize } from './preprocess_core.js';
 import { callWorker } from './worker_call.js';
-import { withForegroundScope } from './foreground_scope.js';
+import { runInferenceDuty, withForegroundScope } from './foreground_scope.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
 import { runCooperativeDino } from './cooperative_dino.js';
 import { TwoStreamBackbone } from './two_stream.js';
@@ -170,6 +170,7 @@ export function initPipelines(device) {
  * @returns {{ vertices: Float32Array, faces: Uint32Array, numVertices: number, numFaces: number }}
  */
 export async function runInference(device, pipelines, weights, imageElement, onProgress, options = {}) {
+  const readBuffer = (...args) => runInferenceDuty(options, () => readGpuBuffer(...args));
   const report = (msg) => { if (onProgress) onProgress(msg); console.log(msg); };
   const _stageTimings = {};
   let _stageStart;
@@ -242,19 +243,19 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       imageElement.naturalWidth || imageElement.width,
       imageElement.naturalHeight || imageElement.height,
       { preprocessWorker: options.preprocessWorker, workerTimeoutMs: options.workerTimeoutMs }));
-  const imageBuf = createStorageBuffer(device, imageData);
-
-  // 2. Camera embedding (GPU) — counted as part of image-preprocess
-  report('Computing camera embedding...');
-  const cameraInput = computeCameraInput();
-  const cameraInputBuf = createStorageBuffer(device, cameraInput);
-
-  // Dispatch camera embedding: Linear(25 → 768)
-  const encoder1 = device.createCommandEncoder();
-  const cameraEmbedBuf = createEmptyBuffer(device, 768 * 4);
-  _dispatchLinear(device, encoder1, pipelines, cameraInputBuf, cameraEmbedBuf,
-    weights.cameraEmbedder.weight, weights.cameraEmbedder.bias, 1, 25, 768);
-  device.queue.submit([encoder1.finish()]);
+  const { imageBuf, cameraEmbedBuf } = await runInferenceDuty(options, () => {
+    const imageBuf = createStorageBuffer(device, imageData);
+    // 2. Camera embedding (GPU) — counted as part of image-preprocess.
+    report('Computing camera embedding...');
+    const cameraInput = computeCameraInput();
+    const cameraInputBuf = createStorageBuffer(device, cameraInput);
+    const encoder1 = device.createCommandEncoder();
+    const cameraEmbedBuf = createEmptyBuffer(device, 768 * 4);
+    _dispatchLinear(device, encoder1, pipelines, cameraInputBuf, cameraEmbedBuf,
+      weights.cameraEmbedder.weight, weights.cameraEmbedder.bias, 1, 25, 768);
+    device.queue.submit([encoder1.finish()]);
+    return { imageBuf, cameraEmbedBuf };
+  });
 
   // Verify image buffer content before DINOv2 — check all 3 channels at pixel (0,0)
   if (DEBUG) {
@@ -294,6 +295,8 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       numBlocks: CONFIG.numEncoderLayers,
       chunkBlocks: dinoChunkBlocks,
       schedulingMode: dinoSchedulingMode,
+      signal: options.signal,
+      inferenceControl: options.inferenceControl,
       onProgress: (p) => {
         if (p.percent != null) report(`DINOv2 blocks ${p.completedItems}/${p.totalItems} (${p.percent.toFixed(0)}%)`);
       },
@@ -302,10 +305,13 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     _cooperativeReports['dinov2-tokenizer'] = coopReport;
   } else {
     report('Running DINOv2 backbone...');
-    const encoder2 = device.createCommandEncoder();
-    dinov2Result = pipelines.imageTokenizer.encode(
-      encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
-    device.queue.submit([encoder2.finish()]);
+    dinov2Result = await runInferenceDuty(options, () => {
+      const encoder2 = device.createCommandEncoder();
+      const result = pipelines.imageTokenizer.encode(
+        encoder2, imageBuf, cameraEmbedBuf, weights.imageTokenizer);
+      device.queue.submit([encoder2.finish()]);
+      return result;
+    });
   }
 
   // Exact numerical payload capture (acceptance-capsule gate 5). Reads back the
@@ -359,6 +365,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   // PyTorch does: rearrange("Np Ct Hp Wp -> Ct (Np Hp Wp)")
   // Source [p,c,h,w] at p*C*H*W + c*H*W + h*W + w
   // Dest [c, p*H*W + h*W + w] at c*3*H*W + p*H*W + h*W + w
+  await runInferenceDuty(options, () => {
   if (!weights.backbone._rearrangedEmbeddings) {
     const C = 1024, Np = 3, H = 96, W = 96;
     const total = Np * C * H * W;
@@ -423,6 +430,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     weights.backbone._rearrangedEmbeddings = rearrangedBuf;
   }
   weights.backbone.tokenizer_embeddings_buf = weights.backbone._rearrangedEmbeddings;
+  });
 
   // Diagnostic: check tokenizer embeddings
   if (DEBUG) {
@@ -456,6 +464,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       dutyGranularity: twoStreamDutyGranularity,
       linearRowsPerDuty: twoStreamLinearRowsPerDuty,
       signal: options.signal,
+      inferenceControl: options.inferenceControl,
       onProgress: (p) => {
         if (p.percent != null) {
           report(
@@ -468,10 +477,13 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     backboneResult = result;
     _cooperativeReports['two-stream-backbone'] = twoStreamReport;
   } else {
-    const encoder3 = device.createCommandEncoder();
-    backboneResult = pipelines.twoStream.forward(
-      encoder3, dinov2Result.tokensBuf, dinov2Result.N, weights.backbone);
-    device.queue.submit([encoder3.finish()]);
+    backboneResult = await runInferenceDuty(options, () => {
+      const encoder3 = device.createCommandEncoder();
+      const result = pipelines.twoStream.forward(
+        encoder3, dinov2Result.tokensBuf, dinov2Result.N, weights.backbone);
+      device.queue.submit([encoder3.finish()]);
+      return result;
+    });
   }
 
   if (DEBUG) {
@@ -543,6 +555,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
       completionPolicy: postProcessorCompletionPolicy,
       maxInFlightGpuDuties: postProcessorMaxInFlightGpuDuties,
       signal: options.signal,
+      inferenceControl: options.inferenceControl,
       onProgress: (p) => {
         if (p.percent != null) {
           report(
@@ -556,13 +569,14 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     _cooperativeReports['post-processor'] = postProcessorReport;
   } else {
     report('Running post-processor...');
-    const encoder4 = device.createCommandEncoder();
-    triplaneResult = dispatchPostProcessor(
-      device, encoder4, backboneResult.buffer, weights.postProcessor);
-    device.queue.submit([encoder4.finish()]);
-
-    // Ensure GPU work is done before reading
-    await device.queue.onSubmittedWorkDone();
+    triplaneResult = await runInferenceDuty(options, async () => {
+      const encoder4 = device.createCommandEncoder();
+      const result = dispatchPostProcessor(
+        device, encoder4, backboneResult.buffer, weights.postProcessor);
+      device.queue.submit([encoder4.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      return result;
+    });
   }
   _markSpan('post-processor', _stageStart);
 
@@ -631,20 +645,19 @@ export async function runInference(device, pipelines, weights, imageElement, onP
 
   // Load tet grid data: the whole grid for the inline marching tet, or only
   // the query positions when a Worker owns the tet table.
-  const tetData = options.marchingTetWorker ? await loadTetGridVertices() : await loadTetData();
-  report(`Loaded tet grid: ${tetData.numVertices} vertices, ${tetData.numTets ?? 'worker-owned'} tets`);
-
-  // Scale grid vertices from [0, 1] to bbox
   const bbox = [-CONFIG.radius, CONFIG.radius];
-  const gridPositions = scaleTensor(tetData.gridVertices, [0, 1], bbox);
-  const gridPosBuf = createStorageBuffer(device, gridPositions);
-
-  // First pass: density + vertex_offset for mesh extraction
-  const encoder5 = device.createCommandEncoder();
-  const decoded = pipelines.triplaneDecoder.decode(
-    encoder5, gridPosBuf, triplaneResult.buffer, tetData.numVertices,
-    weights.decoder, ['density', 'vertex_offset']);
-  device.queue.submit([encoder5.finish()]);
+  const { tetData, gridPositions, decoded } = await runInferenceDuty(options, async () => {
+    const tetData = options.marchingTetWorker ? await loadTetGridVertices() : await loadTetData();
+    report(`Loaded tet grid: ${tetData.numVertices} vertices, ${tetData.numTets ?? 'worker-owned'} tets`);
+    const gridPositions = scaleTensor(tetData.gridVertices, [0, 1], bbox);
+    const gridPosBuf = createStorageBuffer(device, gridPositions);
+    const encoder5 = device.createCommandEncoder();
+    const decoded = pipelines.triplaneDecoder.decode(
+      encoder5, gridPosBuf, triplaneResult.buffer, tetData.numVertices,
+      weights.decoder, ['density', 'vertex_offset']);
+    device.queue.submit([encoder5.finish()]);
+    return { tetData, gridPositions, decoded };
+  });
 
   // Read back density and vertex_offset to CPU
   report('Reading back SDF values...');

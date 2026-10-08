@@ -403,6 +403,7 @@ export async function runCooperativePostProcessor(options) {
     channelsPerDuty = 16,
     onProgress,
     signal,
+    inferenceControl,
     invocationId = `sf3d:post-processor:${schedulingMode}`,
     // Bounded-prefix completion (kit >=0.1.41): allow up to maxInFlightGpuDuties
     // GPU duties to be in flight before the facade fences a prefix, instead of
@@ -461,13 +462,16 @@ export async function runCooperativePostProcessor(options) {
     schedulingMode,
     onProgress,
     signal,
+    inferenceControl,
     // Only the fixed channel-range boundary carries bounded-prefix; all other
     // granularities and the default keep strict-prefix (the kit rejects
     // bounded-prefix on adaptive boundaries regardless).
     completionPolicy,
     ...(completionPolicy === 'bounded-prefix' ? { maxInFlightGpuDuties } : {}),
   });
-  const output = createPostProcessorOutput(device);
+  const output = inferenceControl
+    ? await inferenceControl.runDuty(() => createPostProcessorOutput(device))
+    : createPostProcessorOutput(device);
   let dutyTelemetry = [];
 
   await execution.run(async (cooperative) => {

@@ -18,7 +18,7 @@ import {
 } from './gpu.js';
 import { materializeTextures } from './materialize_core.js';
 import { callWorker } from './worker_call.js';
-import { withForegroundScope } from './foreground_scope.js';
+import { runInferenceDuty, withForegroundScope } from './foreground_scope.js';
 
 /**
  * UV unwrap a mesh using cube projection with bounding-box normalization.
@@ -881,10 +881,15 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
     // small query-position buffer, and the existing per-prefix retire logic
     // still lawfully retires that. Exact per-range prefix completion is unchanged.
     const priorSlotProvider = triplaneDecoder._slotProvider;
-    if (options.arena) triplaneDecoder._slotProvider = options.arena;
-    const featuresAll = createEmptyBuffer(device, numOccupied * 3 * 4);
-    const normalsAll = createEmptyBuffer(device, numOccupied * 3 * 4);
+    let featuresAll;
+    let normalsAll;
     try {
+    ({ featuresAll, normalsAll } = await runInferenceDuty(options, () => {
+      if (options.arena) triplaneDecoder._slotProvider = options.arena;
+      featuresAll = createEmptyBuffer(device, numOccupied * 3 * 4);
+      normalsAll = createEmptyBuffer(device, numOccupied * 3 * 4);
+      return { featuresAll, normalsAll };
+    }));
     await options.cooperativeBatch(numOccupied, async (start, end) => {
       const { encoder, decoded, count, hostEncodeMs, scratchResources } = await decodeRange(start, end);
       // Copy this batch's decode outputs into their slice of the shared buffers,
@@ -902,13 +907,10 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
     const readbackStartedAtMs = performance.now();
     let f;
     let n;
-    try {
-      f = await readBuffer(device, featuresAll, numOccupied * 3 * 4);
-      n = await readBuffer(device, normalsAll, numOccupied * 3 * 4);
-    } finally {
-      featuresAll.destroy();
-      normalsAll.destroy();
-    }
+    ({ f, n } = await runInferenceDuty(options, async () => ({
+      f: await readBuffer(device, featuresAll, numOccupied * 3 * 4),
+      n: await readBuffer(device, normalsAll, numOccupied * 3 * 4),
+    })));
     if (options.telemetry) {
       const readbackCompletedAtMs = performance.now();
       options.telemetry.readbackMs = readbackCompletedAtMs - readbackStartedAtMs;
@@ -923,6 +925,8 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
     normalsCPU.set(n.subarray(0, numOccupied * 3));
     return { featuresCPU, normalsCPU };
     } finally {
+      featuresAll?.destroy();
+      normalsAll?.destroy();
       // Restore the decoder's slot provider so a non-arena decode later is
       // unaffected. The arena's own lifetime (allocation/retirement) is owned by
       // the phase-resource lease at the call site, not here.
@@ -931,11 +935,15 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
   }
 
   // Monolithic default (unchanged behavior).
-  const { encoder, decoded } = await decodeRange(0, numOccupied);
-  device.queue.submit([encoder.finish()]);
-  await device.queue.onSubmittedWorkDone();
-  const f = await readBuffer(device, decoded.features, numOccupied * 3 * 4);
-  const n = await readBuffer(device, decoded.perturb_normal, numOccupied * 3 * 4);
+  const { f, n } = await runInferenceDuty(options, async () => {
+    const { encoder, decoded } = await decodeRange(0, numOccupied);
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    return {
+      f: await readBuffer(device, decoded.features, numOccupied * 3 * 4),
+      n: await readBuffer(device, decoded.perturb_normal, numOccupied * 3 * 4),
+    };
+  });
   featuresCPU.set(f.subarray(0, numOccupied * 3));
   normalsCPU.set(n.subarray(0, numOccupied * 3));
   return { featuresCPU, normalsCPU };
@@ -944,27 +952,27 @@ export async function decodeTexelFeatures(device, triplaneDecoder, triplanesBuf,
 export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoderWeights,
                                    positions3D, mask, tbnData, resolution = 1024, options = {}) {
   const cpuPrepStartedAtMs = performance.now();
-  // Collect occupied texel positions
-  const occupiedIndices = [];
-  for (let i = 0; i < resolution * resolution; i++) {
-    if (mask[i]) occupiedIndices.push(i);
-  }
-
-  const numOccupied = occupiedIndices.length;
+  // The packing loop is a CPU leaf. Do not let it start after a pause ack.
+  const { occupiedIndices, numOccupied, queryPositions } = await runInferenceDuty(options, () => {
+    const occupiedIndices = [];
+    for (let i = 0; i < resolution * resolution; i++) {
+      if (mask[i]) occupiedIndices.push(i);
+    }
+    const numOccupied = occupiedIndices.length;
+    const queryPositions = new Float32Array(numOccupied * 3);
+    for (let i = 0; i < numOccupied; i++) {
+      const idx = occupiedIndices[i];
+      queryPositions[i * 3] = positions3D[idx * 3];
+      queryPositions[i * 3 + 1] = positions3D[idx * 3 + 1];
+      queryPositions[i * 3 + 2] = positions3D[idx * 3 + 2];
+    }
+    return { occupiedIndices, numOccupied, queryPositions };
+  });
   console.log(`Texture bake: ${numOccupied} occupied texels out of ${resolution * resolution}`);
 
   const emptyTex = new Uint8Array(resolution * resolution * 4);
   if (numOccupied === 0) {
     return { albedo: emptyTex, normalMap: new Uint8Array(emptyTex) };
-  }
-
-  // Pack occupied positions into a dense array
-  const queryPositions = new Float32Array(numOccupied * 3);
-  for (let i = 0; i < numOccupied; i++) {
-    const idx = occupiedIndices[i];
-    queryPositions[i * 3] = positions3D[idx * 3];
-    queryPositions[i * 3 + 1] = positions3D[idx * 3 + 1];
-    queryPositions[i * 3 + 2] = positions3D[idx * 3 + 2];
   }
 
   // Decode features + perturb_normal for every occupied texel. Per-texel decode
@@ -1020,7 +1028,7 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
     albedo = out.albedo; normalMap = out.normalMap;
     workerTransferMs = performance.now() - transferStart;
   } else {
-    const m = materializeTextures(matInput);
+    const m = await runInferenceDuty(options, () => materializeTextures(matInput));
     albedo = m.albedo; normalMap = m.normalMap;
   }
   const materializationCompletedAtMs = performance.now();

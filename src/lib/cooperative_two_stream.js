@@ -226,6 +226,7 @@ export async function runCooperativeTwoStream(options) {
     linearRowsPerDuty = 128,
     onProgress,
     signal,
+    inferenceControl,
     invocationId = `sf3d:two-stream:${schedulingMode}`,
   } = options;
   if (!['stage', 'attention-tile'].includes(dutyGranularity)) {
@@ -258,15 +259,15 @@ export async function runCooperativeTwoStream(options) {
     schedulingMode,
     onProgress,
     signal,
+    inferenceControl,
   });
-  const state = attentionPlan
+  const makeState = () => attentionPlan
     ? backbone.createAttentionForwardState(
-      imageTokensBuf,
-      N_img,
-      weights,
-      { linearRowsPerDuty },
-    )
+      imageTokensBuf, N_img, weights, { linearRowsPerDuty })
     : backbone.createForwardState(imageTokensBuf, N_img, weights);
+  const state = inferenceControl
+    ? await inferenceControl.runDuty(makeState)
+    : makeState();
   let stageTelemetry = [];
 
   await execution.run(async cooperative => {
