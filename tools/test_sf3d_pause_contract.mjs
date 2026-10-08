@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createWebGpuInferenceControl } from '@kaminos/webgpu-inference-kit/core';
 import { withForegroundScope } from '../src/lib/foreground_scope.js';
-import { runControlledPipeline } from '../src/lib/sf3d_producer.js';
+import { finishProducerRunWithEvidence, runControlledPipeline } from '../src/lib/sf3d_producer.js';
 
 const phases = [];
 const control = createWebGpuInferenceControl({
@@ -70,4 +70,34 @@ assert.equal((await active.resume()).status, 'running');
 assert.equal(await run, 23, 'resume finishes the original invocation');
 assert.deepEqual(admitted, ['model duty']);
 assert.equal(active, null, 'invocation control closes before foreground finish');
+
+const finalStop = new AbortController();
+let terminalStopError;
+await assert.rejects(runControlledPipeline({
+  queue: { onSubmittedWorkDone: async () => {} },
+  signal: finalStop.signal,
+  options: {},
+  execute: ({ inferenceControl }) => inferenceControl.runDuty(() => {
+    finalStop.abort(new Error('Stop during final model duty'));
+    return 31;
+  }),
+}), error => {
+  terminalStopError = error;
+  return error.name === 'AbortError' && /Stop during final model duty/.test(error.message);
+},
+'Stop at the last duty must not return a successful GLB/result');
+await assert.rejects(finishProducerRunWithEvidence({
+  prepared: { release: async () => ({ completed: true }) },
+  pipelineFailed: true,
+  pipelineError: terminalStopError,
+  runId: 'stopped-run',
+  lastProgress: 'final duty',
+  startedAtMs: performance.now(),
+  deviceInjected: true,
+  commit: 'test',
+}), error => error.name === 'AbortError'
+  && error.sf3dRun?.runId === 'stopped-run'
+  && error.sf3dRun?.inferenceCompleted === false
+  && error.sf3dRun?.lastProgress === 'final duty',
+'the stopped run must preserve producer failure evidence');
 console.log('SF3D PAUSE CONTRACT PASSED');

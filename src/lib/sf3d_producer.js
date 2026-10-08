@@ -170,14 +170,23 @@ export async function runControlledPipeline({ queue, signal, withForeground, opt
   } catch (error) {
     failure = error;
   }
+  let closeSnapshot;
   try {
-    await control.close();
+    closeSnapshot = await control.close();
   } catch (error) {
     failure = failure
       ? new AggregateError([failure, error], 'SF3D inference and pause control close both failed', { cause: failure })
       : error;
   } finally {
     onControl?.(null);
+  }
+  // No later duty admission exists after the final leaf. Kit close reports
+  // cancellation as a status, so terminal Stop must be checked explicitly.
+  if (!failure && (signal?.aborted || closeSnapshot?.status === 'cancelled')) {
+    const reason = signal?.reason;
+    failure = new Error(reason instanceof Error ? reason.message : String(reason ?? 'SF3D inference stopped'),
+      { cause: reason });
+    failure.name = 'AbortError';
   }
   if (failure) throw failure;
   return result;
