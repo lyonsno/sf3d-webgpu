@@ -155,7 +155,7 @@ try {
   assert.match(incomplete.decision.reasons.join('; '), /covers through weight-and-model-load, not required product-route-terminal/);
   assert.match(
     defaultPlanPathForObservation(JSON.parse(fs.readFileSync(observationPath, 'utf8')), repo),
-    /m2-pro-16gib-observed-v0\.json$/,
+    /darwin-16gib-full-route-circuit-breaker-v0\.json$/,
   );
   assert.equal(parseMemoryPressure('System-wide memory free percentage: 37%'), 37);
   assert.deepEqual(parseSwapUsage('vm.swapusage: total = 5120.00M used = 3704.75M free = 1415.25M'), {

@@ -169,11 +169,11 @@ try {
     || MEMORY_OBSERVATION_PATH
     || WEIGHTS_PATH !== path.join(REPO, 'public/weights.bin')
   );
-  const automaticM2CircuitBreaker = memoryAdmission.effective?.planId === 'm2-pro-16gib-observed-v0';
-  if (diagnosticOverrideRequested || automaticM2CircuitBreaker) {
+  const automaticLowMemoryCircuitBreaker = memoryAdmission.effective?.planId === 'darwin-16gib-full-route-circuit-breaker-v0';
+  if (diagnosticOverrideRequested || automaticLowMemoryCircuitBreaker) {
     const circuitBreakerReason = diagnosticOverrideRequested
       ? 'diagnostic plan, observation, or weight overrides have no live allocation authority'
-      : 'the M2 Pro 16 GiB full-route circuit breaker has no live allocation authority';
+      : 'the Darwin 16 GiB full-route circuit breaker has no live allocation authority';
     memoryAdmission = {
       ...memoryAdmission,
       authority: 'circuit-breaker-only',

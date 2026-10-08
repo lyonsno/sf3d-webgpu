@@ -1,6 +1,6 @@
 {
   "schema": "sf3d.memory-admission-plan.v0",
-  "id": "m2-pro-16gib-observed-v0",
+  "id": "darwin-16gib-full-route-circuit-breaker-v0",
   "targetPhase": "weight-and-model-load",
   "projectionCoverage": {
     "through": "weight-and-model-load"

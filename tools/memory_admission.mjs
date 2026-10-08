@@ -252,7 +252,7 @@ export function defaultPlanPathForObservation(observation, repoRoot) {
   const total = observation?.hostTotalBytes;
   if (observation?.platform !== 'darwin' || !Number.isSafeInteger(total)) return null;
   if (total < 15 * 1024 ** 3 || total > 18 * 1024 ** 3) return null;
-  return path.join(repoRoot, 'tools/memory-admission-plans/m2-pro-16gib-observed-v0.json');
+  return path.join(repoRoot, 'tools/memory-admission-plans/darwin-16gib-full-route-circuit-breaker-v0.json');
 }
 
 export function runMemoryAdmission({
