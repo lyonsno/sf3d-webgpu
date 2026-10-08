@@ -101,7 +101,7 @@ try {
   assert.equal(report.partial.memoryAdmission.projection.expandedGpuUpperBoundBytes, 2 * GIB);
   assert.equal(report.partial.memoryAdmission.projection.largestPerTensorTransientBytes, 3 * GIB);
   assert.equal(report.partial.memoryAdmission.projection.peakAdditionalBytes, 6 * GIB + 176);
-  assert.match(report.error.message, /refused.*weight-and-model-load/i);
+  assert.match(report.error.message, /circuit breaker refused.*weight-and-model-load/i);
   assert.match(report.partial.memoryAdmission.refusalContinuation.summary, /setup-only|packed-storage/i);
   assert.doesNotMatch(run.stderr, /injected failure at vite-start/, 'refusal must occur before Vite launch');
 
@@ -187,6 +187,39 @@ try {
   assert.equal(unobservableReport.partial.memoryAdmission.verdict, 'unobservable');
   assert.match(unobservableReport.error.message, /pressure observation/i);
   assert.doesNotMatch(unobservable.stderr, /injected failure at vite-start/);
+
+  const terminalPlanPath = path.join(root, 'terminal-plan.json');
+  fs.writeFileSync(terminalPlanPath, JSON.stringify({
+    ...plan,
+    id: 'test-terminal-label-must-not-authorize',
+    projectionCoverage: { through: 'product-route-terminal' },
+  }));
+  const highPressurePath = path.join(root, 'high-pressure.json');
+  fs.writeFileSync(highPressurePath, JSON.stringify({
+    ...JSON.parse(fs.readFileSync(observationPath, 'utf8')),
+    hostMemoryPressureFreePercent: 90,
+  }));
+  const circuitBreakerReportPath = path.join(root, 'circuit-breaker-report.json');
+  const circuitBreaker = spawnSync(process.execPath, [
+    'tools/smoke_product_route.mjs',
+    '--allow-dirty',
+    '--image', 'public/demo_chair.png',
+    '--report', circuitBreakerReportPath,
+    '--weights', weightsPath,
+    '--memory-admission-plan', terminalPlanPath,
+    '--memory-observation', highPressurePath,
+  ], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, SF3D_WITNESS_INJECT_FAILURE: 'vite-start' },
+  });
+  assert.notEqual(circuitBreaker.status, 0);
+  const circuitBreakerReport = JSON.parse(fs.readFileSync(circuitBreakerReportPath, 'utf8'));
+  assert.equal(circuitBreakerReport.failurePhase, 'memory-admission');
+  assert.equal(circuitBreakerReport.partial.memoryAdmission.verdict, 'refused');
+  assert.equal(circuitBreakerReport.partial.memoryAdmission.authority, 'circuit-breaker-only');
+  assert.match(circuitBreakerReport.error.message, /circuit breaker.*no live allocation authority/i);
+  assert.doesNotMatch(circuitBreaker.stderr, /injected failure at vite-start/);
 
   console.log('memory admission contract passed');
 } finally {

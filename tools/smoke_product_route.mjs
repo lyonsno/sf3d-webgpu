@@ -27,6 +27,8 @@
  *     [--contend | --contend-same-device] [--image P] [--report P] [--expected-glb-sha SHA|none]
  *     [--weights P] [--memory-admission-plan P] [--memory-observation P]
  *     [--max-gap-budget-ms N] [--allow-dirty] [--label TEXT]
+ * Memory plan/observation/weight overrides are diagnostic-only: they can
+ * explain or force refusal, but cannot authorize this full route to launch.
  */
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
@@ -151,6 +153,7 @@ try {
     memoryAdmission = {
       schema: 'sf3d.memory-admission-result.v0',
       verdict: 'unobservable',
+      authority: 'circuit-breaker-only',
       targetPhase: 'weight-and-model-load',
       requiredThrough: 'product-route-terminal',
       effective: {
@@ -161,9 +164,32 @@ try {
     };
     throw error;
   }
+  const diagnosticOverrideRequested = Boolean(
+    MEMORY_ADMISSION_PLAN_PATH
+    || MEMORY_OBSERVATION_PATH
+    || WEIGHTS_PATH !== path.join(REPO, 'public/weights.bin')
+  );
+  const automaticM2CircuitBreaker = memoryAdmission.effective?.planId === 'm2-pro-16gib-observed-v0';
+  if (diagnosticOverrideRequested || automaticM2CircuitBreaker) {
+    const circuitBreakerReason = diagnosticOverrideRequested
+      ? 'diagnostic plan, observation, or weight overrides have no live allocation authority'
+      : 'the M2 Pro 16 GiB full-route circuit breaker has no live allocation authority';
+    memoryAdmission = {
+      ...memoryAdmission,
+      authority: 'circuit-breaker-only',
+      diagnosticVerdict: memoryAdmission.verdict,
+      verdict: 'refused',
+      decision: {
+        ...(memoryAdmission.decision ?? {}),
+        reasons: [circuitBreakerReason, ...(memoryAdmission.decision?.reasons ?? [])],
+      },
+    };
+  } else {
+    memoryAdmission = { ...memoryAdmission, authority: 'not-applicable-to-this-host' };
+  }
   source = { ...source, memoryAdmission };
   if (memoryAdmission.verdict === 'refused') {
-    const error = new Error(`memory admission refused ${memoryAdmission.targetPhase}: ${memoryAdmission.decision.reasons.join('; ')}`);
+    const error = new Error(`memory admission circuit breaker refused ${memoryAdmission.targetPhase}: ${memoryAdmission.decision.reasons.join('; ')}`);
     error.code = 'SF3D_MEMORY_ADMISSION_REFUSED';
     throw error;
   }
