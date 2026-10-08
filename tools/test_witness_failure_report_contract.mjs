@@ -23,9 +23,11 @@ const run = (script, args, env = {}) => spawnSync(process.execPath, [path.join(R
   cwd: REPO, env: { ...process.env, ...env }, encoding: 'utf8', timeout: 120000,
 });
 const readReport = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
-const automaticM2CircuitBreaker = process.platform === 'darwin'
+const guardedLowMemoryHost = process.platform === 'darwin'
   && os.totalmem() >= 15 * 1024 ** 3
   && os.totalmem() <= 18 * 1024 ** 3;
+const productRouteLatePhasesUnavailable = guardedLowMemoryHost
+  || !fs.existsSync(path.join(REPO, 'public/weights.bin'));
 
 // --- Product-route witness ---
 const cases = [
@@ -33,7 +35,7 @@ const cases = [
   ['missing image', ['--image', '/nonexistent/image.png'], {}, 'input', /image not found/],
   ['source identity', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'source-identity' }, 'source-identity', /injected failure at source-identity/],
   ['kit identity', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'kit-identity' }, 'kit-identity', /injected failure at kit-identity/],
-  ...(automaticM2CircuitBreaker ? [] : [
+  ...(productRouteLatePhasesUnavailable ? [] : [
     ['vite start', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'vite-start' }, 'vite-start', /injected failure at vite-start/],
     ['browser launch', ['--allow-dirty'], { SF3D_WITNESS_INJECT_FAILURE: 'browser-launch' }, 'browser-launch', /injected failure at browser-launch/],
   ]),
@@ -53,8 +55,8 @@ for (const [name, args, env, phase, re] of cases) {
   }
   console.log(`ok  product-route witness: ${name} → durable report at phase ${phase}`);
 }
-if (automaticM2CircuitBreaker) {
-  console.log('ok  product-route witness: Vite/browser injection phases are unreachable behind the automatic M2 circuit breaker');
+if (productRouteLatePhasesUnavailable) {
+  console.log('skip product-route witness: Vite/browser failure injection requires an executable route; the circuit-breaker decision has separate executable-authority coverage');
 }
 
 // --- Parity smoke ---

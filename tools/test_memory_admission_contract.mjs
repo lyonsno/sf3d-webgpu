@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
+  applyExecutableMemoryCircuitBreaker,
   defaultPlanPathForObservation,
   evaluateMemoryAdmission,
   inspectWeightFile,
@@ -121,6 +122,30 @@ try {
   assert.equal(safe.verdict, 'would-admit');
   assert.equal(safe.authority, 'diagnostic-only');
   assert.ok(safe.decision.diagnosticMarginAboveReserveBytes > 0);
+
+  const automaticBreaker = applyExecutableMemoryCircuitBreaker({
+    memoryAdmission: {
+      ...safe,
+      effective: {
+        ...safe.effective,
+        planId: 'darwin-16gib-full-route-circuit-breaker-v0',
+      },
+    },
+    diagnosticOverrideRequested: false,
+  });
+  assert.equal(automaticBreaker.verdict, 'refused');
+  assert.equal(automaticBreaker.authority, 'circuit-breaker-only');
+  assert.equal(automaticBreaker.diagnosticVerdict, 'would-admit');
+  assert.match(automaticBreaker.decision.reasons[0], /Darwin 16 GiB full-route circuit breaker/i);
+
+  const overrideBreaker = applyExecutableMemoryCircuitBreaker({
+    memoryAdmission: safe,
+    diagnosticOverrideRequested: true,
+  });
+  assert.equal(overrideBreaker.verdict, 'refused');
+  assert.equal(overrideBreaker.authority, 'circuit-breaker-only');
+  assert.equal(overrideBreaker.diagnosticVerdict, 'would-admit');
+  assert.match(overrideBreaker.decision.reasons[0], /diagnostic plan, observation, or weight overrides/i);
   assert.throws(() => evaluateMemoryAdmission({
     plan,
     planPath,

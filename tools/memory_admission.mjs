@@ -255,6 +255,28 @@ export function defaultPlanPathForObservation(observation, repoRoot) {
   return path.join(repoRoot, 'tools/memory-admission-plans/darwin-16gib-full-route-circuit-breaker-v0.json');
 }
 
+export function applyExecutableMemoryCircuitBreaker({ memoryAdmission, diagnosticOverrideRequested = false }) {
+  const automaticLowMemoryCircuitBreaker = memoryAdmission?.effective?.planId
+    === 'darwin-16gib-full-route-circuit-breaker-v0';
+  if (!diagnosticOverrideRequested && !automaticLowMemoryCircuitBreaker) {
+    return { ...memoryAdmission, authority: 'not-applicable-to-this-host' };
+  }
+
+  const circuitBreakerReason = diagnosticOverrideRequested
+    ? 'diagnostic plan, observation, or weight overrides have no live allocation authority'
+    : 'the Darwin 16 GiB full-route circuit breaker has no live allocation authority';
+  return {
+    ...memoryAdmission,
+    authority: 'circuit-breaker-only',
+    diagnosticVerdict: memoryAdmission.verdict,
+    verdict: 'refused',
+    decision: {
+      ...(memoryAdmission.decision ?? {}),
+      reasons: [circuitBreakerReason, ...(memoryAdmission.decision?.reasons ?? [])],
+    },
+  };
+}
+
 export function runMemoryAdmission({
   repoRoot,
   weightPath,

@@ -36,7 +36,7 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import { spawn, execSync } from 'node:child_process';
-import { runMemoryAdmission } from './memory_admission.mjs';
+import { applyExecutableMemoryCircuitBreaker, runMemoryAdmission } from './memory_admission.mjs';
 import {
   CANONICAL_DEMO_CHAIR_DUTY_COUNTS,
   CANONICAL_DEMO_CHAIR_GLB_SHA256,
@@ -169,24 +169,7 @@ try {
     || MEMORY_OBSERVATION_PATH
     || WEIGHTS_PATH !== path.join(REPO, 'public/weights.bin')
   );
-  const automaticLowMemoryCircuitBreaker = memoryAdmission.effective?.planId === 'darwin-16gib-full-route-circuit-breaker-v0';
-  if (diagnosticOverrideRequested || automaticLowMemoryCircuitBreaker) {
-    const circuitBreakerReason = diagnosticOverrideRequested
-      ? 'diagnostic plan, observation, or weight overrides have no live allocation authority'
-      : 'the Darwin 16 GiB full-route circuit breaker has no live allocation authority';
-    memoryAdmission = {
-      ...memoryAdmission,
-      authority: 'circuit-breaker-only',
-      diagnosticVerdict: memoryAdmission.verdict,
-      verdict: 'refused',
-      decision: {
-        ...(memoryAdmission.decision ?? {}),
-        reasons: [circuitBreakerReason, ...(memoryAdmission.decision?.reasons ?? [])],
-      },
-    };
-  } else {
-    memoryAdmission = { ...memoryAdmission, authority: 'not-applicable-to-this-host' };
-  }
+  memoryAdmission = applyExecutableMemoryCircuitBreaker({ memoryAdmission, diagnosticOverrideRequested });
   source = { ...source, memoryAdmission };
   if (memoryAdmission.verdict === 'refused') {
     const error = new Error(`memory admission circuit breaker refused ${memoryAdmission.targetPhase}: ${memoryAdmission.decision.reasons.join('; ')}`);

@@ -16,6 +16,6 @@
   },
   "refusalContinuation": {
     "kind": "smaller-rung-or-packed-storage",
-    "summary": "Do not allocate the current weight/model phase. Reclaim host pressure, run the setup-only rung, or use an exact observed packed-storage revision before retrying model/DINO progression."
+    "summary": "Do not allocate the current weight/model phase. Run the setup-only rung, or develop a separately reviewed true-admission path around an exact observed packed-storage revision before any model/DINO progression."
   }
 }
