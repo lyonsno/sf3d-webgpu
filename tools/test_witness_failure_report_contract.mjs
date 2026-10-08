@@ -24,6 +24,41 @@ const run = (script, args, env = {}) => spawnSync(process.execPath, [path.join(R
 });
 const readReport = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 
+function writeSafeMemoryAdmissionFixtures() {
+  const weights = path.join(tmp, 'safe-weights.bin');
+  const headerSize = 16 + 160;
+  const bytes = Buffer.alloc(headerSize + 4);
+  bytes.writeUInt32LE(0x33445346, 0);
+  bytes.writeUInt32LE(1, 4);
+  bytes.writeUInt32LE(1, 8);
+  bytes.writeUInt32LE(headerSize, 12);
+  bytes.write('fixture.fp32', 16, 'ascii');
+  bytes.writeUInt32LE(0, 16 + 128);
+  bytes.writeUInt32LE(1, 16 + 132);
+  bytes.writeUInt32LE(1, 16 + 136);
+  bytes.writeUInt32LE(0, 16 + 152);
+  bytes.writeUInt32LE(4, 16 + 156);
+  fs.writeFileSync(weights, bytes);
+  const plan = path.join(tmp, 'safe-memory-plan.json');
+  fs.writeFileSync(plan, JSON.stringify({
+    schema: 'sf3d.memory-admission-plan.v0', id: 'failure-contract-safe', targetPhase: 'weight-and-model-load',
+    projectionCoverage: { through: 'product-route-terminal' },
+    appliesTo: { minHostTotalBytes: 1, maxHostTotalBytes: 32 * 1024 ** 3 },
+    predecessor: { phase: 'fixture', hostMemoryPressureFreePercentLowWater: 10, provenance: 'deterministic failure-report fixture' },
+    refusalContinuation: { kind: 'fixture', summary: 'not exercised' },
+  }));
+  const observation = path.join(tmp, 'safe-memory-observation.json');
+  fs.writeFileSync(observation, JSON.stringify({
+    schema: 'sf3d.mac-memory-observation.v0', source: 'failure-contract-fixture', platform: 'darwin',
+    hostTotalBytes: 16 * 1024 ** 3, hostFreeBytes: 8 * 1024 ** 3, hostMemoryPressureFreePercent: 90,
+    hostSwapTotalBytes: 0, hostSwapUsedBytes: 0, hostSwapFreeBytes: 0, dataVolumeFreeBytes: 64 * 1024 ** 3,
+    observedAt: '2026-10-08T00:00:00.000Z',
+  }));
+  return ['--weights', weights, '--memory-admission-plan', plan, '--memory-observation', observation];
+}
+
+const safeMemoryAdmissionArgs = writeSafeMemoryAdmissionFixtures();
+
 // --- Product-route witness ---
 const cases = [
   ['unknown arm', ['--arm', 'definitely-not-an-arm'], {}, 'arguments', /unknown --arm/],
@@ -35,7 +70,8 @@ const cases = [
 ];
 for (const [name, args, env, phase, re] of cases) {
   const report = path.join(tmp, `product-${phase}.json`);
-  const r = run('smoke_product_route.mjs', [...args, '--report', report], env);
+  const admittedArgs = ['vite-start', 'browser-launch'].includes(phase) ? safeMemoryAdmissionArgs : [];
+  const r = run('smoke_product_route.mjs', [...args, ...admittedArgs, '--report', report], env);
   assert.notEqual(r.status, 0, `${name}: harness must fail`);
   assert.ok(fs.existsSync(report), `${name}: failure report must exist (stderr: ${r.stderr.slice(0, 300)})`);
   const d = readReport(report);
