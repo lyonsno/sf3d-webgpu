@@ -150,6 +150,7 @@ export function inspectWeightFile(weightPath) {
 
     return {
       schema: 'sf3d.weight-memory-projection.v0',
+      authority: 'diagnostic-not-a-conservative-upper-bound',
       path: resolved,
       representation: 'flat-v1-mixed-fp32-fp16-expanded-to-fp32-gpu',
       weightArtifactBytes: stat.size,
@@ -160,11 +161,11 @@ export function inspectWeightFile(weightPath) {
       fp32SourceBytes,
       expandedGpuUpperBoundBytes,
       largestPerTensorTransientBytes,
-      peakAdditionalBytes: stat.size + expandedGpuUpperBoundBytes + largestPerTensorTransientBytes,
+      modeledAdditionalBytes: stat.size + expandedGpuUpperBoundBytes + largestPerTensorTransientBytes,
       accounting: {
         sourceArtifact: 'entire streamed weight artifact remains resident until eager uploads complete',
-        gpuStorage: 'all tensors conservatively counted at the loader effective FP32 GPU width',
-        transient: 'largest tensor raw cross-chunk copy plus FP16-to-FP32 conversion may overlap source and GPU storage',
+        gpuStorage: 'all tensors are counted at the loader effective FP32 GPU width; this may overcount CPU-only tensors',
+        transient: 'one largest tensor raw-copy plus FP16 conversion is modeled; this does not bound unreclaimed prior JavaScript backing stores',
         excludes: ['browser and Vite baseline', 'pipeline buffers after weight load', 'later inference activations'],
       },
     };
@@ -208,7 +209,7 @@ export function evaluateMemoryAdmission({ plan, planPath, observation, projectio
   const pressureAvailableBytes = Math.floor(total * pressurePercent / 100);
   const reservePercent = plan.predecessor.hostMemoryPressureFreePercentLowWater;
   const survivalReserveBytes = Math.ceil(total * reservePercent / 100);
-  const projectedPressureAvailableBytes = pressureAvailableBytes - projection.peakAdditionalBytes;
+  const diagnosticProjectedPressureAvailableBytes = pressureAvailableBytes - projection.modeledAdditionalBytes;
   const reasons = [];
   if (plan.projectionCoverage.through !== requiredThrough) {
     reasons.push(`projection covers through ${plan.projectionCoverage.through}, not required ${requiredThrough}`);
@@ -216,13 +217,14 @@ export function evaluateMemoryAdmission({ plan, planPath, observation, projectio
   if (pressureAvailableBytes < survivalReserveBytes) {
     reasons.push(`current pressure-available bytes ${pressureAvailableBytes} are already below the measured predecessor reserve ${survivalReserveBytes}`);
   }
-  if (projectedPressureAvailableBytes < survivalReserveBytes) {
-    reasons.push(`projected pressure-available bytes ${projectedPressureAvailableBytes} would fall below the measured predecessor reserve ${survivalReserveBytes}`);
+  if (diagnosticProjectedPressureAvailableBytes < survivalReserveBytes) {
+    reasons.push(`diagnostic projected pressure-available bytes ${diagnosticProjectedPressureAvailableBytes} would fall below the measured predecessor reserve ${survivalReserveBytes}`);
   }
 
   return {
     schema: 'sf3d.memory-admission-result.v0',
-    verdict: reasons.length ? 'refused' : 'admitted',
+    authority: 'diagnostic-only',
+    verdict: reasons.length ? 'would-refuse' : 'would-admit',
     targetPhase: plan.targetPhase,
     requiredThrough,
     effective: {
@@ -238,8 +240,8 @@ export function evaluateMemoryAdmission({ plan, planPath, observation, projectio
       pressureAvailableBytes,
       survivalReservePercent: reservePercent,
       survivalReserveBytes,
-      projectedPressureAvailableBytes,
-      marginAboveReserveBytes: projectedPressureAvailableBytes - survivalReserveBytes,
+      diagnosticProjectedPressureAvailableBytes,
+      diagnosticMarginAboveReserveBytes: diagnosticProjectedPressureAvailableBytes - survivalReserveBytes,
       reasons,
     },
     refusalContinuation: plan.refusalContinuation ?? null,

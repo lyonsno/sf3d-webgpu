@@ -100,7 +100,8 @@ try {
   assert.equal(report.partial.memoryAdmission.projection.weightArtifactBytes, 1 * GIB + 176);
   assert.equal(report.partial.memoryAdmission.projection.expandedGpuUpperBoundBytes, 2 * GIB);
   assert.equal(report.partial.memoryAdmission.projection.largestPerTensorTransientBytes, 3 * GIB);
-  assert.equal(report.partial.memoryAdmission.projection.peakAdditionalBytes, 6 * GIB + 176);
+  assert.equal(report.partial.memoryAdmission.projection.modeledAdditionalBytes, 6 * GIB + 176);
+  assert.equal(report.partial.memoryAdmission.projection.authority, 'diagnostic-not-a-conservative-upper-bound');
   assert.match(report.error.message, /circuit breaker refused.*weight-and-model-load/i);
   assert.match(report.partial.memoryAdmission.refusalContinuation.summary, /setup-only|packed-storage/i);
   assert.doesNotMatch(run.stderr, /injected failure at vite-start/, 'refusal must occur before Vite launch');
@@ -117,8 +118,9 @@ try {
     projection,
     requiredThrough: 'weight-and-model-load',
   });
-  assert.equal(safe.verdict, 'admitted');
-  assert.ok(safe.decision.marginAboveReserveBytes > 0);
+  assert.equal(safe.verdict, 'would-admit');
+  assert.equal(safe.authority, 'diagnostic-only');
+  assert.ok(safe.decision.diagnosticMarginAboveReserveBytes > 0);
   assert.throws(() => evaluateMemoryAdmission({
     plan,
     planPath,
@@ -149,7 +151,7 @@ try {
     projection,
     requiredThrough: 'product-route-terminal',
   });
-  assert.equal(incomplete.verdict, 'refused');
+  assert.equal(incomplete.verdict, 'would-refuse');
   assert.match(incomplete.decision.reasons.join('; '), /covers through weight-and-model-load, not required product-route-terminal/);
   assert.match(
     defaultPlanPathForObservation(JSON.parse(fs.readFileSync(observationPath, 'utf8')), repo),
