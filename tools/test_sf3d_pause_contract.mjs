@@ -100,4 +100,24 @@ await assert.rejects(finishProducerRunWithEvidence({
   && error.sf3dRun?.inferenceCompleted === false
   && error.sf3dRun?.lastProgress === 'final duty',
 'the stopped run must preserve producer failure evidence');
+
+const settlementStop = new AbortController();
+await assert.rejects(finishProducerRunWithEvidence({
+  prepared: { release: async () => {
+    settlementStop.abort(new Error('Stop during foreground settlement'));
+    return { completed: true };
+  } },
+  pipelineFailed: false,
+  signal: settlementStop.signal,
+  runId: 'settlement-stopped-run',
+  lastProgress: 'glb export',
+  startedAtMs: performance.now(),
+  deviceInjected: true,
+  commit: 'test',
+}), error => error.name === 'AbortError'
+  && /Stop during foreground settlement/.test(error.message)
+  && error.sf3dRun?.runId === 'settlement-stopped-run'
+  && error.sf3dRun?.lastProgress === 'glb export'
+  && error.sf3dRun?.foregroundOpportunityReport?.completed === true,
+'Stop during foreground settlement must reject instead of fulfilling a GLB');
 console.log('SF3D PAUSE CONTRACT PASSED');

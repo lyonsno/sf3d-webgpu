@@ -129,7 +129,7 @@ export function buildRunIdentity({ runId, routeId, startedAtMs, finishedAtMs, de
 /** Internal run-settlement seam: the caller supplies the completed pipeline result/error. */
 export async function finishProducerRunWithEvidence({
   prepared, pipelineFailed, pipelineError, runId, lastProgress,
-  startedAtMs, deviceInjected, commit,
+  startedAtMs, deviceInjected, commit, signal,
 }) {
   let foregroundOpportunityReport = null;
   let finishFailed = false;
@@ -140,15 +140,22 @@ export async function finishProducerRunWithEvidence({
     finishFailed = true;
     finishError = releaseError;
   }
-  if (!pipelineFailed && !finishFailed) return foregroundOpportunityReport;
+  const cancelled = signal?.aborted === true;
+  if (!pipelineFailed && !finishFailed && !cancelled) return foregroundOpportunityReport;
+  const stopReason = signal?.reason;
+  const stopError = cancelled
+    ? Object.assign(new Error(stopReason instanceof Error ? stopReason.message : String(stopReason ?? 'SF3D inference stopped'),
+      { cause: stopReason }), { name: 'AbortError' })
+    : null;
   const reason = pipelineFailed && finishFailed
     ? new AggregateError([pipelineError, finishError], 'SF3D inference and foreground finish both failed', { cause: pipelineError })
-    : pipelineFailed ? pipelineError : finishError;
+    : pipelineFailed ? pipelineError : finishFailed ? finishError : stopError;
   const evidence = Object.freeze({
     runId,
     lastProgress,
     foregroundOpportunityReport,
     inferenceCompleted: !pipelineFailed,
+    cancelled,
     identity: buildRunIdentity({ runId, routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, startedAtMs, finishedAtMs: performance.now(), deviceInjected, commit, kitVersion: WEBGPU_INFERENCE_KIT_VERSION }),
   });
   // JavaScript rejection reasons need not be Error objects (or extensible).
@@ -386,9 +393,9 @@ export async function createSf3dProducer({
         pipelineError = error;
       }
       if (pipelineError) await finishProducerRunWithEvidence({ prepared, pipelineFailed: true, pipelineError,
-        runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit });
+        runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit, signal });
       foregroundOpportunityReport = await finishProducerRunWithEvidence({ prepared, pipelineFailed: false,
-        runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit });
+        runId: id, lastProgress, startedAtMs, deviceInjected: gpu.injected, commit, signal });
       const finishedAtMs = performance.now();
       const receipt = buildRouteReceipt({ backend, image, result, commit });
       const receiptValidation = validateRouteReceipt(receipt);
