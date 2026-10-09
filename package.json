@@ -5,6 +5,7 @@
   "description": "Stable Fast 3D (SF3D) single-image 3D mesh generation in WebGPU compute shaders",
   "type": "module",
   "scripts": {
+    "test:foreground-preparation": "node tools/test_foreground_prepare.mjs && node tools/test_condition_image.mjs",
     "dev": "vite",
     "build": "vite build",
     "test:build-weight-exclusion": "node tools/test_build_weight_exclusion.mjs && node tools/test_build_without_public_dir.mjs",

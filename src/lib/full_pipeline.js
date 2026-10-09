@@ -72,12 +72,7 @@ export async function runFullPipelineToGlb(device, pipelines, weights, inputImag
 
   // Step 2: CLIP material estimation (exact PyTorch preprocessing order)
   const clipStart = performance.now();
-  const clipCanvas = document.createElement('canvas');
-  clipCanvas.width = COND_SIZE;
-  clipCanvas.height = COND_SIZE;
-  const clipCtx = clipCanvas.getContext('2d');
-  clipCtx.drawImage(inputImage, 0, 0, COND_SIZE, COND_SIZE);
-  const clipRaw = clipCtx.getImageData(0, 0, COND_SIZE, COND_SIZE).data;
+  const clipRaw = meshResult._conditionRgba;
   // Blend / resize / patch-embed run in clip_prep_core — on the main thread, or
   // on options.clipPrepWorker with byte-identical output.
   const { roughness, metallic } = await estimateMaterials(

@@ -14,8 +14,7 @@
  */
 
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
-import { validatePreprocessReply } from './worker_reply_validation.js';
-import { resizeBlendNormalize } from './preprocess_core.js';
+import { prepareConditionImage, validateConditionReply } from './condition_image.js';
 import { callWorker } from './worker_call.js';
 import { withForegroundScope } from './foreground_scope.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
@@ -83,12 +82,15 @@ function extractSourcePixels(imageData) {
  * Preprocess an image for SF3D input → CHW float32 tensor.
  *
  * @param {object} [options.preprocessWorker]  a live Worker running
- *   preprocess_worker.js; when supplied, the Lanczos resize + blend + normalize
- *   (the ~700ms main-thread gap) runs OFF the main thread. Output is
- *   byte-identical to the main-thread path (same preprocess_core math). Without
- *   it, behavior is unchanged.
+ *   preprocess_worker.js; when supplied, foreground framing, bicubic resizing,
+ *   blending and normalization run off the main thread. Both paths use the
+ *   same condition_image implementation.
  */
 export async function preprocessImage(imageData, width, height, options = {}) {
+  return (await preprocessConditionImage(imageData, options)).chw;
+}
+
+async function preprocessConditionImage(imageData, options = {}) {
   const size = CONFIG.condImageSize;
   const { srcFloat, srcW, srcH } = extractSourcePixels(imageData);
   const bg = CONFIG.bgColor, imageMean = CONFIG.imageMean, imageStd = CONFIG.imageStd;
@@ -96,7 +98,6 @@ export async function preprocessImage(imageData, width, height, options = {}) {
   const worker = options.preprocessWorker;
   if (worker) {
     const id = `pp-${Math.random().toString(36).slice(2)}`;
-    const expectedLen = 3 * size * size;
     // Fail-loud: a worker crash / malformed reply / wedge rejects (never hangs,
     // never silently falls back). The caller owns any main-thread retry policy.
     return await callWorker(
@@ -107,13 +108,12 @@ export async function preprocessImage(imageData, width, height, options = {}) {
         timeoutMs: options.workerTimeoutMs || 30000,
         // Shape + finiteness (worker_reply_validation.js): a length-correct
         // reply carrying NaN/Inf must not reach the GPU as a successful offload.
-        onResult: (data) => validatePreprocessReply(data, expectedLen),
+        onResult: (data) => validateConditionReply(data, size),
       },
     );
   }
 
-  // Main-thread path (unchanged output).
-  return resizeBlendNormalize(srcFloat, srcW, srcH, size, bg, imageMean, imageStd);
+  return prepareConditionImage(srcFloat, srcW, srcH, size, bg, imageMean, imageStd);
 }
 
 /**
@@ -236,13 +236,11 @@ export async function runInference(device, pipelines, weights, imageElement, onP
   // 1. Preprocess image (CPU)
   _stageStart = performance.now();
   report('Preprocessing image...');
-  const imageData = await withForegroundScope(options,
+  const conditionImage = await withForegroundScope(options,
     options.preprocessWorker ? 'image-preprocess-worker' : 'image-preprocess',
-    () => preprocessImage(imageElement,
-      imageElement.naturalWidth || imageElement.width,
-      imageElement.naturalHeight || imageElement.height,
+    () => preprocessConditionImage(imageElement,
       { preprocessWorker: options.preprocessWorker, workerTimeoutMs: options.workerTimeoutMs }));
-  const imageBuf = createStorageBuffer(device, imageData);
+  const imageBuf = createStorageBuffer(device, conditionImage.chw);
 
   // 2. Camera embedding (GPU) — counted as part of image-preprocess
   report('Computing camera embedding...');
@@ -737,6 +735,7 @@ export async function runInference(device, pipelines, weights, imageElement, onP
     faces: mesh.faces,
     numVertices: mesh.numVertices,
     numFaces: mesh.numFaces,
+    _conditionRgba: conditionImage.rgba,
     // Expose for texture baking
     _triplanesBuf: triplaneResult.buffer,
     _triplaneDecoder: pipelines.triplaneDecoder,

@@ -32,6 +32,15 @@ npm run dev            # or: npx vite --port 5177
 # Click "Download GLB"
 ```
 
+### Image preparation
+
+SF3D centers the alpha-masked foreground, preserves its aspect ratio, and fits
+it to 85% of the square input using upstream-style framing and bicubic resizing.
+Geometry and material estimation share the resulting 512 x 512 image. Pass the
+source image directly to the app or producer; callers do not need to crop or
+resize it first. Transparent-background images provide the foreground mask;
+opaque images use their full bounds. This step does not remove backgrounds.
+
 ### Model weights
 
 Inference needs `public/weights.bin` — a ~2.1 GB fp16 flat binary (gitignored,
@@ -162,7 +171,7 @@ in one place by [`src/lib/product_route.js`](src/lib/product_route.js):
 
 | Stage | Mechanism |
 |-------|-----------|
-| Image preprocessing (Lanczos resize, blend, normalize) | Web Worker |
+| Image preprocessing (foreground framing, bicubic resize, blend, normalize) | Web Worker |
 | DINOv2 ViT-Large | 24 cooperative GPU duties (one per block) |
 | Two-stream transformer | cooperative attention-tile duties, 256 linear rows per duty (2,922 duties) |
 | PixelShuffle post-processor | 702 cooperative channel-range duties, bounded-prefix completion, depth 2 |
@@ -171,7 +180,8 @@ in one place by [`src/lib/product_route.js`](src/lib/product_route.js):
 | UV unwrap | Web Worker |
 | Texture bake | 4,096-texel cooperative GPU duties over a scratch arena; albedo/normal materialization on a Web Worker |
 
-Measured with [`tools/smoke_product_route.mjs`](tools/smoke_product_route.mjs)
+Historical measurements, before the foreground-preparation default changed,
+with [`tools/smoke_product_route.mjs`](tools/smoke_product_route.mjs)
 on an M4 Max in Chrome (`apple/metal-3`) under a GPU Greenroom lease (no other
 GPU tenant), same commit and `demo_chair.png`, requestAnimationFrame intervals
 scoped to the inference window. `--contend` adds a same-page WebGPU contender
@@ -265,6 +275,10 @@ device, or a coarser composition profile of the product route.
 
 ## Numerical Match to PyTorch
 
+The comparisons in this section and the deterministic hash below were recorded
+before upstream-style foreground preparation became the default. They describe
+those source revisions, not a new parity measurement of the current preparation.
+
 Measured against the original PyTorch pipeline on the bundled `demo_chair.png`
 (figures from the provenance-bound receipt below):
 
@@ -300,8 +314,8 @@ records that admission. Receipt:
 
 ### Deterministic output receipt
 
-The final GLB is **bit-for-bit reproducible**. A clean `npm install` → convert
-weights → run produces, for `demo_chair.png`:
+The recorded pre-framing-default route produces a **bit-for-bit reproducible**
+GLB for `demo_chair.png`:
 
 ```
 SHA-256(demo_chair GLB) = e1f70de3407df24d571bf68f70fac2b59373bdd948075a2387f1834e4faff8b7
