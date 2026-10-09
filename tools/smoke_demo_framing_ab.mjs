@@ -21,7 +21,7 @@ let server, browser;
 try {
   await save();
   const cases = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
-  if (cases.length !== 4 || new Set(cases.map(c => c.id)).size !== 4) throw new Error('Expected four unique cases');
+  if (!cases.length || new Set(cases.map(c => c.id)).size !== cases.length) throw new Error('Expected nonempty unique cases');
   for (const c of cases) if (sha(await fs.readFile(c.input)) !== c.inputSha256) throw new Error(`Changed input ${c.id}`);
   report.phase = 'weights-hash'; await save();
   // Stream the large weight file rather than making another resident 2 GB copy.

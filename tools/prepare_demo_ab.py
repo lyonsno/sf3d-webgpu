@@ -30,10 +30,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--names", nargs="+", default=["animal_character", "tree"])
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     cases = []
-    for name in ["animal_character", "tree"]:
+    for name in args.names:
         source = args.inputs / (name + ".png")
         with Image.open(source) as image:
             framed, crop = official_frame(image)
