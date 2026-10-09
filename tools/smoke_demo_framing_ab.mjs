@@ -38,7 +38,7 @@ try {
     fs: { allow: [repo, outputRoot, path.dirname(weightsPath)] } },
     plugins: [{ name: 'framing-assay-shell', configureServer(s) {
       s.middlewares.use('/framing-assay', (_req, res) => {
-        res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>SF3D framing comparison</title><body></body>');
+        res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><link rel="icon" href="data:,"><title>SF3D framing comparison</title><body></body>');
       });
     } }] });
   await server.listen();
@@ -79,7 +79,8 @@ try {
         routeOptions: out.routeOptions, receiptValidation: out.receiptValidation, stageTimings: out.stageTimings,
         stageSpans: out.stageSpans, inputDimensions: [img.naturalWidth, img.naturalHeight] };
       await producer.dispose().completion;
-      producer.device.destroy();
+      // The owned browser closes after rendering; explicit destroy logs an
+      // expected device-lost event through the producer's error listener.
       return result;
     }, { image: `data:image/png;base64,${(await fs.readFile(c.input)).toString('base64')}`,
       weights: `/@fs${weightsPath}`, commit: report.sourceCommit, runId: c.id });
