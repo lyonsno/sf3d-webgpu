@@ -15,7 +15,8 @@ export function validateForegroundService(config,{repoRoot,revision,outputDir}){
     throw Error('actual foreground server source/store identity mismatch');
 }
 
-export async function startForegroundService({repoRoot,revision,outputDir,onSpawn}){
+export async function startForegroundService({repoRoot,revision,outputDir,onSpawn,sourceHoldHead=false}){
+  if(typeof sourceHoldHead!=='boolean')throw Error('explicit boolean source HEAD policy required');
   if(!path.isAbsolute(repoRoot)||!path.isAbsolute(outputDir)||!/^[a-f0-9]{40}$/.test(revision))throw Error('explicit actual server root/revision/output required');
   fs.mkdirSync(outputDir,{recursive:true});
   const object=revision+':serve.py',size=Number(execFileSync('git',['cat-file','-s',object],{cwd:repoRoot,encoding:'utf8'}));
@@ -26,7 +27,7 @@ export async function startForegroundService({repoRoot,revision,outputDir,onSpaw
   const env=Object.fromEntries(names.filter(name=>process.env[name]!=null).map(name=>[name,process.env[name]]));
   Object.assign(env,{KAMINOS_ASSETS_DIR:path.join(outputDir,'assets'),KAMINOS_SCENES_DIR:path.join(outputDir,'scenes'),
     KAMINOS_SCENE_LIBRARY_GLOBS:path.join(outputDir,'scenes','*')});
-  const child=spawn('/usr/bin/python3',['-B','-u',path.resolve(adapter.pathname),repoRoot,outputDir],{cwd:repoRoot,env,stdio:['ignore','pipe','pipe']});
+  const child=spawn('/usr/bin/python3',['-B','-u',path.resolve(adapter.pathname),repoRoot,outputDir,...(sourceHoldHead?['--sf3d-source-hold-head']:[])],{cwd:repoRoot,env,stdio:['ignore','pipe','pipe']});
   onSpawn?.(child);
   const logPath=path.join(outputDir,'server.log'),network=[];
   child.stderr.on('data',chunk=>fs.appendFileSync(logPath,chunk));
@@ -41,12 +42,12 @@ export async function startForegroundService({repoRoot,revision,outputDir,onSpaw
       const error=e=>{cleanup();reject(e);};
       child.stdout.on('data',data);child.once('exit',exit);child.once('error',error);
     });
-    if(announced.pid!==child.pid||!/^http:\/\/127\.0\.0\.1:\d+$/.test(announced.origin))throw Error('owned loopback actual-server announcement required');
+    if(announced.pid!==child.pid||!/^http:\/\/127\.0\.0\.1:\d+$/.test(announced.origin)||announced.sourceHoldHead!==sourceHoldHead)throw Error('owned loopback actual-server announcement and effective source HEAD policy required');
     const response=await fetch(announced.origin+'/api/runtime-config');
     const raw=Buffer.from(await response.arrayBuffer());fs.writeFileSync(path.join(outputDir,'runtime-config.json'),raw);
     if(!response.ok)throw Error('actual foreground runtime config HTTP '+response.status);
     const config=JSON.parse(raw);validateForegroundService(config,{repoRoot,revision,outputDir});
-    const receipt={route:'owned-actual-kaminos-handler.v0',ownedPid:child.pid,origin:announced.origin,loopback:true,
+    const receipt={route:'owned-actual-kaminos-handler.v0',ownedPid:child.pid,origin:announced.origin,loopback:true,sourceHoldHead:announced.sourceHoldHead,
       serveSha256:hash(bytes),adapterSha256:hash(fs.readFileSync(adapter)),effective:config,logPath,network,
       childEnvironment:{policy:'positive-allowlist-with-caller-owned-stores',names:Object.keys(env),valuesRecorded:false}};
     const service={};

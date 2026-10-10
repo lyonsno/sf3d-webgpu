@@ -14,6 +14,9 @@ from urllib.parse import unquote, urlparse
 
 root = Path(sys.argv[1]).resolve()
 out = Path(sys.argv[2]).resolve()
+if sys.argv[3:] not in ([], ["--sf3d-source-hold-head"]):
+    raise ValueError("unknown selected-consumer adapter policy")
+source_hold_head = sys.argv[3:] == ["--sf3d-source-hold-head"]
 spec = importlib.util.spec_from_file_location("mini_actual_kaminos_server", root / "serve.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -42,6 +45,16 @@ class SelectedConsumerHandler(module.KaminosHandler):
         super().do_GET()
 
     def do_HEAD(self):
+        decoded = urlparse(self.path).path
+        while unquote(decoded) != decoded:
+            decoded = unquote(decoded)
+        if source_hold_head and decoded == "/lib/sf3d/weights.bin":
+            # Delegate only the refusal, never static file access. If this
+            # source is not held, or the actual handler lacks this capability,
+            # the selected consumer's original409 restriction still applies.
+            refuse = getattr(self, "refuse_sf3d_source", None)
+            if callable(refuse) and refuse(module.ROOT / "lib/sf3d/weights.bin"):
+                return
         if self.held():
             self.send_response(409)
             self.send_header("Content-Length", "0")
@@ -59,7 +72,7 @@ class SelectedConsumerHandler(module.KaminosHandler):
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SelectedConsumerHandler)
 module.PORT = server.server_address[1]
-print(json.dumps({"origin": f"http://127.0.0.1:{module.PORT}", "pid": os.getpid()}), flush=True)
+print(json.dumps({"origin": f"http://127.0.0.1:{module.PORT}", "pid": os.getpid(), "sourceHoldHead": source_hold_head}), flush=True)
 try:
     server.serve_forever()
 finally:
