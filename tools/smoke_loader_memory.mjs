@@ -94,7 +94,8 @@ try {
         verdict:host.hostname===report.source.hostname&&host.model==='Mac14,9'&&host.processor==='Apple M2 Pro'&&!host.observerErrors.length&&
           host.hostFreeBytes>=report.phaseDemand.requiredBytes&&report.processObservation?.lastObservation?.status==='observed'&&
           report.processObservation?.coverage==='sampled-owned-process-tree'&&!report.memorySafety?'admitted':'refused'};
-      writeJsonReportAtomic(reportPath,report).then(()=>{res.writeHead(report.phaseAdmission.verdict==='admitted'?200:409,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(report.phaseAdmission));},error=>res.writeHead(500).end(error.message));return;
+      writeJsonReportAtomic(reportPath,report);
+      res.writeHead(report.phaseAdmission.verdict==='admitted'?200:409,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(report.phaseAdmission));return;
       }catch(error){report.phaseAdmission={verdict:'refused',error:error.message};res.writeHead(409).end(error.message);return;}
     }
     if(patchMode&&name==='/phase-image'){res.writeHead(200,{'Content-Type':'image/png','Cache-Control':'no-store'}).end(phaseImage);return;}
@@ -151,6 +152,7 @@ try {
         baseline.lastObservation?.runId!==report.runId||baseline.lastObservation?.rootPid!==process.pid||
         baseline.lastObservation?.status!=='observed'||baseline.coverage!=='sampled-owned-process-tree'||report.memorySafety)
         throw Error('current successful owned-process baseline required before learned allocation');
+      report.phaseProcessBaseline=baseline;
       await persist();
       Object.assign(report,await page.evaluate(async config=>{const {runPatchPhase}=await import('/tools/patch_phase_browser.js');return runPatchPhase(config);},
         {requested:report.requested,source:report.canonicalSource,demand:report.phaseDemand,input:report.inputArtifact}));
