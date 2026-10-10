@@ -21,6 +21,7 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
   let peakCombinedBytes=0;
   const events = [], buffers = new Map(), unresolvedAllocations = new Set();
   let phase = 'new', refusal = null, device, originalCreate, originalTexture, originalDestroy, wrappedCreate, wrappedTexture, wrappedDestroy, restored = false;
+  let acquiring = false, acquiredHere = false, unresolvedAcquisition = false;
   const emit = (kind, details) => events.push({kind, phase, atMs:performance.now(), ...details});
   const refuse = (ledger, size, label, scope) => {
     bytes(size, 'requestedBytes');
@@ -41,6 +42,7 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
   };
   const assertActive = () => {
     if (restored) throw new Error('loader budget is restored');
+    if (unresolvedAcquisition) throw new Error('device acquisition cleanup is unresolved');
     parent?.assertActive();
   };
   const reserve = (scope, size, label) => {
@@ -75,7 +77,41 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
       if (!device || restored || value !== device || device.createBuffer !== wrappedCreate || device.destroy !== wrappedDestroy || (wrappedTexture && device.createTexture!==wrappedTexture))
         throw new Error('loader budget must be installed on this exact owned device');
     },
+    assertDeviceAcquiredHere(value) {
+      assertActive();
+      budget.assertDevice(value);
+      if (!acquiredHere) throw new Error('host device must be requested through the budget; earlier acquisition baseline is unaccounted');
+    },
+    // Request and install before exposing the fresh device to a host. Binding
+    // an existing device remains useful for owned loader tests, but cannot
+    // certify allocations that happened before the hook was installed.
+    async requestOwnedDevice(adapter, descriptor = {}, options = {}) {
+      assertActive();
+      if (device || acquiring) throw new Error('device already bound or acquisition in progress');
+      if (typeof adapter?.requestDevice !== 'function') throw new TypeError('adapter requestDevice required');
+      acquiring = true;
+      let acquired;
+      try {
+        acquired = await adapter.requestDevice(descriptor);
+        assertActive();
+        budget.bindOwnedDevice(acquired, options);
+        acquiredHere = true;
+        emit('device-acquired', {route:'adapter.requestDevice through loader budget'});
+        return acquired;
+      } catch (error) {
+        if (acquired) {
+          try { acquired.destroy(); }
+          catch (cleanupError) {
+            unresolvedAcquisition = true;
+            emit('device-acquisition-cleanup-unresolved', {message:String(cleanupError?.message ?? cleanupError)});
+            throw new AggregateError([error, cleanupError], 'device acquisition and cleanup failed', {cause:error});
+          }
+        }
+        throw error;
+      } finally { acquiring = false; }
+    },
     bindOwnedDevice(value,{textureBytes=null}={}) {
+      assertActive();
       if (device || restored || devices.has(value)) throw new Error('device already has a loader budget');
       if (typeof value?.createBuffer !== 'function' || typeof value.destroy !== 'function') throw new TypeError('owned device createBuffer/destroy required');
       if(textureBytes!==null&&(typeof textureBytes!=='function'||typeof value.createTexture!=='function'))throw new TypeError('host texture estimator and owned allocator required');
@@ -160,6 +196,8 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
     },
     snapshot() {
       return {schema:'sf3d.loader-memory-budget.v0', phase, refusal,
+        deviceAcquisition:acquiredHere?'requested-through-budget':device?'bound-after-acquisition':'unbound',
+        unresolvedAcquisitionCleanup:unresolvedAcquisition,
         accounting:'own and descendant explicit reservations; nested ledgers are not additive physical RAM',
         parentAllowance:parent ? {cpuBytes:parent.cpuBytes,gpuBytes:parent.gpuBytes,totalBytes:parent.totalBytes} : null,
         total:{liveBytes:cpu.liveBytes+gpu.liveBytes,peakLiveBytes:peakCombinedBytes,maxBytes:totalBytes,physicalMemoryMeasured:false,
@@ -171,6 +209,7 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
     },
     restore() {
       if (restored) return;
+      if (unresolvedAcquisition) throw new Error('device acquisition cleanup is unresolved');
       if (cpu.liveBytes || gpu.liveBytes) throw new Error('retire loader allocations before restoring the budget');
       if (device) {
         device.createBuffer = originalCreate; device.destroy = originalDestroy;

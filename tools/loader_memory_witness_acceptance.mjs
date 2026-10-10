@@ -16,6 +16,23 @@ export function acceptLoaderMemoryWitness(report) {
   need(report?.cases?.gpuRefusal?.budget?.gpu?.peakLiveBytes === 8, 'exact native allocation prefix before refusal');
   need(JSON.stringify(report?.deviceControl) === '[7,11,13,17]', 'same device remains usable after cleanup');
   need(report?.validationError === null, 'native validation scope');
+  if(report.requested?.hostProducerAllowance){
+    const artifact=report.producerArtifact,host=report.hostProducer;
+    need(artifact?.sourceRevision===report.source?.revision&&artifact?.buildSucceeded===true&&
+      artifact.entryPath==='/dist-lib/sf3d-producer.js'&&/^[a-f0-9]{64}$/.test(artifact.sha256??'')&&
+      artifact.servedSha256===artifact.sha256&&/^[a-f0-9]{64}$/.test(artifact.lockSha256??''),'exact fresh built and served producer artifact');
+    need(host?.moduleUrl===artifact?.entryPath&&host?.sameDevice===true,'actual constructor uses the guarded native host device');
+    need(host?.backend?.isFallbackAdapter===false&&/apple/i.test(host.backend.vendor),'producer host nonfallback Apple adapter');
+    need(host?.refusal?.name==='SF3DMemoryBudgetError'&&host.refusal.memoryBudget?.label==='weight-source'&&host.fetchCount===0,'actual producer source refusal before fetch');
+    need(host?.postRefusal?.name==='SF3DMemoryBudgetError'&&host.postRefusal.memoryBudget?.label==='post-producer-guard-control','host guard remains installed after producer refusal');
+    for(const label of ['before','after']){
+      const budget=host?.[label];
+      need(budget?.deviceAcquisition==='requested-through-budget'&&budget.cpu?.maxBytes===1&&budget.gpu?.maxBytes===128&&
+        budget.cpu.liveBytes===0&&budget.gpu.liveBytes===80&&budget.cpu.physicalMemoryMeasured===false&&budget.gpu.physicalMemoryMeasured===false,'exact guarded host baseline '+label);
+    }
+    need(JSON.stringify(host?.control)==='[7,11,13,17]'&&host?.validationError===null,'guarded native host readback remains usable');
+    need(host?.terminal?.cpu?.liveBytes===0&&host.terminal.gpu.liveBytes===0,'host control allocations retired');
+  }
   if(report.requested?.sharedAllowance){
     const shared=report.sharedAllowance;
     need(shared?.requested?.cpuBytes===64&&shared?.requested?.gpuBytes===64,'exact tiny shared diagnostic allowance');

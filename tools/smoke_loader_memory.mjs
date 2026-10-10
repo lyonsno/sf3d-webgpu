@@ -24,6 +24,7 @@ const reportPath = path.resolve(arg('--report') ?? path.join(os.tmpdir(),'sf3d-l
 const patchMode=process.argv.includes('--canonical-patch-phase');
 const canonicalMode=patchMode||process.argv.includes('--canonical-tensor-unit');
 const sharedMode=process.argv.includes('--shared-allowance');
+const hostProducerMode=process.argv.includes('--host-producer-allowance');
 const foregroundRoot=arg('--foreground-repo-root')?path.resolve(arg('--foreground-repo-root')):null;
 const report = {schema:'sf3d.loader-native-memory-witness.v0', status:'running', phase:'arguments', receiver:'mini-wake-and-bake-pit-boss',
   route:'sf3d-loader-native-refusal-synthetic-weights-no-inference.v0', reportPath, runId:randomUUID(),
@@ -46,11 +47,13 @@ if(foregroundRoot){
 }
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 if(sharedMode){report.requested.sharedAllowance=true;report.claim+='; shared explicit allowance contention on two actual owned devices with compute/readback, not host-wide coverage';}
+if(hostProducerMode){report.requested.hostProducerAllowance=true;report.claim+='; built producer source refusal preserves a guarded-from-acquisition native host device; not ordinary Kaminos adoption';}
 const persist = async () => writeJsonReportAtomic(reportPath,report);
 let browser, child, server, monitor, profile, canonical,foregroundPage,foregroundService,foregroundChild;
 try {
   await persist();
   if(sharedMode&&canonicalMode)throw Error('shared tiny diagnostic and canonical learned/unit routes must be invoked separately');
+  if(hostProducerMode&&(canonicalMode||foregroundRoot))throw Error('host producer constructor diagnostic requires the synthetic no-inference route');
   if(foregroundRoot&&(!patchMode||![32,48,64,96,128,136,140,160].includes(report.requested.foreground.grid)||
     !Number.isSafeInteger(report.requested.foreground.rendererCpuBytes)||report.requested.foreground.rendererCpuBytes<1||!report.requested.foreground.revision||
     !Number.isSafeInteger(report.requested.totalBytes)||report.requested.totalBytes<1||
@@ -133,6 +136,30 @@ try {
   const sources=new Map();
   const served=['src/lib/weights.js','src/lib/gpu.js','src/lib/loader_memory_budget.js','src/lib/flat_tensor_ranges.js'];
   if(sharedMode)served.push('tools/shared_allowance_browser.js');
+  if(hostProducerMode){
+    served.push('tools/producer_host_allowance_browser.js');
+    report.phase='producer-artifact-build';await persist();
+    const buildLog=reportPath+'.producer-build.log';report.evidencePaths.producerBuild=buildLog;
+    const fd=fs.openSync(buildLog,'w');
+    try{
+      execFileSync(process.execPath,[path.join(root,'node_modules/vite/bin/vite.js'),'build','-c','vite.lib.config.js'],{cwd:root,stdio:['ignore',fd,fd]});
+    }finally{fs.closeSync(fd);}
+    report.producerArtifact={sourceRevision:report.source.revision,buildSucceeded:true,entryPath:'/dist-lib/sf3d-producer.js',
+      lockSha256:digest(fs.readFileSync(path.join(root,'package-lock.json'))),kitVersion:JSON.parse(fs.readFileSync(path.join(root,'node_modules/@kaminos/webgpu-inference-kit/package.json'))).version,
+      buildCommand:[process.execPath,path.join(root,'node_modules/vite/bin/vite.js'),'build','-c','vite.lib.config.js'],artifacts:{}};
+    const collect=directory=>{
+      for(const item of fs.readdirSync(directory,{withFileTypes:true})){
+        const filename=path.join(directory,item.name);
+        if(item.isDirectory())collect(filename);
+        else if(item.isFile()&&item.name.endsWith('.js')){
+          const bytes=fs.readFileSync(filename),url='/'+path.relative(root,filename).split(path.sep).join('/');
+          sources.set(url,bytes);report.producerArtifact.artifacts[url]=digest(bytes);
+        }
+      }
+    };
+    collect(path.join(root,'dist-lib'));report.producerArtifact.sha256=report.producerArtifact.artifacts[report.producerArtifact.entryPath];
+    if(!report.producerArtifact.sha256)throw Error('producer build omitted its requested entry');
+  }
   if(foregroundRoot)served.push('tools/foreground_guard_browser.js');
   if(patchMode)served.push('src/lib/sf3d_backbone.js','src/lib/preprocess_core.js','tools/patch_phase_browser.js',
     ...['patch_embed_dinov2','layernorm_vit','attention','linear','linear_gelu','layerscale','activations'].map(n=>'src/shaders/'+n+'.wgsl'));
@@ -188,6 +215,7 @@ try {
     }
     const raw=name.endsWith('.wgsl')&&new URL(req.url,'http://localhost').searchParams.has('raw');
     const servedBytes=raw?Buffer.from('export default '+JSON.stringify(bytes.toString())+';'):bytes;
+    if(report.producerArtifact?.entryPath===name)report.producerArtifact.servedSha256=digest(servedBytes);
     res.setHeader('content-type',name.endsWith('.js')||raw?'text/javascript':'application/octet-stream');res.setHeader('content-length',servedBytes.length);res.setHeader('cache-control','no-store');res.end(servedBytes);
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -358,6 +386,10 @@ try {
   if(sharedMode){
     report.phase='native-shared-allowance';await persist();
     report.sharedAllowance=await page.evaluate(async()=>{const {runSharedAllowanceWitness}=await import('/tools/shared_allowance_browser.js');return runSharedAllowanceWitness();});
+  }
+  if(hostProducerMode){
+    report.phase='native-producer-host-allowance';await persist();
+    report.hostProducer=await page.evaluate(async bytes=>{const {runProducerHostAllowance}=await import('/tools/producer_host_allowance_browser.js');return runProducerHostAllowance(bytes);},report.fixtures.f32.bytes);
   }
   report.phase='native-process-stop';report.processObservation=await monitor.stop();monitor=null;await persist();
   if(report.processObservation.status!=='observed'||report.processObservation.safety||report.memorySafety)

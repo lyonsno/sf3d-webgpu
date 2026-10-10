@@ -51,3 +51,34 @@ for(const [name,mutate]of [
   ['validation error',r=>r.sharedAllowance.validationErrors[1]='device error'],
 ]){const r=shared();mutate(r);assert.equal(acceptLoaderMemoryWitness(r).ok,false,name);}
 assert.equal(acceptLoaderMemoryWitness(shared()).ok,true,'synthetic shared fixture only tests acceptance policy');
+const hostProducer=()=>{
+  const r=valid();r.requested.hostProducerAllowance=true;
+  r.producerArtifact={sourceRevision:revision,buildSucceeded:true,entryPath:'/dist-lib/sf3d-producer.js',sha256:'c'.repeat(64),servedSha256:'c'.repeat(64),lockSha256:'d'.repeat(64)};
+  const budget=()=>({deviceAcquisition:'requested-through-budget',cpu:{liveBytes:0,maxBytes:1,physicalMemoryMeasured:false},gpu:{liveBytes:80,maxBytes:128,physicalMemoryMeasured:false}});
+  r.hostProducer={moduleUrl:'/dist-lib/sf3d-producer.js',backend:{vendor:'apple',isFallbackAdapter:false},sameDevice:true,
+    refusal:{name:'SF3DMemoryBudgetError',memoryBudget:{label:'weight-source'}},fetchCount:0,
+    before:budget(),after:budget(),postRefusal:{name:'SF3DMemoryBudgetError',memoryBudget:{label:'post-producer-guard-control'}},
+    control:[7,11,13,17],validationError:null,terminal:{cpu:{liveBytes:0},gpu:{liveBytes:0}}};return r;
+};
+{
+  const r=hostProducer();delete r.hostProducer;
+  assert.equal(acceptLoaderMemoryWitness(r).ok,false,'requested producer host contract cannot silently omit its primary evidence');
+}
+for(const [name,mutate]of [
+  ['stale library source',r=>r.producerArtifact.sourceRevision='b'.repeat(40)],
+  ['library not built',r=>r.producerArtifact.buildSucceeded=false],
+  ['wrong served artifact',r=>r.producerArtifact.servedSha256='e'.repeat(64)],
+  ['producer module substituted',r=>r.hostProducer.moduleUrl='/other.js'],
+  ['producer fallback',r=>r.hostProducer.backend.isFallbackAdapter=true],
+  ['wrong device',r=>r.hostProducer.sameDevice=false],
+  ['unobserved acquisition',r=>r.hostProducer.after.deviceAcquisition='bound-after-acquisition'],
+  ['auth failure pretending allocation refusal',r=>r.hostProducer.refusal.name='TypeError'],
+  ['source fetched before refusal',r=>r.hostProducer.fetchCount=1],
+  ['host guard removed',r=>delete r.hostProducer.postRefusal],
+  ['host baseline retired',r=>r.hostProducer.after.gpu.liveBytes=0],
+  ['shadowed host allowance',r=>r.hostProducer.after.gpu.maxBytes=256],
+  ['no usable host control',r=>r.hostProducer.control=[]],
+  ['native producer validation failure',r=>r.hostProducer.validationError='bad pipeline'],
+  ['host allocations stranded',r=>r.hostProducer.terminal.gpu.liveBytes=80],
+]){const r=hostProducer();mutate(r);assert.equal(acceptLoaderMemoryWitness(r).ok,false,name);}
+assert.equal(acceptLoaderMemoryWitness(hostProducer()).ok,true,'synthetic producer fixture tests reporting policy, not platform conformance');

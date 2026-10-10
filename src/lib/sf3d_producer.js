@@ -34,6 +34,9 @@
 import { initGPU } from './gpu.js';
 import { loadWeights } from './weights.js';
 import { isLoaderMemoryBudget } from './loader_memory_budget.js';
+// Hosts use the same bundled authority as the constructor, not a duplicated
+// module's lookalike budget or an assertion about an unobserved old device.
+export { createLoaderMemoryBudget } from './loader_memory_budget.js';
 import { initPipelines } from './inference.js';
 import { retainClipPrepWorker, releaseClipPrepWorker } from './clip_estimator.js';
 import { runFullPipelineToGlb } from './full_pipeline.js';
@@ -236,12 +239,13 @@ export async function createSf3dProducer({
   commit = (typeof __COMMIT_HASH__ !== 'undefined' ? __COMMIT_HASH__ : 'dev'),
 } = {}) {
   if (memoryBudget && !isLoaderMemoryBudget(memoryBudget)) throw new TypeError('authenticated loader budget required');
-  if (memoryBudget && (device != null || weights != null))
-    throw new Error('loader budget requires a newly owned GPU device and weights; borrowed host baseline is not accounted');
+  if (memoryBudget && weights != null)
+    throw new Error('injected weights are unaccounted by the loader budget');
+  if (memoryBudget && device != null) memoryBudget.assertDeviceAcquiredHere(device);
   const gpu = await initGPU(device ? { device, adapter } : {});
   const dev = gpu.device;
-  const retireBudgetDevice = () => { if (memoryBudget) { dev.destroy(); memoryBudget.restore(); } };
-  if (memoryBudget) {
+  const retireBudgetDevice = () => { if (memoryBudget && !gpu.injected) { dev.destroy(); memoryBudget.restore(); } };
+  if (memoryBudget && !gpu.injected) {
     try { memoryBudget.bindOwnedDevice(dev); }
     catch (error) { dev.destroy(); throw error; }
   }
