@@ -9,9 +9,9 @@ const result={verdict:'would-admit',effective:{planId:'darwin-16gib-full-route-c
 try{
   fs.mkdirSync(path.join(root,'public'));fs.writeFileSync(path.join(root,'public/weights.bin'),'local policy fixture, not canonical weights');
   fs.symlinkSync('weights.bin',path.join(root,'public/alias.bin'));
-  const exercise=({url='/weights.bin',method='GET',observation=observed,admit=()=>result,preview=false}={})=>{
+  const exercise=({url='/weights.bin',method='GET',observation=observed,admit=()=>result,preview=false,base='/'}={})=>{
     let handler,passed=false;const plugin=modelSourceCircuitBreaker({observe:()=>observation,admit});
-    plugin.configResolved({root,publicDir:path.join(root,'public')});
+    plugin.configResolved({root,publicDir:path.join(root,'public'),base,rawBase:base});
     const returned=plugin[preview?'configurePreviewServer':'configureServer']({middlewares:{use(fn){handler=fn;return ()=>assert.fail('Connect app must not become a Vite post-hook');}}});
     assert.equal(returned,undefined,'Vite configure hook must not return the Connect app as a post-hook');
     const res={code:null,headers:null,body:null,writeHead(code,headers){this.code=code;this.headers=headers;return this;},end(body){this.body=body;}};
@@ -23,6 +23,12 @@ try{
     assert.equal(receipt.sourcePath,fs.realpathSync(path.join(root,'public/weights.bin')));assert.equal(receipt.repoRoot,root);
   }
   const head=exercise({method:'HEAD',preview:true});assert.equal(head.code,503);assert.equal(head.body,undefined);
+  for(const preview of [false,true])for(const effectivePath of ['/weights.bin','/%77eights.bin','/alias.bin','/public/weights.bin','/@fs/'+path.join(root,'public/weights.bin')]){
+    const url='/sf3d'+effectivePath,r=exercise({url,preview,base:'/sf3d/'});
+    assert.equal(r.code,503,'Vite base-prefixed model must refuse before later base stripping: '+url);
+    const receipt=JSON.parse(r.body);assert.equal(receipt.requestedPath,decodeURIComponent(url));
+    assert.equal(receipt.effectivePath,decodeURIComponent(effectivePath));assert.equal(receipt.base,'/sf3d/');
+  }
   assert.equal(head.headers['X-SF3D-Memory-Authority'],'circuit-breaker-only');
   assert.equal(exercise({observation:{...observed,hostTotalBytes:64*1024**3}}).passed,true,'unmatched source host preserves existing route, not positive M2 authority');
   assert.equal(exercise({url:'/demo_chair.png'}).passed,true,'ordinary assets remain unaffected');

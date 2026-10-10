@@ -7,16 +7,24 @@ import {observeMacMemory,defaultPlanPathForObservation,runMemoryAdmission,applyE
 export function modelSourceCircuitBreaker({observe=observeMacMemory,admit=runMemoryAdmission}={}){
   let config;
   const install=server=>{server.middlewares.use((req,res,next)=>{
-    let requestedPath;
-    try{requestedPath=decodeURIComponent(new URL(req.url,'http://localhost').pathname);}catch{return next();}
+    let requestedPath,effectivePath;
+    const base=config.rawBase??config.base??'/';
+    // Vite installs configureServer hooks before its baseMiddleware. Follow
+    // that middleware's raw-prefix stripping before decoding/file matching.
+    // Keep the original path distinct; a receipt must not erase this route.
+    const effectiveUrl=base!=='/'&&req.url.startsWith(base)?req.url.slice(base.length-1):req.url;
+    try{
+      requestedPath=decodeURIComponent(new URL(req.url,'http://localhost').pathname);
+      effectivePath=decodeURIComponent(new URL(effectiveUrl,'http://localhost').pathname);
+    }catch{return next();}
     const weightPath=path.resolve(config.root,'public/weights.bin');
     const real=value=>{try{return fs.realpathSync(value);}catch{return path.resolve(value);}};
     const target=real(weightPath);
-    const candidates=requestedPath.startsWith('/@fs/')?[requestedPath.slice(4)]:[
-      path.resolve(config.root,'.'+requestedPath),
-      ...(config.publicDir?[path.resolve(config.publicDir,'.'+requestedPath)]:[]),
+    const candidates=effectivePath.startsWith('/@fs/')?[effectivePath.slice(4)]:[
+      path.resolve(config.root,'.'+effectivePath),
+      ...(config.publicDir?[path.resolve(config.publicDir,'.'+effectivePath)]:[]),
     ];
-    if(requestedPath!=='/weights.bin'&&!candidates.some(candidate=>real(candidate)===target))return next();
+    if(effectivePath!=='/weights.bin'&&!candidates.some(candidate=>real(candidate)===target))return next();
     let observation;
     try{
       observation=observe({volumePath:path.dirname(weightPath)});
@@ -28,10 +36,10 @@ export function modelSourceCircuitBreaker({observe=observeMacMemory,admit=runMem
       // This endpoint never turns diagnostic headroom into allocation authority.
       if(memoryAdmission.verdict!=='refused'||memoryAdmission.authority!=='circuit-breaker-only')throw Error('source full-route circuit breaker lost refusal authority');
       respond({schema:'sf3d.model-source-circuit-breaker.v0',verdict:'refused',authority:'circuit-breaker-only',
-        repoRoot:config.root,requestedPath,sourcePath:target,memoryAdmission,
+        repoRoot:config.root,requestedPath,effectivePath,base,sourcePath:target,memoryAdmission,
         meaning:'unadmitted full-model source refused on this source host; not browser RAM discovery or positive phase admission'});
     }catch(error){respond({schema:'sf3d.model-source-circuit-breaker.v0',verdict:'refused',authority:'circuit-breaker-only',
-      repoRoot:config.root,requestedPath,sourcePath:target,observation,error:error.message,
+      repoRoot:config.root,requestedPath,effectivePath,base,sourcePath:target,observation,error:error.message,
       meaning:'source observation/diagnostic unavailable; no model bytes served'});}
     function respond(report){
       const body=JSON.stringify(report);
