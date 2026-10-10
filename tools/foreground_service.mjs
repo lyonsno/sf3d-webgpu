@@ -3,6 +3,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {createHash} from 'node:crypto';
 import {spawn,execFileSync} from 'node:child_process';
+import {pipeline} from 'node:stream';
 import {stopOwnedBrowser} from './owned_browser_stop.mjs';
 
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -50,21 +51,36 @@ export async function startForegroundService({repoRoot,revision,outputDir,onSpaw
       childEnvironment:{policy:'positive-allowlist-with-caller-owned-stores',names:Object.keys(env),valuesRecorded:false}};
     const service={};
     const proxy=(req,res,{requestedUrl=req.url}={})=>{
-      const record={url:req.url,requestedUrl,method:req.method,route:'actual-kaminos-handler',at:new Date().toISOString()};network.push(record);
-      const upstream=http.request(new URL(req.url,announced.origin),{method:req.method},reply=>{
+      let target;
+      try{
+        target=new URL(req.url,announced.origin);
+        if(!req.url.startsWith('/')||req.url.startsWith('//')||req.url.includes('\\')||target.origin!==announced.origin)
+          throw Error('actual foreground proxy destination must remain on its owned private origin');
+      }catch(error){res.writeHead(409,{'Content-Type':'text/plain'}).end(error.message);return Promise.resolve();}
+      const record={requestId:network.length+1,url:req.url,effectiveUrl:target.href,requestedUrl,method:req.method,
+        route:'actual-kaminos-handler',at:new Date().toISOString(),complete:false};
+      record.rawPath=path.join(outputDir,'response-'+record.requestId+'.raw');network.push(record);
+      let finish;const completion=new Promise(resolve=>{finish=()=>resolve(record);});
+      const headers=Object.fromEntries(['content-type','content-length'].filter(name=>req.headers?.[name]!=null).map(name=>[name,req.headers[name]]));
+      const upstream=http.request(target,{method:req.method,headers},reply=>{
         record.status=reply.statusCode;record.contentType=reply.headers['content-type']??null;
         const digest=createHash('sha256');
-        const rawPath=path.join(outputDir,'response-'+network.length+'.raw');record.rawPath=rawPath;
-        const saved=fs.createWriteStream(rawPath);
+        const saved=fs.createWriteStream(record.rawPath);
         reply.on('data',chunk=>digest.update(chunk));
-        reply.on('end',()=>{record.sha256=digest.digest('hex');record.complete=true;service.onServed?.(record);});
+        reply.on('end',()=>{record.sha256=digest.digest('hex');record.upstreamComplete=reply.complete;});
         reply.on('error',error=>{record.error=error.message;res.destroy(error);});
-        reply.on('aborted',()=>{record.error='upstream response aborted';saved.end();res.destroy();});
+        reply.on('aborted',()=>{record.error='upstream response aborted';res.destroy();});
         saved.on('error',error=>{record.evidenceError=error.message;res.destroy(error);});
-        res.writeHead(reply.statusCode,reply.headers);reply.pipe(saved);reply.pipe(res);
+        pipeline(reply,saved,error=>{
+          if(error)record.evidenceError??=error.message;
+          record.complete=!error&&record.upstreamComplete===true;
+          if(record.complete)service.onServed?.(record);
+          finish();
+        });
+        res.writeHead(reply.statusCode,reply.headers);reply.pipe(res);
       });
-      upstream.on('error',error=>{record.error=error.message;if(!res.headersSent)res.writeHead(503,{'Content-Type':'text/plain'}).end('actual foreground service unavailable: '+error.message);else res.destroy(error);});
-      req.pipe(upstream);
+      upstream.on('error',error=>{record.error=error.message;if(!res.headersSent)res.writeHead(503,{'Content-Type':'text/plain'}).end('actual foreground service unavailable: '+error.message);else res.destroy(error);finish();});
+      req.pipe(upstream);return completion;
     };
     return Object.assign(service,{child,receipt,proxy,close:()=>stopOwnedBrowser(child)});
   }catch(error){error.foregroundServiceCleanup=await stopOwnedBrowser(child);throw error;}

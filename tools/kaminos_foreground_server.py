@@ -50,7 +50,12 @@ class SelectedConsumerHandler(module.KaminosHandler):
         super().do_HEAD()
 
     def do_POST(self):
-        self.send_json({"error": "selected consumer service is read-only"}, 409)
+        if urlparse(self.path).path == "/api/volume-cockpit-layouts":
+            # The actual cockpit publishes its source layout during startup.
+            # This store was explicitly routed into this run's output directory.
+            super().do_POST()
+            return
+        self.send_json({"error": "selected consumer permits only caller-owned cockpit layout writes"}, 409)
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SelectedConsumerHandler)
 module.PORT = server.server_address[1]

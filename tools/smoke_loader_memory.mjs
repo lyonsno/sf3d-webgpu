@@ -170,7 +170,8 @@ try {
           let decoded=target.pathname,previous;
           do{previous=decoded;decoded=decodeURIComponent(decoded);}while(decoded!==previous);
           if(decoded.startsWith('/foreground/'))decoded=decoded.slice('/foreground'.length);
-          if(!['GET','HEAD'].includes(req.method)||/\.(bin|glb|gltf|safetensors|npy|npz|pt|gguf)$/i.test(decoded)||
+          const ownedLayoutWrite=req.method==='POST'&&decoded==='/api/volume-cockpit-layouts';
+          if(decoded.startsWith('//')||decoded.includes('\\')||(!['GET','HEAD'].includes(req.method)&&!ownedLayoutWrite)||/\.(bin|glb|gltf|safetensors|npy|npz|pt|gguf)$/i.test(decoded)||
             /^\/api\/(read|delete|job)/.test(decoded))throw Error('unadmitted model/data/mutation route held by selected consumer');
           req.url=decoded+target.search;
           if(!foregroundService)throw Error('owned actual foreground service unavailable');
@@ -233,18 +234,21 @@ try {
     page.on('requestfailed',request=>report.foreground.networkFailures.push({url:request.url(),type:request.resourceType(),error:request.failure()?.errorText}));
     let failStartup,startupError;
     const startupFailure=new Promise((_resolve,reject)=>{failStartup=error=>{startupError=Error('foreground startup exception: '+error.message);reject(startupError);};});
+    const failCaughtStartup=message=>{if(message.type()==='error'&&/^(Volume cockpit initialization failed:|Volume route initialization failed:|initScene failed:)/.test(message.text()))
+      failStartup(Error(message.text()));};
     const failRequiredResponse=response=>{if(response.status()>=400&&response.request().resourceType()==='script')
       failStartup(Error('foreground required module refused: HTTP '+response.status()+' '+response.url()));};
     const failRequiredRequest=request=>{if(request.resourceType()==='script')
       failStartup(Error('foreground required module network failure: '+request.url()+' '+request.failure()?.errorText));};
     page.on('pageerror',failStartup);
+    page.on('console',failCaughtStartup);
     page.on('response',failRequiredResponse);page.on('requestfailed',failRequiredRequest);
     try{
       const navigation=await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'networkidle0',timeout:0}),startupFailure]);
       if(startupError)throw startupError;
       if(!navigation?.ok())throw Error('foreground navigation refused: HTTP '+navigation?.status());
       await Promise.race([page.waitForFunction(()=>window.__kaminosVolumePrototype?.debugState().active||window.__kaminosVolumePrototype?.debugState().error,{timeout:0}),startupFailure]);
-    }finally{page.off('pageerror',failStartup);page.off('response',failRequiredResponse);page.off('requestfailed',failRequiredRequest);}
+    }finally{page.off('pageerror',failStartup);page.off('console',failCaughtStartup);page.off('response',failRequiredResponse);page.off('requestfailed',failRequiredRequest);}
     const initial=await page.evaluate(()=>window.__kaminosVolumePrototype.debugState());
     if(!initial.active||initial.error)throw Error('ordinary foreground initialization failed: '+initial.error);
     await page.waitForFunction(()=>window.__kaminosVolumePrototype.debugState().frameCount>=3||window.__kaminosVolumePrototype.debugState().error,{timeout:0});
