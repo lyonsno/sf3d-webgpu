@@ -271,6 +271,8 @@ export async function runCooperativeDino(opts) {
     signal,
     invocationId = `sf3d:dino:${schedulingMode}`,
   } = opts;
+  if(opts.withChunkWeights!=null&&schedulingMode!=='cooperative')
+    throw Error('phase weight residency requires cooperative queue-prefix fences');
 
   const manifest = defineDinoEncoderManifest(numBlocks, chunkBlocks);
   const runtime = createSf3dCooperativeRuntime(device, {
@@ -305,6 +307,8 @@ export async function runCooperativeDino(opts) {
       // queue.submit; no producer-side submit callback.
       encodeTokenizer: (driver) => tokenizer.encodeCooperative({
         imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver,
+        withChunkWeights:opts.withChunkWeights??null,
+        retireIntermediateBuffers:opts.retireIntermediateBuffers===true,
       }),
     });
   });

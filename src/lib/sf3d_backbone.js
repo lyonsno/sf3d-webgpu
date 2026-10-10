@@ -12,7 +12,7 @@
  * Produces: [N_tokens, dim] image features for the two-stream backbone
  */
 
-import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import { createStorageBuffer, createEmptyBuffer, readBuffer, captureGpuBufferAllocations } from './gpu.js';
 
 import patchEmbedWGSL from '../shaders/patch_embed_dinov2.wgsl?raw';
 import layerNormWGSL from '../shaders/layernorm_vit.wgsl?raw';
@@ -183,37 +183,62 @@ export class SF3DImageTokenizer {
    * @param {number} o.chunkBlocks
    * @param {(blockStart:number, blockEnd:number, encodeChunk:(enc:GPUCommandEncoder)=>void)=>Promise<void>} o.driver
    */
-  async encodeCooperative({ imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver }) {
+  async encodeCooperative({ imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver, withChunkWeights = null, retireIntermediateBuffers = false }) {
     if (numBlocks !== VIT_CONFIG.numLayers) {
       throw new Error(
         `encodeCooperative numBlocks ${numBlocks} must equal VIT_CONFIG.numLayers ${VIT_CONFIG.numLayers}`,
       );
     }
+    if(withChunkWeights!==null&&typeof withChunkWeights!=='function')throw TypeError('withChunkWeights must be a function');
     // ctx (work buffers + currentTokens ping-pong pointer) is created once and
     // survives every chunk. Setup dispatches are deferred into the first chunk.
     let ctx = null;
     let result = null;
+    const allocations=[];
+    let failure;
 
+    try{
     for (let start = 0; start < numBlocks; start += chunkBlocks) {
       const end = Math.min(start + chunkBlocks, numBlocks);
       const isFirst = start === 0;
       const isLast = end === numBlocks;
       // eslint-disable-next-line no-await-in-loop
-      await driver(start, end, encoder => {
+      const encode = chunkWeights => driver(start, end, encoder => {
+        const record = () => {
         if (isFirst) {
-          ctx = this._setupEncode(encoder, imageBuf, cameraEmbedBuf, weights);
+          ctx = this._setupEncode(encoder, imageBuf, cameraEmbedBuf, chunkWeights);
         }
         for (let l = start; l < end; l++) {
-          this._encodeBlock(encoder, l, ctx, weights);
+          this._encodeBlock(encoder, l, ctx, chunkWeights);
         }
         if (isLast) {
-          result = this._finalizeEncode(encoder, ctx, weights);
+          result = this._finalizeEncode(encoder, ctx, chunkWeights);
         }
+        };
+        if(retireIntermediateBuffers)allocations.push(...captureGpuBufferAllocations(record).allocations);
+        else record();
       });
+      if(withChunkWeights)await withChunkWeights({blockStart:start,blockEnd:end,isFirst,isLast},encode);
+      else await encode(weights);
     }
 
     if (!result) throw new Error('encodeCooperative produced no result');
     return result;
+    }catch(error){failure=error;throw error;}
+    finally{
+      if(retireIntermediateBuffers){
+        // Capture only synchronous model encoding, never a yielding host turn.
+        // Do not retire backing still referenced by an unresolved queue prefix.
+        try{await this.device.queue.onSubmittedWorkDone();}
+        catch(error){throw failure?new AggregateError([failure,error],'DINO failed and work-buffer drain is unresolved',{cause:failure}):error;}
+        const keep=failure?null:result?.tokensBuf,retired=new Set(),errors=[];
+        for(const {buffer} of allocations)if(buffer!==keep&&!retired.has(buffer)){
+          try{buffer.destroy();retired.add(buffer);}catch(error){errors.push(error);}
+        }
+        for(const [name,buffer] of Object.entries(this._dinov2Diag??{}))if(retired.has(buffer))delete this._dinov2Diag[name];
+        if(errors.length)throw new AggregateError(failure?[failure,...errors]:errors,'DINO work-buffer retirement failed',{cause:failure});
+      }
+    }
   }
 
   /**

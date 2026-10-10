@@ -287,14 +287,14 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = 
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
     consumed.add(name);
-    return staged?.dryRun ? {} : staged ? staged.buffers.get(name) : upload(chunkedBuffer, info);
+    return staged?.references ? staged.references(name) : staged?.dryRun ? {} : staged ? staged.buffers.get(name) : upload(chunkedBuffer, info);
   };
 
   const tryGet = (name) => {
     const info = tensors.get(name);
     if (!info) return null;
     consumed.add(name);
-    return staged?.dryRun ? {} : staged ? staged.buffers.get(name) : upload(chunkedBuffer, info);
+    return staged?.references ? staged.references(name) : staged?.dryRun ? {} : staged ? staged.buffers.get(name) : upload(chunkedBuffer, info);
   };
 
   const getCPU = (name) => {
@@ -481,6 +481,8 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = 
   }
 
   if(staged?.dryRun)return consumed;
+  const components={imageTokenizer,cameraEmbedder,tokenizer,backbone,postProcessor,decoder,imageEstimator};
+  if(staged?.references)return components;
   console.log(`Loaded ${tensors.size} SF3D tensors from weight file`);
 
   // Raw tensor access for modules that read weights lazily by name (the CLIP
@@ -532,13 +534,7 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = 
   };
 
   return {
-    imageTokenizer,
-    cameraEmbedder,
-    tokenizer,
-    backbone,
-    postProcessor,
-    decoder,
-    imageEstimator,
+    ...components,
     ...(staged ? {loadingReport:staged.report} : {}),
     dispose,
     _assertActive,
@@ -614,4 +610,71 @@ async function loadRangeWeights(device,url,onProgress,options){
     },dispose(){disposed=true;retained.clear();}};
     return buildWeightSet(device,null,source.tensors,owner.ownedBuffers,owner.context,{buffers,compact,report:source.report});
   }catch(error){owner.cleanup(error);throw error;}
+}
+
+/**
+ * Opt-in computation-bound residency over the SAME model builders/converter.
+ * Construction validates the complete eager model schema from the range table,
+ * but allocates no payload. A caller selects actual template leaves for one
+ * computation; those buffers retire only after its submitted queue work drains.
+ * This is explicit lifetime accounting, never host-fit or physical reclaim authority.
+ */
+export async function createWeightPhaseSource(device,url,options={}){
+  if(!isLoaderMemoryBudget(options.memoryBudget))throw TypeError('authenticated loader budget required');
+  options.memoryBudget.assertDevice(device);
+  const source=await createFlatTensorRangeSource(url,options),references=new WeakMap();
+  const template=buildWeightSet(device,null,source.tensors,new Set(),null,{references(name){
+    const ref=Object.freeze({});references.set(ref,name);return ref;
+  }});
+  let active=false,disposed=false,quarantined=false,unresolvedOwner=null;
+  const phases=[];
+  const assertActive=()=>{
+    if(disposed)throw Error('weight phase source is disposed');
+    if(quarantined)throw Error('weight phase source queue cleanup is quarantined');
+    if(active)throw Error('weight phase source has an active phase');
+  };
+  const select=(value,names,buffers=null)=>{
+    if(value===null)return null;
+    if(!value||typeof value!=='object')throw TypeError('authenticated weight phase selection required');
+    if(references.has(value)){
+      const name=references.get(value);names.add(name);return buffers?buffers.get(name):value;
+    }
+    if(Array.isArray(value))return value.map(v=>select(v,names,buffers));
+    const entries=Object.entries(value);
+    if(!entries.length)throw TypeError('authenticated weight phase selection required');
+    return Object.fromEntries(entries.map(([key,v])=>[key,select(v,names,buffers)]));
+  };
+  return Object.freeze({template,loadingReport:source.report,phases,
+    async withWeights(selection,work){
+      assertActive();if(typeof work!=='function')throw TypeError('weight phase computation required');
+      const names=new Set();
+      if(selection&&typeof selection==='object'&&!Object.keys(selection).length)throw TypeError('nonempty weight phase selection required');
+      const pinned=select(selection,names);if(!names.size)throw TypeError('nonempty weight phase selection required');
+      active=true;
+      const owner=rangeLoadContext(device,options.memoryBudget),buffers=new Map();
+      const phase={tensorNames:[...names],status:'loading',retirementAuthority:'API destruction after queue drain; not physical reclamation'};
+      phases.push(phase);
+      let value,error;
+      try{
+        for(const name of names)buffers.set(name,(await uploadRangeTensor(device,source,name,owner)).buffer);
+        phase.status='computing';value=await work(select(pinned,new Set(),buffers));
+      }catch(failure){error=failure;phase.error=String(failure?.message??failure);}
+      try{
+        if(owner.ownedBuffers.size)await device.queue.onSubmittedWorkDone();
+        owner.cleanup();buffers.clear();phase.status=error?'failed-retired':'completed-retired';
+      }catch(failure){
+        quarantined=true;unresolvedOwner=owner;phase.status='cleanup-unresolved';phase.cleanupError=String(failure?.message??failure);
+        error=error?new AggregateError([error,failure],'weight phase failed and cleanup is unresolved',{cause:error}):failure;
+      }finally{active=false;}
+      if(error)throw error;return value;
+    },
+    async dispose(){
+      if(active)throw Error('cannot dispose an active weight phase');
+      if(disposed&&!unresolvedOwner)return;
+      disposed=true;
+      if(unresolvedOwner){
+        await device.queue.onSubmittedWorkDone();unresolvedOwner.cleanup();unresolvedOwner=null;
+      }
+    },
+  });
 }
