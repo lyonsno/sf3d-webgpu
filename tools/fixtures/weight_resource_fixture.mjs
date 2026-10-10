@@ -1,5 +1,5 @@
 /** Tiny synthetic tensors for exercising the real loader, not model numerics. */
-export function weightFixture({ normX = true, seed = 0, fullClipPrep = false } = {}) {
+export function weightFixture({ normX = true, seed = 0, fullClipPrep = false, tensorShapes = new Map(), fp16Names = new Set() } = {}) {
   const names = new Set();
   const add = (...values) => values.forEach(value => names.add(value));
   const pair = prefix => add(`${prefix}.weight`, `${prefix}.bias`);
@@ -48,7 +48,8 @@ export function weightFixture({ normX = true, seed = 0, fullClipPrep = false } =
     ['image_estimator.model.visual.class_embedding', [768]],
     ['image_estimator.model.visual.positional_embedding', [50, 768]],
   ]) : new Map();
-  const tensorByteSize = name => (clipPrepShapes.get(name) || [1]).reduce((size, dim) => size * dim, 4);
+  const tensorShape = name => tensorShapes.get(name) || clipPrepShapes.get(name) || [1];
+  const tensorByteSize = name => tensorShape(name).reduce((size, dim) => size * dim, fp16Names.has(name) ? 2 : 4);
   const headerSize = 16 + names.size * 160;
   const bytes = new Uint8Array(headerSize + [...names].reduce((size, name) => size + tensorByteSize(name), 0));
   const view = new DataView(bytes.buffer);
@@ -58,13 +59,15 @@ export function weightFixture({ normX = true, seed = 0, fullClipPrep = false } =
   [...names].forEach((name, i) => {
     const entry = 16 + i * 160;
     bytes.set(new TextEncoder().encode(name), entry);
-    const shape = clipPrepShapes.get(name) || [1];
+    const shape = tensorShape(name);
     const byteSize = tensorByteSize(name);
+    view.setUint32(entry + 128, fp16Names.has(name) ? 1 : 0, true);
     view.setUint32(entry + 132, shape.length, true);
     shape.forEach((dimension, axis) => view.setUint32(entry + 136 + axis * 4, dimension, true));
     view.setUint32(entry + 152, payloadOffset, true);
     view.setUint32(entry + 156, byteSize, true);
-    view.setFloat32(headerSize + payloadOffset, seed + i + 1, true);
+    if (fp16Names.has(name)) view.setUint16(headerSize + payloadOffset, 0x3c00, true);
+    else view.setFloat32(headerSize + payloadOffset, seed + i + 1, true);
     values.set(name, seed + i + 1);
     payloadOffset += byteSize;
   });
@@ -75,14 +78,15 @@ export function fakeWeightDevice() {
   const buffers = [];
   const clipPipelines = [];
   const device = {
-    buffers, clipPipelines, failBufferAt: null, failClipPipeline: false,
+    buffers, clipPipelines, failBufferAt: null, failClipPipeline: false, destroyed:0,
+    destroy() { this.destroyed++; for (const buffer of buffers) if (!buffer.destroyed) buffer.destroy(); },
     limits: { maxBufferSize: 2147483648, maxStorageBufferBindingSize: 1073741824, maxComputeInvocationsPerWorkgroup: 256 },
     features: new Set(),
     queue: { submit() {}, writeBuffer() {}, async onSubmittedWorkDone() {} },
     createBuffer({ size, label }) {
       if (buffers.length === device.failBufferAt) throw new Error('injected allocation failure');
       const data = new ArrayBuffer(size);
-      const buffer = { device, label, data, destroyed: 0,
+      const buffer = { device, label, size, data, destroyed: 0,
         getMappedRange() { return data; }, unmap() {}, destroy() { this.destroyed++; } };
       buffers.push(buffer);
       return buffer;

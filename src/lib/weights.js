@@ -14,6 +14,7 @@
  */
 
 import { createStorageBuffer } from './gpu.js';
+import { isLoaderMemoryBudget } from './loader_memory_budget.js';
 
 const MAGIC = 0x33445346; // "SF3D" in little-endian
 const ENTRY_SIZE = 160;
@@ -66,32 +67,57 @@ function fp16ToFp32(h) {
   return sign ? -val : val;
 }
 
-function extractTensor(device, buffer, info) {
+function allocateCpu(context, size, label, make, leases = context?.ownedCpu) {
+  const lease = context?.budget.reserveCpu(size, label);
+  try { const value = make(); if (lease) leases.add(lease); return value; }
+  catch (error) { lease?.release(); throw error; }
+}
+
+function cpuScope(context, work) {
+  const temporary = new Set();
+  try { return work(context ? {...context, temporary} : null); }
+  finally { for (const lease of temporary) lease.release(); }
+}
+
+function retireOwnedBuffers(buffers) {
+  const errors=[];
+  for(const buffer of buffers) {
+    try { buffer.destroy(); buffers.delete(buffer); }
+    catch(error) { errors.push(error); }
+  }
+  return errors;
+}
+
+function extractTensor(device, buffer, info, context) {
+  return cpuScope(context, scoped => {
   const { dtype, offset, size } = info;
-  const raw = extractBytes(buffer, offset, size);
+  const raw = extractBytes(buffer, offset, size, scoped);
   if (dtype === 0) {
     // fp32 — raw bytes are already float32
     const fp32 = new Float32Array(raw.buffer, raw.byteOffset, size / 4);
     return createStorageBuffer(device, fp32);
   } else {
     const fp16 = new Uint16Array(raw.buffer, raw.byteOffset, size / 2);
-    const fp32 = new Float32Array(fp16.length);
+    const fp32 = allocateCpu(scoped, fp16.length * 4, 'fp16-conversion', () => new Float32Array(fp16.length), scoped?.temporary);
     for (let i = 0; i < fp16.length; i++) fp32[i] = fp16ToFp32(fp16[i]);
     return createStorageBuffer(device, fp32);
   }
+  });
 }
 
-function extractTensorCPU(buffer, info) {
+function extractTensorCPU(buffer, info, context) {
+  return cpuScope(context, scoped => {
   const { dtype, offset, size } = info;
-  const raw = extractBytes(buffer, offset, size);
+  const raw = extractBytes(buffer, offset, size, scoped);
   if (dtype === 0) {
     const fp32 = new Float32Array(raw.buffer, raw.byteOffset, size / 4);
-    return new Float32Array(fp32); // copy to decouple from chunk
+    return allocateCpu(scoped, size, 'cpu-tensor-copy', () => new Float32Array(fp32));
   }
   const fp16 = new Uint16Array(raw.buffer, raw.byteOffset, size / 2);
-  const fp32 = new Float32Array(fp16.length);
+  const fp32 = allocateCpu(scoped, fp16.length * 4, 'cpu-fp16-conversion', () => new Float32Array(fp16.length));
   for (let i = 0; i < fp16.length; i++) fp32[i] = fp16ToFp32(fp16[i]);
   return fp32;
+  });
 }
 
 /**
@@ -108,7 +134,7 @@ export const LAZILY_READ_TENSOR_PREFIXES = Object.freeze(['image_estimator.']);
  * consumed, then release the streamed chunks so ~2 GB of JS heap can go.
  * Returns { retained: Map<name, Uint8Array copy>, rawBytes(name), retainedBytes, droppedBytes }.
  */
-export function compactRetainedTensors(tensors, chunkedBuffer, consumed, retainPrefixes = LAZILY_READ_TENSOR_PREFIXES) {
+export function compactRetainedTensors(tensors, chunkedBuffer, consumed, retainPrefixes = LAZILY_READ_TENSOR_PREFIXES, context = null) {
   const retained = new Map();
   let disposed = false;
   let retainedBytes = 0;
@@ -116,7 +142,10 @@ export function compactRetainedTensors(tensors, chunkedBuffer, consumed, retainP
   for (const [name, info] of tensors) {
     const keep = !consumed.has(name) || retainPrefixes.some(prefix => name.startsWith(prefix));
     if (keep) {
-      retained.set(name, extractBytes(chunkedBuffer, info.offset, info.size).slice());
+      retained.set(name, cpuScope(context, scoped => {
+        const raw = extractBytes(chunkedBuffer, info.offset, info.size, scoped);
+        return allocateCpu(scoped, info.size, 'retained-raw-copy', () => raw.slice());
+      }));
       retainedBytes += info.size;
     } else {
       droppedBytes += info.size;
@@ -141,7 +170,7 @@ export function compactRetainedTensors(tensors, chunkedBuffer, consumed, retainP
 
 export function extractBytesFromChunks(chunkedBuffer, offset, size) { return extractBytes(chunkedBuffer, offset, size); }
 
-function extractBytes(chunkedBuffer, offset, size) {
+function extractBytes(chunkedBuffer, offset, size, context = null) {
   if (chunkedBuffer instanceof ArrayBuffer) {
     // Legacy single-buffer path
     return new Uint8Array(chunkedBuffer, offset, size);
@@ -165,7 +194,7 @@ function extractBytes(chunkedBuffer, offset, size) {
     // Ensure 4-byte alignment for typed array views (Float32Array, Uint16Array)
     const chunkBaseOffset = chunks[startChunk].byteOffset + localOffset;
     if (chunkBaseOffset % 4 !== 0) {
-      const copy = new Uint8Array(size);
+      const copy = allocateCpu(context, size, 'aligned-tensor-copy', () => new Uint8Array(size), context?.temporary);
       copy.set(chunks[startChunk].subarray(localOffset, localOffset + size));
       return copy;
     }
@@ -173,7 +202,7 @@ function extractBytes(chunkedBuffer, offset, size) {
   }
 
   // Spans multiple chunks — copy into aligned buffer
-  const result = new Uint8Array(size);
+  const result = allocateCpu(context, size, 'cross-chunk-tensor-copy', () => new Uint8Array(size), context?.temporary);
   let written = 0;
   for (let i = startChunk; i < chunks.length && written < size; i++) {
     const chunkStart = Math.max(0, offset + written - offsets[i]);
@@ -188,47 +217,65 @@ function extractBytes(chunkedBuffer, offset, size) {
 /**
  * Load SF3D weights and organize into component structure.
  */
-export async function loadWeights(device, url, onProgress) {
+export async function loadWeights(device, url, onProgress, {memoryBudget = null, expectedWeightBytes} = {}) {
+  if (memoryBudget && !isLoaderMemoryBudget(memoryBudget)) throw new TypeError('authenticated loader budget required');
+  if (memoryBudget && (!Number.isSafeInteger(expectedWeightBytes) || expectedWeightBytes < 16))
+    throw new TypeError('budgeted load requires explicit expectedWeightBytes');
+  memoryBudget?.assertDevice(device);
+  memoryBudget?.setPhase('weight-source');
+  const ownedCpu = new Set(), ownedBuffers = new Set(), context = memoryBudget ? {budget:memoryBudget, ownedCpu} : null;
+  // This reservation precedes fetch, not just append of already allocated chunks.
+  const sourceLease = memoryBudget?.reserveCpu(expectedWeightBytes, 'weight-source');
+  let reader;
+  try {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Failed to fetch weights: ${response.status}`);
 
   const contentLength = parseInt(response.headers.get('content-length') || '0');
-  const reader = response.body.getReader();
+  if (memoryBudget && response.headers.has('content-length') && Number(response.headers.get('content-length')) !== expectedWeightBytes)
+    throw new Error('weight content length differs from expectedWeightBytes');
+  reader = response.body.getReader();
   const chunks = [];
   const chunkOffsets = [];
   let received = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    if (memoryBudget && value.length > expectedWeightBytes - received) throw new Error('weight bytes exceed expectedWeightBytes');
     chunkOffsets.push(received);
     chunks.push(value);
     received += value.length;
     if (onProgress) onProgress(received, contentLength);
   }
+  if (memoryBudget && received !== expectedWeightBytes) throw new Error('weight bytes differ from expectedWeightBytes');
 
   // Build a chunked buffer that avoids a single >2GB ArrayBuffer
   const chunkedBuffer = { chunks, offsets: chunkOffsets, totalSize: received };
 
-  // Parse header from the first chunk(s) — header is always small (<1MB)
-  // Always copy to get a clean ArrayBuffer for DataView
-  const headerBytes = extractBytes(chunkedBuffer, 0, Math.min(received, 1024 * 1024));
-  const headerBuf = headerBytes.slice().buffer;
-  const { tensors } = parseHeader(headerBuf);
-
-  const ownedBuffers = new Set();
-  try {
-    return buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers);
+  // Read the exact declared table rather than copying a fixed 1-MiB prefix.
+  const {tensors} = cpuScope(context, scoped => {
+    const prefix = extractBytes(chunkedBuffer, 0, 16, scoped);
+    const view = new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength);
+    const count = view.getUint32(8, true), headerSize = view.getUint32(12, true);
+    if (headerSize !== 16 + count * ENTRY_SIZE || headerSize > received) throw new Error('weight header exceeds or contradicts received bytes');
+    const header = extractBytes(chunkedBuffer, 0, headerSize, scoped);
+    return parseHeader(allocateCpu(scoped, headerSize, 'weight-header-copy', () => header.slice().buffer, scoped?.temporary));
+  });
+  memoryBudget?.setPhase('weight-construction');
+    return buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context);
   } catch (error) {
     // No weight set is returned on a partial load; its allocations still have
     // an owner and must not wait for a producer that will never be created.
-    for (const buffer of ownedBuffers) buffer.destroy();
+    const cleanupErrors=retireOwnedBuffers(ownedBuffers);
+    for (const lease of ownedCpu) lease.release();
+    if(cleanupErrors.length)throw new AggregateError([error,...cleanupErrors],'SF3D load failed and partial cleanup encountered failures',{cause:error});
     throw error;
-  }
+  } finally { sourceLease?.release(); await reader?.cancel().catch(() => {}); }
 }
 
-function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers) {
+function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = null) {
   const upload = (buffer, info) => {
-    const gpuBuffer = extractTensor(device, buffer, info);
+    const gpuBuffer = extractTensor(device, buffer, info, context);
     ownedBuffers.add(gpuBuffer);
     return gpuBuffer;
   };
@@ -251,7 +298,7 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers) {
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
     consumed.add(name);
-    return extractTensorCPU(chunkedBuffer, info);
+    return extractTensorCPU(chunkedBuffer, info, context);
   };
 
   const getInfo = (name) => {
@@ -437,7 +484,7 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers) {
   // (and anything the builders above did not consume) are kept, as standalone
   // copies; the streamed chunks are released so the page does not carry the
   // whole weight file in JS heap for the producer's lifetime.
-  const compact = compactRetainedTensors(tensors, chunkedBuffer, consumed);
+  const compact = compactRetainedTensors(tensors, chunkedBuffer, consumed, LAZILY_READ_TENSOR_PREFIXES, context);
   console.log(`Retained ${(compact.retainedBytes / 1048576).toFixed(0)} MB of raw tensor bytes for lazy readers; released ${(compact.droppedBytes / 1048576).toFixed(0)} MB of streamed chunks`);
   const lazyBuffers = new Map();
   let disposed = false;
@@ -463,18 +510,20 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers) {
   };
   const _rawGetCPU = (name) => {
     _assertActive();
-    return extractTensorCPU(compact.rawBytes(name).buffer, rawInfo(name));
+    return extractTensorCPU(compact.rawBytes(name).buffer, rawInfo(name), context);
   };
   const _rawTryGet = (name) => { _assertActive(); return tensors.has(name) ? _rawGet(name) : null; };
   const _rawHas = (name) => { _assertActive(); return tensors.has(name); };
   const dispose = () => {
-    if (disposed) return 0;
+    if (disposed && ownedBuffers.size===0) return 0;
     disposed = true;
     const count = ownedBuffers.size;
-    for (const buffer of ownedBuffers) buffer.destroy();
-    ownedBuffers.clear();
+    const cleanupErrors=retireOwnedBuffers(ownedBuffers);
     lazyBuffers.clear();
     compact.dispose();
+    for (const lease of context?.ownedCpu ?? []) lease.release();
+    context?.ownedCpu.clear();
+    if(cleanupErrors.length)throw new AggregateError(cleanupErrors,'SF3D weight cleanup encountered failures');
     return count;
   };
 

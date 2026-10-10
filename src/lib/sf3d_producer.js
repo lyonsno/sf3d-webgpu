@@ -33,6 +33,7 @@
  */
 import { initGPU } from './gpu.js';
 import { loadWeights } from './weights.js';
+import { isLoaderMemoryBudget } from './loader_memory_budget.js';
 import { initPipelines } from './inference.js';
 import { retainClipPrepWorker, releaseClipPrepWorker } from './clip_estimator.js';
 import { runFullPipelineToGlb } from './full_pipeline.js';
@@ -228,13 +229,31 @@ export async function createSf3dProducer({
   weightsUrl = 'weights.bin',
   workers = null,
   onWeightsProgress = null,
+  memoryBudget = null,
+  expectedWeightBytes = undefined,
   commit = (typeof __COMMIT_HASH__ !== 'undefined' ? __COMMIT_HASH__ : 'dev'),
 } = {}) {
+  if (memoryBudget && !isLoaderMemoryBudget(memoryBudget)) throw new TypeError('authenticated loader budget required');
+  if (memoryBudget && (device != null || weights != null))
+    throw new Error('loader budget requires a newly owned GPU device and weights; borrowed host baseline is not accounted');
   const gpu = await initGPU(device ? { device, adapter } : {});
   const dev = gpu.device;
-  const backend = await describeBackend(gpu.adapter, dev);
+  const retireBudgetDevice = () => { if (memoryBudget) { dev.destroy(); memoryBudget.restore(); } };
+  if (memoryBudget) {
+    try { memoryBudget.bindOwnedDevice(dev); }
+    catch (error) { dev.destroy(); throw error; }
+  }
   const ownsWeights = weights == null;
-  const modelWeights = weights ?? await loadWeights(dev, weightsUrl, onWeightsProgress || undefined);
+  let modelWeights, backend;
+  try {
+    backend = await describeBackend(gpu.adapter, dev);
+    modelWeights = weights ?? await loadWeights(dev, weightsUrl, onWeightsProgress || undefined, {memoryBudget, expectedWeightBytes});
+  }
+  catch (error) {
+    try { retireBudgetDevice(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], 'SF3D budgeted loading and device cleanup failed', {cause:error}); }
+    throw error;
+  }
   modelWeights._assertActive?.(dev);
   // Explicit resource identity for a mounting host: where the weights came
   // from and which worker module URLs must be reachable from the artifact.
@@ -259,13 +278,16 @@ export async function createSf3dProducer({
     }
     foreground = createWebGpuForegroundService({ routeId: SF3D_IMAGE_TO_MESH_ROUTE_ID, device: dev, queue: dev.queue });
   } catch (error) {
+    const failures = [error];
     try {
       await releaseProducerResources({
         foreground, retainedClipPrepWorker, routeWorkers, modelWeights, ownsWorkers, ownsWeights,
       });
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], 'SF3D producer initialization and cleanup failed', { cause: error });
+      failures.push(cleanupError);
     }
+    try { retireBudgetDevice(); } catch (cleanupError) { failures.push(cleanupError); }
+    if (failures.length > 1) throw new AggregateError(failures, 'SF3D producer initialization and cleanup failed', {cause:error});
     throw error;
   }
 
@@ -281,6 +303,7 @@ export async function createSf3dProducer({
       await releaseProducerResources({
         foreground, retainedClipPrepWorker, routeWorkers, modelWeights, ownsWorkers, ownsWeights,
       });
+      retireBudgetDevice();
     },
   });
 

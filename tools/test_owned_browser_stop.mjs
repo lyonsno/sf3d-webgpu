@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {EventEmitter} from 'node:events';
+import {memoryStopAction, stopOwnedBrowser} from './owned_browser_stop.mjs';
+const child = new EventEmitter();
+Object.assign(child,{pid:42,exitCode:null,signalCode:null,kill(signal){assert.equal(signal,'SIGTERM');queueMicrotask(()=>child.emit('exit',null,'SIGTERM'));return true;}});
+const report = {};
+await assert.rejects(memoryStopAction({child:()=>child,report,persist:async()=>{throw Error('intentional persistence failure');}})({reason:'process-footprint-budget'}), /persistence/);
+assert.equal(report.memorySafety.stop.exitObserved,true,'report failure cannot block verified owned-child stopping');
+assert.equal(report.memorySafety.stop.ownedPid,42);
+const noExit = new EventEmitter();Object.assign(noExit,{pid:43,exitCode:null,signalCode:null,kill(){return true;}});
+await assert.rejects(stopOwnedBrowser(noExit,{graceMs:5}),/has not exited/,'signal request alone is not successful cleanup');
+assert.equal(noExit.listenerCount('exit'),0);
+await assert.rejects(stopOwnedBrowser(null),/exact owned/);
+console.log('Actual safety callback stops the exact owned child despite report failure; signal-only and missing custody cannot claim exit.');
