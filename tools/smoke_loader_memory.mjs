@@ -139,7 +139,12 @@ try {
         if(path.relative(foregroundRoot,file).startsWith('..')||/\.(bin|glb|gltf)$/i.test(file))throw Error('unadmitted model/asset source refused by selected consumer host');
         let data=foregroundSources.get(relative);
         if(!data){
-          const committed=execFileSync('git',['show',report.foreground.source.revision+':'+relative],{cwd:foregroundRoot,stdio:['ignore','pipe','pipe']});
+          const object=report.foreground.source.revision+':'+relative;
+          const committedBytes=Number(execFileSync('git',['cat-file','-s',object],{cwd:foregroundRoot,encoding:'utf8'}).trim());
+          if(!Number.isSafeInteger(committedBytes)||committedBytes<0)throw Error('exact committed foreground blob size required');
+          // Node's default maxBuffer silently excludes the actual large
+          // cockpit. Use the observed complete blob size, not an authored cap.
+          const committed=execFileSync('git',['show',object],{cwd:foregroundRoot,stdio:['ignore','pipe','pipe'],maxBuffer:Math.max(1,committedBytes)});
           data=fs.readFileSync(file);
           if(digest(data)!==digest(committed))throw Error('foreground served source differs from commit: '+relative);
           foregroundSources.set(relative,data);report.foreground.servedSources[relative]=digest(data);
@@ -218,7 +223,8 @@ try {
     const startupFailure=new Promise((_resolve,reject)=>{failStartup=error=>reject(Error('foreground startup exception: '+error.message));});
     page.on('pageerror',failStartup);
     try{
-      await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'networkidle0',timeout:0}),startupFailure]);
+      const navigation=await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'networkidle0',timeout:0}),startupFailure]);
+      if(!navigation?.ok())throw Error('foreground navigation refused: HTTP '+navigation?.status());
       await Promise.race([page.waitForFunction(()=>window.__kaminosVolumePrototype?.debugState().active||window.__kaminosVolumePrototype?.debugState().error,{timeout:0}),startupFailure]);
     }finally{page.off('pageerror',failStartup);}
     const initial=await page.evaluate(()=>window.__kaminosVolumePrototype.debugState());
