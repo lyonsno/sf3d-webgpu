@@ -20,6 +20,7 @@ const root = arg('--repo-root') ? path.resolve(arg('--repo-root')) : null;
 const reportPath = path.resolve(arg('--report') ?? path.join(os.tmpdir(),'sf3d-loader-memory-'+randomUUID()+'.json'));
 const patchMode=process.argv.includes('--canonical-patch-phase');
 const canonicalMode=patchMode||process.argv.includes('--canonical-tensor-unit');
+const sharedMode=process.argv.includes('--shared-allowance');
 const report = {schema:'sf3d.loader-native-memory-witness.v0', status:'running', phase:'arguments', receiver:'mini-wake-and-bake-pit-boss',
   route:'sf3d-loader-native-refusal-synthetic-weights-no-inference.v0', reportPath, runId:randomUUID(),
   requested:{repoRoot:root, revision:arg('--expected-revision'), chrome:arg('--chrome'), processBudgetBytes:Number(arg('--process-budget-bytes'))},
@@ -33,10 +34,12 @@ if(canonicalMode){
 if(patchMode){report.route='sf3d-canonical-patch-embedding.v0';report.claim='selected canonical learned patch projection on M2 Pro with explicit backing demand, live baseline, process stop and raw tensor replay; not full-model fit or production admission';
   Object.assign(report.requested,{inputPath:arg('--input'),inputSha256:arg('--expected-input-sha256')});}
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
+if(sharedMode){report.requested.sharedAllowance=true;report.claim+='; shared explicit allowance contention on two actual owned devices with compute/readback, not host-wide coverage';}
 const persist = async () => writeJsonReportAtomic(reportPath,report);
 let browser, child, server, monitor, profile, canonical;
 try {
   await persist();
+  if(sharedMode&&canonicalMode)throw Error('shared tiny diagnostic and canonical learned/unit routes must be invoked separately');
   if(!root || !arg('--chrome') || !arg('--expected-revision') || !Number.isSafeInteger(report.requested.processBudgetBytes) || report.requested.processBudgetBytes<1)
     throw Error('explicit --repo-root, --expected-revision, --chrome and --process-budget-bytes required');
   if(canonicalMode){
@@ -73,6 +76,7 @@ try {
   }));
   const sources=new Map();
   const served=['src/lib/weights.js','src/lib/gpu.js','src/lib/loader_memory_budget.js','src/lib/flat_tensor_ranges.js'];
+  if(sharedMode)served.push('tools/shared_allowance_browser.js');
   if(patchMode)served.push('src/lib/sf3d_backbone.js','src/lib/preprocess_core.js','tools/patch_phase_browser.js',
     ...['patch_embed_dinov2','layernorm_vit','attention','linear','linear_gelu','layerscale','activations'].map(n=>'src/shaders/'+n+'.wgsl'));
   for(const relative of served) {
@@ -209,6 +213,10 @@ try {
       const validation=await device.popErrorScope();return{backend,cases,deviceControl,validationError:validation?.message??null};
     }finally{device.destroy();}
   },report.fixtures));
+  }
+  if(sharedMode){
+    report.phase='native-shared-allowance';await persist();
+    report.sharedAllowance=await page.evaluate(async()=>{const {runSharedAllowanceWitness}=await import('/tools/shared_allowance_browser.js');return runSharedAllowanceWitness();});
   }
   report.phase='native-process-stop';report.processObservation=await monitor.stop();monitor=null;await persist();
   // Force refusal below an already observed tiny-run charge; never provoke growth/OOM.

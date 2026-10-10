@@ -16,6 +16,21 @@ export function acceptLoaderMemoryWitness(report) {
   need(report?.cases?.gpuRefusal?.budget?.gpu?.peakLiveBytes === 8, 'exact native allocation prefix before refusal');
   need(JSON.stringify(report?.deviceControl) === '[7,11,13,17]', 'same device remains usable after cleanup');
   need(report?.validationError === null, 'native validation scope');
+  if(report.requested?.sharedAllowance){
+    const shared=report.sharedAllowance;
+    need(shared?.requested?.cpuBytes===64&&shared?.requested?.gpuBytes===64,'exact tiny shared diagnostic allowance');
+    need(shared?.distinctOwnedDevices===true,'two distinct actual owned devices');
+    need(shared?.backend?.isFallbackAdapter===false&&/apple/i.test(shared.backend.vendor),'actual shared nonfallback Apple adapter');
+    need(JSON.stringify(shared?.outputs)==='[[14,22,26,34],[14,22,26,34]]','both guarded compute/readbacks complete');
+    need(JSON.stringify(shared?.validationErrors)==='[null,null]','both shared-device validation scopes');
+    for(const [scope,held,requested]of [['cpu',32,40],['gpu',48,32]]){
+      const refusal=shared?.refusals?.[scope];
+      need(refusal?.name==='SF3DMemoryBudgetError'&&refusal.memoryBudget?.liveBytes===held&&refusal.memoryBudget?.requestedBytes===requested&&refusal.memoryBudget?.maxBytes===64,'actual shared '+scope+' contention refusal');
+      need(shared?.held?.[scope]?.liveBytes===held,'held shared '+scope+' backing');
+      const rows=[shared?.parent,...(shared?.children??[])];
+      need(rows.length===3&&rows.every(row=>row?.[scope]?.maxBytes===64&&row?.[scope]?.liveBytes===0&&row?.[scope]?.physicalMemoryMeasured===false),'shared '+scope+' effective allowance and retirement scope');
+    }
+  }
   errors.push(...acceptOwnedProcessWitness(report));
   return {ok:errors.length === 0, errors};
 }

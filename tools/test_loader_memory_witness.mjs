@@ -30,3 +30,22 @@ for(const [name,mutate]of [
   ['missing action result',r=>delete r.processRefusal.safety.actionStatus],
 ]){const r=valid();mutate(r);assert.equal(acceptLoaderMemoryWitness(r).ok,false,name+' must not close the native witness');}
 console.log('Native memory witness rejects wrong route/source, fallback, blank/partial/stale evidence, shadowed allowance, and signal-only cleanup.');
+const shared=()=>{
+  const r=valid();r.requested.sharedAllowance=true;
+  const ledger=()=>({cpu:{maxBytes:64,liveBytes:0,peakLiveBytes:32,physicalMemoryMeasured:false},gpu:{maxBytes:64,liveBytes:0,peakLiveBytes:48,physicalMemoryMeasured:false}});
+  r.sharedAllowance={requested:{cpuBytes:64,gpuBytes:64},backend:{vendor:'apple',isFallbackAdapter:false},distinctOwnedDevices:true,parent:ledger(),children:[ledger(),ledger()],validationErrors:[null,null],outputs:[[14,22,26,34],[14,22,26,34]],
+    held:{cpu:{liveBytes:32},gpu:{liveBytes:48}},refusals:{cpu:{name:'SF3DMemoryBudgetError',memoryBudget:{requestedBytes:40,liveBytes:32,maxBytes:64}},gpu:{name:'SF3DMemoryBudgetError',memoryBudget:{requestedBytes:32,liveBytes:48,maxBytes:64}}}};
+  return r;
+};
+for(const [name,mutate]of [
+  ['requested shared mode silently omitted',r=>delete r.sharedAllowance],
+  ['wrong shared quota',r=>r.sharedAllowance.parent.gpu.maxBytes=128],
+  ['refusal without root contention',r=>r.sharedAllowance.refusals.gpu.memoryBudget.liveBytes=0],
+  ['same device substituted',r=>r.sharedAllowance.distinctOwnedDevices=false],
+  ['shared fallback route',r=>r.sharedAllowance.backend.isFallbackAdapter=true],
+  ['second compute missing',r=>r.sharedAllowance.outputs.pop()],
+  ['wrong native numerics',r=>r.sharedAllowance.outputs[1][0]=0],
+  ['stranded root charge',r=>r.sharedAllowance.parent.gpu.liveBytes=48],
+  ['validation error',r=>r.sharedAllowance.validationErrors[1]='device error'],
+]){const r=shared();mutate(r);assert.equal(acceptLoaderMemoryWitness(r).ok,false,name);}
+assert.equal(acceptLoaderMemoryWitness(shared()).ok,true,'synthetic shared fixture only tests acceptance policy');
