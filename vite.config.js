@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { access, cp, rm } from 'node:fs/promises';
 import path from 'node:path';
+import {modelSourceCircuitBreaker} from './tools/model_source_circuit_breaker.mjs';
 
 const BUILD_LOCAL_MODEL_ASSETS = new Set(['weights.bin']);
 
@@ -55,7 +56,7 @@ function copyPublicAssetsWithoutLocalModels() {
 }
 
 export default defineConfig({
-  plugins: [copyPublicAssetsWithoutLocalModels()],
+  plugins: [modelSourceCircuitBreaker(),copyPublicAssetsWithoutLocalModels()],
   server: {
     port: 5176,
     open: true,
