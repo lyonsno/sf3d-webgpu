@@ -50,6 +50,20 @@ assert.equal(acceptStagedTensorWitness(valid()).ok,true,'actual patch-phase rece
     effective:{source:{repoRoot:'/pinned/kaminos',commit:r.requested.foreground.revision}},loopback:true};
   r.cleanup.foregroundService={ownedPid:57,exitObserved:true};
   assert.equal(acceptStagedTensorWitness(r).ok,true,'actual foreground must have its own positive acceptance path');
+  {
+    const requested=structuredClone(r);
+    Object.assign(requested.requested.foreground,{sourceDepth:0.125,warmupFrames:200});
+    Object.assign(requested.foreground.before,{sourceDepth:0.125,frameCount:200,simStepCount:200,submissions:200});
+    Object.assign(requested.foreground.after,{sourceDepth:0.125,frameCount:201,simStepCount:201,submissions:202});
+    assert.equal(acceptStagedTensorWitness(requested).ok,true,'explicit depth/warmup identity can retain the lower consumer claim');
+    for(const [label,mutate]of [
+      ['ignored source depth',x=>x.foreground.before.sourceDepth=0.006],
+      ['changed source depth',x=>x.foreground.after.sourceDepth=0.006],
+      ['missing effective depth',x=>delete x.foreground.before.sourceDepth],
+      ['unperformed warmup',x=>x.foreground.before.frameCount=199],
+      ['caller warmup shadowed',x=>x.requested.foreground.warmupFrames=201],
+    ]){const changed=structuredClone(requested);mutate(changed);assert.equal(acceptStagedTensorWitness(changed).ok,false,label);}
+  }
   for(const [label,mutate]of [
     ['observed black-route failure',x=>x.foreground.console.push({type:'error',text:"Scene route load failed: TypeError: Failed to execute 'createView' on 'GPUTexture'"})],
     ['offscreen',x=>x.browserArguments.push('--headless=new')],['wrong source',x=>x.foreground.source.revision='d'.repeat(40)],

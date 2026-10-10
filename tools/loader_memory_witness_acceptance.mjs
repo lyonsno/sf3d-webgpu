@@ -95,6 +95,11 @@ export function acceptStagedTensorWitness(report){
         'actual foreground startup and scene route did not fail');
       need(fg?.before?.renderer==='ordinary-volume'&&fg.after?.renderer==='ordinary-volume','actual ordinary renderer, not alternate/synthetic rendering');
       need(fg?.before?.grid===report.requested.foreground.grid&&fg.after?.grid===report.requested.foreground.grid,'effective requested grid variant');
+      const requestedDepth=report.requested.foreground.sourceDepth,requestedWarmup=report.requested.foreground.warmupFrames;
+      if(requestedDepth!=null)need(Number.isFinite(requestedDepth)&&requestedDepth>=0.006&&requestedDepth<=0.24&&
+        fg?.before?.sourceDepth===requestedDepth&&fg?.after?.sourceDepth===requestedDepth,'effective caller-selected source depth before and after learned work');
+      if(requestedWarmup!=null)need(Number.isSafeInteger(requestedWarmup)&&requestedWarmup>0&&
+        fg?.before?.frameCount>=requestedWarmup,'caller-selected foreground warmup completed before learned interval');
       need(fg?.after?.frameCount>fg?.before?.frameCount&&fg?.after?.simStepCount>fg?.before?.simStepCount,'ordinary simulation and presentation advance through learned work');
       need(fg?.after?.submissions>fg?.before?.submissions,'native host queue submits through learned work');
       need(fg?.progressInterval==='before-selected-operation-to-immediate-operation-return','foreground progress excludes later CPU-reference interval');

@@ -24,3 +24,14 @@ for(const whitespace of [' ','','\t']){
   assert.equal(new URL(result.originalRoute).hash,'#composition_module_url=./sf3d-live-flame-inject.mjs');
 }
 console.log('Observed refresh whitespace and ordinary controls survive explicit grid variant parsing.');
+{
+  const capsule='<meta content="0; url=/?volume_resolution=160&amp;volume_emitter_source_depth=0.006">';
+  const report={requested:{foreground:{grid:32,sourceDepth:0.125,warmupFrames:200}},foreground:{}};
+  const result=parse(capsule,report,URL);
+  assert.equal(new URL(result.originalRoute).searchParams.get('volume_emitter_source_depth'),'0.006');
+  assert.equal(new URL(result.route,'http://witness.invalid').searchParams.get('volume_emitter_source_depth'),'0.125',
+    'caller-selected resolved source depth must reach the actual route, not silently preserve the under-resolved capsule');
+  const unchanged=parse(capsule,{requested:{foreground:{grid:32}},foreground:{}},URL);
+  assert.equal(new URL(unchanged.route,'http://witness.invalid').searchParams.get('volume_emitter_source_depth'),'0.006',
+    'omitted source-depth request must preserve the original capsule');
+}

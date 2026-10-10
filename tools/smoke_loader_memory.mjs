@@ -38,7 +38,9 @@ if(canonicalMode){
 if(patchMode){report.route='sf3d-canonical-patch-embedding.v0';report.claim='selected canonical learned patch projection on M2 Pro with explicit backing demand, live baseline, process stop and raw tensor replay; not full-model fit or production admission';
   Object.assign(report.requested,{inputPath:arg('--input'),inputSha256:arg('--expected-input-sha256')});}
 if(foregroundRoot){
-  report.requested.foreground={repoRoot:foregroundRoot,revision:arg('--expected-foreground-revision'),grid:Number(arg('--foreground-grid')),rendererCpuBytes:Number(arg('--renderer-cpu-bytes'))};
+  report.requested.foreground={repoRoot:foregroundRoot,revision:arg('--expected-foreground-revision'),grid:Number(arg('--foreground-grid')),rendererCpuBytes:Number(arg('--renderer-cpu-bytes')),
+    sourceDepth:arg('--foreground-source-depth')===null?null:Number(arg('--foreground-source-depth')),
+    warmupFrames:arg('--foreground-warmup-frames')===null?3:Number(arg('--foreground-warmup-frames'))};
   report.requested.totalBytes=Number(arg('--combined-budget-bytes'));
   report.claim+='; actual ordinary flame and selected learned operation on its pre-bound device under one explicit allowance; explicit grid variant, not unchanged basin/full-model fit';
 }
@@ -51,8 +53,11 @@ try {
   if(sharedMode&&canonicalMode)throw Error('shared tiny diagnostic and canonical learned/unit routes must be invoked separately');
   if(foregroundRoot&&(!patchMode||![32,48,64,96,128,136,140,160].includes(report.requested.foreground.grid)||
     !Number.isSafeInteger(report.requested.foreground.rendererCpuBytes)||report.requested.foreground.rendererCpuBytes<1||!report.requested.foreground.revision||
-    !Number.isSafeInteger(report.requested.totalBytes)||report.requested.totalBytes<1))
-    throw Error('foreground requires canonical patch mode and explicit source revision, supported grid and CPU initialization allowance');
+    !Number.isSafeInteger(report.requested.totalBytes)||report.requested.totalBytes<1||
+    !Number.isSafeInteger(report.requested.foreground.warmupFrames)||report.requested.foreground.warmupFrames<1||
+    (report.requested.foreground.sourceDepth!==null&&(!Number.isFinite(report.requested.foreground.sourceDepth)||
+      report.requested.foreground.sourceDepth<0.006||report.requested.foreground.sourceDepth>0.24))))
+    throw Error('foreground requires canonical patch mode, explicit source/grid/CPU allowance, positive warmup frames and supported UI source depth [0.006,0.24]');
   if(!root || !arg('--chrome') || !arg('--expected-revision') || !Number.isSafeInteger(report.requested.processBudgetBytes) || report.requested.processBudgetBytes<1)
     throw Error('explicit --repo-root, --expected-revision, --chrome and --process-budget-bytes required');
   if(canonicalMode){
@@ -78,8 +83,9 @@ try {
     route.hash='';route.searchParams.delete('settings_preset');route.searchParams.delete('settings_preset_authority');
     route.searchParams.set('volume_resolution',String(report.requested.foreground.grid));
     route.searchParams.set('volume_quality_reason','mini-explicit-memory-guard-grid-variant');
+    if(report.requested.foreground.sourceDepth!=null)route.searchParams.set('volume_emitter_source_depth',String(report.requested.foreground.sourceDepth));
     report.foreground.route='/foreground/index.html'+route.search;
-    report.foreground.variant='same recorded ordinary source controls with explicitly changed grid; no accepted immutable basin identity claimed';
+    report.foreground.variant=report.requested.foreground.sourceDepth!=null?'explicit grid and caller-selected source-depth variant; not unchanged authored basin':'same recorded ordinary source controls with explicitly changed grid; no accepted immutable basin identity claimed';
     // Pin the source-level large initialization cliff before navigating. The
     // observed source has a tall (2*g^3) domain, sixteen fluid floats/cell,
     // paired front/quench/pressure arrays, sidecar and scalar/texture stores.
@@ -251,8 +257,11 @@ try {
     }finally{page.off('pageerror',failStartup);page.off('console',failCaughtStartup);page.off('response',failRequiredResponse);page.off('requestfailed',failRequiredRequest);}
     const initial=await page.evaluate(()=>window.__kaminosVolumePrototype.debugState());
     if(!initial.active||initial.error)throw Error('ordinary foreground initialization failed: '+initial.error);
-    await page.waitForFunction(()=>window.__kaminosVolumePrototype.debugState().frameCount>=3||window.__kaminosVolumePrototype.debugState().error,{timeout:0});
+    if(report.requested.foreground.sourceDepth!==null&&initial.controls?.emitterSourceDepth!==report.requested.foreground.sourceDepth)
+      throw Error('ordinary foreground did not apply requested source depth');
+    await page.waitForFunction(frames=>window.__kaminosVolumePrototype.debugState().frameCount>=frames||window.__kaminosVolumePrototype.debugState().error,{timeout:0},report.requested.foreground.warmupFrames);
     const settled=await page.evaluate(()=>window.__kaminosVolumePrototype.debugState());if(settled.error)throw Error('ordinary foreground frame failed: '+settled.error);
+    report.foreground.warmup={requestedFrames:report.requested.foreground.warmupFrames,completedFrameCount:settled.frameCount,sourceDepth:settled.controls?.emitterSourceDepth};
     await page.screenshot({path:report.evidencePaths.foregroundBefore});
   }
   report.phase='native-loader-refusal';await persist();
@@ -269,7 +278,7 @@ try {
       report.phaseProcessBaseline=baseline;
       await persist();
       if(foregroundRoot)report.foreground.before=await page.evaluate(async()=>{const p=window.__kaminosVolumePrototype,g=await window.__miniForegroundGuardPromise,s=p.debugState(),context=p.foregroundGpuContext();
-        return{active:s.active,error:s.error,renderer:context.renderer,grid:s.simGrid,frameCount:s.frameCount,simStepCount:s.simStepCount,submissions:g.queueSubmissions.length,budget:g.snapshot()};});
+        return{active:s.active,error:s.error,renderer:context.renderer,grid:s.simGrid,sourceDepth:s.controls?.emitterSourceDepth,frameCount:s.frameCount,simStepCount:s.simStepCount,submissions:g.queueSubmissions.length,budget:g.snapshot()};});
       Object.assign(report,await page.evaluate(async config=>{const {runPatchPhase}=await import('/tools/patch_phase_browser.js');
         const hostGpu=config.requested.foreground?(await window.__miniForegroundGuardPromise).forDevice(window.__kaminosVolumePrototype.foregroundGpuContext().device):null;
         const result=await runPatchPhase(config,hostGpu);
@@ -280,7 +289,7 @@ try {
       if(foregroundRoot){
         report.foreground.sameDevice=report.foregroundSameDevice;
         report.foreground.after=await page.evaluate(async()=>{const p=window.__kaminosVolumePrototype,g=await window.__miniForegroundGuardPromise,s=p.debugState(),context=p.foregroundGpuContext();
-          return{active:s.active,error:s.error,renderer:context.renderer,grid:s.simGrid,frameCount:s.frameCount,simStepCount:s.simStepCount,submissions:g.queueSubmissions.length,budget:g.snapshot()};});
+          return{active:s.active,error:s.error,renderer:context.renderer,grid:s.simGrid,sourceDepth:s.controls?.emitterSourceDepth,frameCount:s.frameCount,simStepCount:s.simStepCount,submissions:g.queueSubmissions.length,budget:g.snapshot()};});
         // Capture progress at phase completion, before the CPU reference can
         // create a later idle interval that masquerades as concurrent work.
         report.foreground.progressInterval='before-selected-operation-to-immediate-operation-return';
