@@ -34,9 +34,12 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
   try{
     owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag});
     const source=owner.source,template=source.template;
-    await onBeforePhase({name:'two-stream-embedding',tensors:source.describe(template.tokenizer),workGpuBytes:3*1024*96*96*4+20});
+    await onBeforePhase({name:'two-stream-embedding-weights',tensors:source.describe(template.tokenizer),workGpuBytes:0});
     let embedding;
     await source.withWeights(template.tokenizer,async selected=>{
+      // Conversion custody has ended, not necessarily physical backing.
+      // A fresh post-upload observation includes anything still resident.
+      await onBeforePhase({name:'two-stream-embedding-rearrange',tensors:[],workGpuBytes:3*1024*96*96*4+20});
       const encoder=device.createCommandEncoder();
       captureGpuBufferAllocations(()=>{
         embedding=dispatchTokenizerEmbedding(encoder,device,backbone.pipelines,selected.embeddings);

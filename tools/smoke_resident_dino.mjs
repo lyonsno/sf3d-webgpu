@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Source-pinned complete native encoder experiment. Full SF3D remains held.
+// Source-pinned native experiment. Backbone invocation requires:
+// node --import ./tools/wgsl-raw-loader-register.mjs tools/smoke_resident_dino.mjs --through-backbone ...
+// Full SF3D remains held.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -15,11 +17,9 @@ import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction,stopOwnedBrowser,ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
-import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream} from './resident_two_stream_acceptance.mjs';
+import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
-const backboneModule=throughBackbone?await import('../src/lib/two_stream.js'):null;
-const groups=throughBackbone?(await import('../src/lib/cooperative_two_stream.js')).groupTwoStreamDuties(
-  backboneModule.createTwoStreamAttentionDutyPlan(1297,{residentFFN:true,linearRowsPerDuty:128})):null;
+let groups=null;
 const arg=name=>{const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root=arg('--repo-root')?path.resolve(arg('--repo-root')):null;
 const requestedReportPath=path.resolve(arg('--report')??path.join(os.tmpdir(),'sf3d-dino-'+randomUUID()+'.json'));
@@ -42,6 +42,12 @@ try{
   if(occupied)throw Error('requested evidence paths already exist; retained previous evidence without reuse or overwrite');
   if(!root||!report.requested.revision||!report.requested.chrome||!report.requested.input||
     !Number.isSafeInteger(report.requested.processBudgetBytes)||report.requested.processBudgetBytes<1)throw Error('explicit source, browser, input and process diagnostic allowance required');
+  if(throughBackbone){
+    report.phase='backbone-graph-import';await persist();
+    const backboneModule=await import('../src/lib/two_stream.js');
+    groups=(await import('../src/lib/cooperative_two_stream.js')).groupTwoStreamDuties(
+      backboneModule.createTwoStreamAttentionDutyPlan(1297,{residentFFN:true,linearRowsPerDuty:128}));
+  }
   const git=args=>execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
   report.source={repoRoot:root,revision:git(['rev-parse','HEAD']),clean:git(['status','--porcelain'])==='',hostname:os.hostname()};
   if(!report.source.clean||report.source.revision!==report.requested.revision)throw Error('clean exact requested source required');
@@ -67,13 +73,14 @@ try{
     entry:'/dist-lib/sf3d-producer.js',sourceRevision:report.source.revision,lockSha256:digest(fs.readFileSync(path.join(root,'package-lock.json')))};
   const order=['preprocess','camera',...Array.from({length:24},(_,i)=>'dino-block-'+i),'dino-output'];
   if(throughBackbone){
-    order.push('two-stream-embedding');
+    order.push('two-stream-embedding-weights','two-stream-embedding-rearrange');
     for(const group of groups){
       order.push('two-stream-'+group.stageId);
       for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty}).requiredBytes>0)
         order.push('two-stream-duty-'+duty.dutyIndex);
     }
     order.push('two-stream-output');
+    if(order.join(',')!==residentTwoStreamExpectedPhases().join(','))throw Error('effective source graph differs from approved complete backbone cliffs');
   }
   report.expectedPhaseOrder=order;
   const readBody=async req=>{const chunks=[];for await(const chunk of req)chunks.push(chunk);return Buffer.concat(chunks);};

@@ -335,6 +335,7 @@ export class TwoStreamBackbone {
   }
 
   _cachedUniform(data) {
+    if(this._failedUniforms?.size)throw Error('two-stream uniform cleanup is quarantined');
     const bytes = new Uint8Array(data.buffer || data);
     let h = 0;
     for (let i = 0; i < bytes.length; i++) h = (h * 31 + bytes[i]) | 0;
@@ -345,8 +346,17 @@ export class TwoStreamBackbone {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       mappedAtCreation: true,
     });
-    new Uint8Array(buf.getMappedRange()).set(bytes);
-    buf.unmap();
+    try{
+      new Uint8Array(buf.getMappedRange()).set(bytes);
+      buf.unmap();
+    }catch(error){
+      try{buf.destroy();}
+      catch(retirement){
+        (this._failedUniforms??=new Set()).add(buf);
+        throw new AggregateError([error,retirement],'uniform initialization failed and retirement is unresolved',{cause:error});
+      }
+      throw error;
+    }
     this._uniformCache.set(key, buf);
     return buf;
   }

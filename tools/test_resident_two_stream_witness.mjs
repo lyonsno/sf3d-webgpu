@@ -4,6 +4,7 @@ const subject=await import('./resident_two_stream_acceptance.mjs').catch(error=>
   throw error;
 });
 assert.equal(typeof subject.twoStreamPhaseDemand,'function','complete backbone must identify its actual new allocation cliffs');
+assert.equal(subject.acceptResidentTwoStream({}).ok,false,'early missing evidence must produce a refusal rather than throw while writing terminal report');
 const tri=27648*1024*4,latent=3089*1024*4;
 assert.equal(subject.twoStreamPhaseDemand({name:'two-stream-duty',duty:{kind:'fuse-resident-ffn-range',rangeIndex:0,rowCount:128}}).workGpuBytes,
   tri+128*(1024*2+4096*3)*4+4096,'complete FFN output plus reusable four-buffer scratch, not full GEGLU expansion');

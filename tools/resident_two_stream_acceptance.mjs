@@ -4,6 +4,27 @@ import {acceptResidentDino} from './resident_dino_acceptance.mjs';
 const D=1024,N=27648,L=3089,I=1297,tri=N*D*4,latent=L*D*4;
 const scratch=rows=>rows*(2*D+3*4096)*4;
 const attention=(q,kv)=>(2*q+2*kv)*D*4+16*128*kv*4+128*D*4;
+/** Approved complete1297-token/128-row graph; independently checked against
+ * the source planner by test_two_stream_review_contracts. Reporter input is
+ * never the authority for a shorter sequence. */
+export function residentTwoStreamExpectedPhases(){
+  const names=['preprocess','camera',...Array.from({length:24},(_,i)=>'dino-block-'+i),'dino-output',
+    'two-stream-embedding-weights','two-stream-embedding-rearrange'];
+  const add=(stage,indices)=>{names.push('two-stream-'+stage);
+    for(const index of indices)names.push('two-stream-duty-'+index);};
+  add('setup',[0]);
+  for(let b=0;b<4;b++){
+    const start=1+b*837;
+    add('block-'+b+'-fuse-in',[start,start+26]);
+    for(let basic=0;basic<3;basic++){
+      const first=start+27+basic*53;
+      add('block-'+b+'-basic-'+basic,[first,first+26,first+52]);
+    }
+    const out=start+186;
+    add('block-'+b+'-fuse-out',[out,out+217,out+433,out+434,out+650]);
+  }
+  add('final',[3349]);names.push('two-stream-output');return names;
+}
 /** Source-fixed actual new backing, not driver backing or physical fit. */
 export function twoStreamPhaseDemand(phase){
   let weights=0,cpu=0,work=0;
@@ -11,7 +32,11 @@ export function twoStreamPhaseDemand(phase){
     if(!Number.isSafeInteger(t.size)||t.size<=0||![0,1].includes(t.dtype))throw Error('invalid tensor component');
     weights+=t.size*(t.dtype===1?2:1);cpu=Math.max(cpu,2*t.size+(t.dtype===1?2*t.size:0));
   }
-  if(phase.name==='two-stream-embedding')work=tri+20;
+  if(phase.name==='two-stream-embedding-weights')work=0;
+  else if(phase.name==='two-stream-embedding-rearrange'){
+    if(phase.tensors?.length)throw Error('rearrangement cannot reacquire embedding weights');
+    work=tri+20;
+  }
   else if(phase.name==='two-stream-output')return {components:[
     {name:'bounded-complete-output-readback',bytes:128*D*4,scope:'gpu'},
     {name:'complete-output-stream-response',bytes:2*128*D*4,scope:'cpu'}],
@@ -77,12 +102,17 @@ export function acceptResidentTwoStream(report){
   require(b?.residentFFN===true&&b.linearRowsPerDuty===128&&b.blocks===4&&b.basicBlocks===12&&
     b.shape?.join(',')==='3,1024,96,96','complete effective resident backbone configuration missing');
   require(b?.weightPhases?.length===23&&b.weightPhases.every(p=>p.status==='completed-retired'),'complete embedding and22 weight groups missing');
-  require(c?.status==='succeeded'&&c.schedulingMode==='cooperative'&&c.queueCompletionAuthority==='per-gpu-duty-prefix-fence'&&
+  require(c?.status==='succeeded'&&c.routeId==='sf3d.image-to-mesh.webgpu-local.v0'&&
+    c.manifestId==='sf3d.two-stream-attention-cooperative-boundaries.v0'&&c.schedulingMode==='cooperative'&&
+    c.queueCompletionAuthority==='per-gpu-duty-prefix-fence'&&boundary?.boundaryId==='two-stream-attention-duties'&&
     boundary?.completedItems===3350&&boundary.totalItems===3350&&boundary.actualRangeCount===3350&&
-    c.adapterTelemetry?.residentFFN===true&&c.adapterTelemetry?.declaredDutyCount===3350,'complete actual3350-duty cooperative backbone missing');
-  require(b?.loadingReport?.sourceETag===report.canonicalSource?.etag&&
+    c.adapterTelemetry?.residentFFN===true&&c.adapterTelemetry.linearRowsPerDuty===128&&
+    c.adapterTelemetry.dutyGranularity==='attention-tile'&&c.adapterTelemetry.declaredDutyCount===3350,'complete actual3350-duty cooperative backbone missing');
+  require(!!b?.loadingReport?.sourceETag&&b.loadingReport.sourceETag===report.canonicalSource?.etag&&
     b.loadingReport.expectedWeightBytes===report.canonicalSource?.byteLength,'backbone effective immutable source drift');
-  require(report.phaseObservations?.map(o=>o.phase).join(',')===report.expectedPhaseOrder?.join(','),'actual backbone cliff sequence incomplete');
+  const expected=residentTwoStreamExpectedPhases().join(',');
+  require(report.expectedPhaseOrder?.join(',')===expected&&
+    report.phaseObservations?.map(o=>o.phase).join(',')===expected,'actual approved backbone cliff sequence incomplete');
   require(report.phaseObservations?.every(o=>o.verdict==='admitted'&&o.host?.source==='live-macos'&&
     o.host.hostFreeBytes>=o.demand.requiredBytes&&o.host.hostname===report.source?.hostname&&
     o.host.model==='Mac14,9'&&o.host.processor==='Apple M2 Pro'&&!o.host.observerErrors?.length&&

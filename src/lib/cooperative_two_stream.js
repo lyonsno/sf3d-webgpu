@@ -240,12 +240,19 @@ export function groupTwoStreamDuties(plan){
 
 /** Unresolved queue/destruction failures stay reachable on the actual backbone. */
 export async function retireTwoStreamWork(backbone,keep=new Set()){
-  const owner=backbone._residentWorkOwner;if(!owner)return;
-  for(const allocation of owner.allocations)owner.buffers.add(allocation.buffer);
-  owner.allocations.length=0;
+  const owner=backbone._residentWorkOwner;
+  if(!owner&&!backbone._failedUniforms?.size)return;
+  if(owner){
+    for(const allocation of owner.allocations)owner.buffers.add(allocation.buffer);
+    owner.allocations.length=0;
+  }
   await backbone.device.queue.onSubmittedWorkDone();
   const errors=[];
-  for(const buffer of owner.buffers)if(!keep.has(buffer)){
+  for(const buffer of backbone._failedUniforms??[]){
+    try{buffer.destroy();backbone._failedUniforms.delete(buffer);}
+    catch(error){errors.push(error);}
+  }
+  for(const buffer of owner?.buffers??[])if(!keep.has(buffer)){
     try{
       buffer.destroy();owner.buffers.delete(buffer);
       if(backbone._zeroBias===buffer){backbone._zeroBias=null;backbone._zeroBiasSize=0;}
@@ -254,7 +261,7 @@ export async function retireTwoStreamWork(backbone,keep=new Set()){
     }catch(error){errors.push(error);}
   }
   if(errors.length)throw new AggregateError(errors,'two-stream work retirement failed');
-  if(owner.buffers.size===0)backbone._residentWorkOwner=null;
+  if(!owner||owner.buffers.size===0)backbone._residentWorkOwner=null;
 }
 
 function liveWorkBuffers(state,backbone){
@@ -291,7 +298,7 @@ export async function runCooperativeTwoStream(options) {
   if((residentFFN||retireIntermediateBuffers||withGroupWeights)&&dutyGranularity!=='attention-tile')
     throw TypeError('resident lifetimes require the exact attention-tile plan');
   if(withGroupWeights!==null&&typeof withGroupWeights!=='function')throw TypeError('withGroupWeights must be a function');
-  if(backbone._residentWorkOwner)throw Error('two-stream work cleanup is quarantined');
+  if(backbone._residentWorkOwner||backbone._failedUniforms?.size)throw Error('two-stream work cleanup is quarantined');
   const attentionPlan = dutyGranularity === 'attention-tile'
     ? createTwoStreamAttentionDutyPlan(N_img, { linearRowsPerDuty, residentFFN })
     : null;
