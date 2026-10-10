@@ -216,7 +216,7 @@ export class SF3DImageTokenizer {
           result = this._finalizeEncode(encoder, ctx, chunkWeights);
         }
         };
-        if(retireIntermediateBuffers)allocations.push(...captureGpuBufferAllocations(record).allocations);
+        if(retireIntermediateBuffers)captureGpuBufferAllocations(record,{ownedAllocations:allocations});
         else record();
       });
       if(withChunkWeights)await withChunkWeights({blockStart:start,blockEnd:end,isFirst,isLast},encode);

@@ -17,16 +17,22 @@ function recordBufferAllocation(buffer, size, label) {
 
 /**
  * Capture buffers allocated synchronously through this module while `fn` runs.
- * The caller owns retirement; nested scopes restore the outer sink afterward.
+ * A caller-owned inventory receives allocations before `fn` can reject, so
+ * terminal drain/recovery retains custody independently of the thrown value.
+ * Without that inventory, the existing unsubmitted-failure cleanup applies.
+ * Nested scopes restore the outer sink afterward.
  */
-export function captureGpuBufferAllocations(fn) {
+export function captureGpuBufferAllocations(fn, { ownedAllocations = null } = {}) {
   if (typeof fn !== 'function') throw new TypeError('fn must be a function');
+  if (ownedAllocations !== null && !Array.isArray(ownedAllocations)) throw new TypeError('ownedAllocations must be an array');
   const previous = activeBufferAllocationSink;
-  const allocations = [];
+  const allocations = ownedAllocations ?? [];
+  const start = allocations.length;
   activeBufferAllocationSink = allocations;
   try {
-    return { value: fn(), allocations };
+    return { value: fn(), allocations: ownedAllocations ? allocations.slice(start) : allocations };
   } catch (error) {
+    if (ownedAllocations) throw error;
     const cleanupErrors = [];
     for (const allocation of allocations) {
       try {
@@ -47,7 +53,7 @@ export function captureGpuBufferAllocations(fn) {
           value: cleanup,
         });
       } catch {
-        // Cleanup remains complete even when the thrown object is immutable.
+        // Ownership/error handling must not depend on mutating a thrown value.
       }
     }
     throw error;

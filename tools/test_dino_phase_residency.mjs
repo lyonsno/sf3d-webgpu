@@ -66,4 +66,26 @@ failedDevice.queue.onSubmittedWorkDone=async()=>{throw null;};
 await assert.rejects(()=>unresolved.encodeCooperative({numBlocks:24,chunkBlocks:1,weights:{},retireIntermediateBuffers:true,
   driver:async(start,end,encode)=>{encode({});throw 0;}}),e=>e instanceof AggregateError&&e.errors[0]===0&&e.errors[1]===null);
 failedDevice.queue.onSubmittedWorkDone=async()=>{};await unresolved.retireCapturedWorkBuffers();
+for(const rejection of [Error('synchronous setup failed'),Object.freeze(Error('immutable setup failed')),null,undefined,0,false,'']){
+  const sync=Object.create(SF3DImageTokenizer.prototype),syncDevice=fakeWeightDevice();sync.device=syncDevice;
+  let destructionFails=true;
+  sync._setupEncode=()=>{
+    const first=createEmptyBuffer(syncDevice,16);createEmptyBuffer(syncDevice,16);
+    const destroy=first.destroy;
+    first.destroy=function(){if(destructionFails)throw Error('synchronous capture retirement failed');return destroy.call(this);};
+    throw rejection;
+  };
+  sync._encodeBlock=()=>{};
+  const attempt=()=>sync.encodeCooperative({numBlocks:24,chunkBlocks:1,weights:{},retireIntermediateBuffers:true,
+    driver:async(start,end,encode)=>encode({})});
+  let caught,hasRejected=false;
+  try{await attempt();}catch(error){hasRejected=true;caught=error;}
+  assert.equal(hasRejected,true);
+  assert.ok(sync._capturedWorkOwner?.buffers.has(syncDevice.buffers[0]),'synchronous rejection must not abandon surviving work backing');
+  assert.ok(caught instanceof AggregateError&&caught.errors[0]===rejection,'root synchronous rejection survives cleanup failure');
+  const allocated=syncDevice.buffers.length;
+  await assert.rejects(attempt,/quarantined/);assert.equal(syncDevice.buffers.length,allocated);
+  destructionFails=false;await sync.retireCapturedWorkBuffers();
+  assert.ok(syncDevice.buffers.every(buffer=>buffer.destroyed===1));
+}
 console.log('actual DINO cooperative loop loads/fences/retires all 24 blocks without changing setup/final order');

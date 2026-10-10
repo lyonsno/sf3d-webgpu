@@ -14,7 +14,7 @@ import {observeMacMemory} from './memory_admission.mjs';
 import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction,stopOwnedBrowser,ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
-import {dinoPhaseDemand,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
+import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 const arg=name=>{const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root=arg('--repo-root')?path.resolve(arg('--repo-root')):null;
 const requestedReportPath=path.resolve(arg('--report')??path.join(os.tmpdir(),'sf3d-dino-'+randomUUID()+'.json'));
@@ -95,7 +95,12 @@ try{
       if(req.method==='POST'&&['/input.f32','/output.f32'].includes(name)){
         const bytes=await readBody(req),expected=name==='/input.f32'?3*512*512*4:1297*1024*4;
         if(bytes.length!==expected)throw Error('partial or conflicting full tensor shape');
+        if(name==='/input.f32'){
+          if(report.inputTensor)throw Error('complete transformed input already fixed');
+          report.inputTensor=inspectDinoInputBytes(bytes);
+        }
         fs.writeFileSync(name==='/input.f32'?report.evidencePaths.input:report.evidencePaths.output,bytes);
+        await persist();
         res.writeHead(200).end();return;
       }
       res.writeHead(404).end();
@@ -141,7 +146,10 @@ try{
       imageLease=budget.reserveCpu(80*1024*1024,'native-condition-image-and-readback');
       const imageResponse=await fetch('/image.png');bitmap=await createImageBitmap(await imageResponse.blob());
       if(bitmap.width!==config.input.width||bitmap.height!==config.input.height)throw Error('decoded canonical dimensions changed');
-      const chw=await preprocessImage(bitmap);await persistTensor('/input.f32',new Uint8Array(chw.buffer));
+      const chw=await preprocessImage(bitmap),inputBytes=new Uint8Array(chw.buffer,chw.byteOffset,chw.byteLength);
+      const inputHash=await crypto.subtle.digest('SHA-256',inputBytes);
+      const inputConsumed={sha256:Array.from(new Uint8Array(inputHash),b=>b.toString(16).padStart(2,'0')).join(''),bytes:inputBytes.byteLength};
+      await persistTensor('/input.f32',inputBytes);
       const dino=await runResidentDino({device,memoryBudget:budget,imageChw:chw,weightsUrl:'/canonical-weights.bin',
         expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag,onBeforePhase:observe,
         onProgress:p=>{document.querySelector('#status').textContent='DINO '+(p.completedItems??0)+'/24 blocks';},
@@ -153,7 +161,7 @@ try{
       imageLease.release();imageLease=null;const validation=await device.popErrorScope();
       if(validation)throw Error('native validation: '+validation.message);
       document.querySelector('#status').textContent='All24 DINO blocks completed; full SF3D not yet run';
-      return {backend,dino,validationError:null,budget:budget.snapshot()};
+      return {backend,dino,inputConsumed,validationError:null,budget:budget.snapshot()};
     }catch(error){failed=true;failure=error;throw error;}
     finally{
       bitmap?.close();

@@ -16,7 +16,8 @@ assert.equal(witness.acceptResidentDino({status:'passed',phase:'complete'}).ok,f
 const leaf=fs.mkdtempSync(path.join(os.tmpdir(),'sf3d-dino-witness-contract-'));
 try{
   const output=path.join(leaf,'output'),input=path.join(leaf,'input'),bytes=Buffer.alloc(1297*1024*4);bytes.writeFloatLE(1,0);
-  fs.writeFileSync(output,bytes);fs.writeFileSync(input,Buffer.alloc(3*512*512*4));
+  const inputBytes=Buffer.alloc(3*512*512*4),inputSha=createHash('sha256').update(inputBytes).digest('hex');
+  fs.writeFileSync(output,bytes);fs.writeFileSync(input,inputBytes);
   const phaseNames=['preprocess','camera',...Array.from({length:24},(_,i)=>'dino-block-'+i),'dino-output'];
   const observation=phase=>({phase,verdict:'admitted',host:{source:'live-macos',hostname:'host',model:'Mac14,9',processor:'Apple M2 Pro',observerErrors:[],hostFreeBytes:100},
     demand:{requiredBytes:10},process:{coverage:'sampled-owned-process-tree',lastObservation:{runId:'current',rootPid:42,status:'observed',sampledAggregatePhysicalFootprintBytes:10}}});
@@ -26,14 +27,20 @@ try{
       loadingReport:{sourceETag:'"weights"',expectedWeightBytes:200},cooperative:{status:'succeeded',schedulingMode:'cooperative',queueCompletionAuthority:'per-gpu-duty-prefix-fence',
         boundaries:[{completedItems:24,totalItems:24,actualRangeCount:24}]}},phaseObservations:phaseNames.map(observation),runId:'current',rootPid:42,
     validationError:null,budget:{cpu:{liveBytes:0},gpu:{liveBytes:0}},processObservation:{status:'observed',coverage:'sampled-owned-process-tree',sampledPeakAggregatePhysicalFootprintBytes:20},
-    cleanup:{browser:{exitObserved:true},server:'closed'},evidencePaths:{input,output},output:{sha256:createHash('sha256').update(bytes).digest('hex')}};
+    cleanup:{browser:{exitObserved:true},server:'closed'},evidencePaths:{input,output},inputTensor:{sha256:inputSha},inputConsumed:{sha256:inputSha},output:{sha256:createHash('sha256').update(bytes).digest('hex')}};
   assert.equal(witness.acceptResidentDino(valid).ok,true,'synthetic policy fixture, not native conformance evidence');
+  const drift=Buffer.from(inputBytes);drift.writeFloatLE(1,0);fs.writeFileSync(input,drift);
+  assert.equal(witness.acceptResidentDino(valid).ok,false,'same-length finite replay input drift must invalidate acceptance');
+  fs.writeFileSync(input,Buffer.alloc(inputBytes.length,255));
+  assert.equal(witness.acceptResidentDino(valid).ok,false,'same-length nonfinite replay input must invalidate acceptance');
+  fs.writeFileSync(input,inputBytes);
   for(const mutate of [r=>r.backend.isFallbackAdapter=true,r=>r.artifact.servedSha256='old',r=>r.requested.revision='other',
     r=>r.dino.cooperative.boundaries[0].completedItems=23,r=>r.dino.weightPhases.pop(),r=>r.phaseObservations.pop(),
     r=>r.phaseObservations[0].process.lastObservation.runId='stale',r=>r.phaseObservations[0].host.hostFreeBytes=0,
     r=>r.phaseObservations[0].process.lastObservation.sampledAggregatePhysicalFootprintBytes=101,
     r=>r.memorySafety={reason:'original-process-stop'},r=>r.validationError='invalid',r=>r.budget.gpu.liveBytes=4,
-    r=>r.dino.loadingReport.sourceETag='"other"',r=>r.evidencePaths.output=path.join(leaf,'missing'),r=>r.output.sha256='cached']){
+    r=>r.dino.loadingReport.sourceETag='"other"',r=>r.evidencePaths.output=path.join(leaf,'missing'),r=>r.output.sha256='cached',
+    r=>r.inputConsumed.sha256='other',r=>delete r.inputTensor,r=>delete r.inputConsumed]){
     const report=structuredClone(valid);mutate(report);assert.equal(witness.acceptResidentDino(report).ok,false);
   }
   fs.writeFileSync(output,Buffer.alloc(4));assert.equal(witness.acceptResidentDino(valid).ok,false,'partial raw output rejects');

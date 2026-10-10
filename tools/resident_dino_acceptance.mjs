@@ -43,6 +43,12 @@ export function inspectDinoOutput(filename){
   return {sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length,finite,nonzero,min,max};
 }
 
+export function inspectDinoInputBytes(bytes){
+  if(bytes.length!==3*512*512*4)throw Error('missing or partial complete DINO input');
+  for(let i=0;i<bytes.length;i+=4)if(!Number.isFinite(bytes.readFloatLE(i)))throw Error('nonfinite DINO input');
+  return {sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length,finite:3*512*512};
+}
+
 export function acceptResidentDino(report){
   const errors=[],require=(condition,message)=>{if(!condition)errors.push(message);};
   require(report.status==='passed'&&report.phase==='complete','run not complete');
@@ -75,7 +81,10 @@ export function acceptResidentDino(report){
     const output=inspectDinoOutput(report.evidencePaths?.output);
     require(output.sha256===report.output?.sha256,'raw output hash mismatch');
   }catch(error){errors.push('raw output: '+error.message);}
-  try{require(fs.statSync(report.evidencePaths?.input).size===3*512*512*4,'raw complete input missing');}
+  try{
+    const input=inspectDinoInputBytes(fs.readFileSync(report.evidencePaths?.input));
+    require(input.sha256===report.inputTensor?.sha256&&input.sha256===report.inputConsumed?.sha256,'raw input differs from the complete CHW tensor consumed');
+  }
   catch(error){errors.push('raw input: '+error.message);}
   return {ok:!errors.length,errors,authority:'complete native DINO encoder only; not full SF3D, reference parity or production fit'};
 }
