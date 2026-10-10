@@ -40,18 +40,31 @@ function acceptOwnedProcessWitness(report){
 export function acceptStagedTensorWitness(report){
   const errors=[],need=(condition,text)=>{if(!condition)errors.push(text);};
   need(report?.status==='passed'&&!report.error,'successful terminal path');
-  need(report?.route==='sf3d-canonical-tensor-ranges-no-inference.v0','exact canonical-unit route');
+  const learned=report?.route==='sf3d-canonical-patch-embedding.v0';
+  need(learned||report?.route==='sf3d-canonical-tensor-ranges-no-inference.v0','exact canonical-unit/patch-phase route');
   need(report?.source?.clean===true&&report.source.revision===report.requested?.revision,'clean exact requested source');
   need(report?.backend?.isFallbackAdapter===false&&/apple/i.test(report.backend.vendor),'actual nonfallback Apple adapter');
-  const source=report?.canonicalSource,unit=report?.tensorUnit;
+  const source=report?.canonicalSource,unit=learned?report?.patchPhase:report?.tensorUnit;
   need(/^[a-f0-9]{64}$/.test(source?.sha256??'')&&source.sha256===report.requested?.weightsSha256,'exact observed canonical artifact digest');
   need(JSON.stringify(source?.units?.map(x=>x.name))===JSON.stringify(report.requested?.tensorNames),'exact requested tensor selection');
   need(unit?.loadingReport?.mode==='tensor-ranges'&&unit.loadingReport.sourceETag===source?.etag&&unit.loadingReport.expectedWeightBytes===source?.byteLength,'effective identified range source');
   need(unit?.loadingReport?.ranges?.length===source?.units?.length+2,'all and only identified source units plus header');
-  need(Array.isArray(unit?.readbacks)&&unit.readbacks.length===source?.units?.length&&unit.readbacks.length>0,'complete native readbacks');
-  for(const row of source?.units??[]){
-    const actual=unit?.readbacks?.find(x=>x.name===row.name);
-    need(actual?.bytes===row.expandedBytes&&Array.isArray(actual?.f32Words)&&actual.f32Words.length>0&&JSON.stringify(actual.f32Words)===JSON.stringify(row.expectedF32Words),'exact independent F32 reference: '+row.name);
+  if(learned){
+    const admission=report?.phaseAdmission,host=admission?.host;
+    need(report.inputArtifact?.sha256===report.requested?.inputSha256,'exact observed phase input');
+    need(admission?.authority==='reversible-selected-phase-only'&&admission?.verdict==='admitted'&&host?.source==='live-macos'&&host.hostname===report.source?.hostname,'fresh effective host admission');
+    need(host?.model==='Mac14,9'&&host?.processor==='Apple M2 Pro','actual calibrated M2 Pro identity');
+    need(Number.isSafeInteger(admission?.requiredBytes)&&admission.requiredBytes>0&&admission.requiredBytes<=host?.hostFreeBytes,'phase backing demand fits observed free bytes');
+    need(JSON.stringify(unit?.shape)==='[1297,1024]'&&unit?.inputBytes===3145728&&unit?.outputBytes===5312512,'complete production-shape patch projection');
+    need(unit?.finiteCount===1328128&&unit?.nonzeroCount>0,'finite nonblank learned output');
+    need(/^[a-f0-9]{64}$/.test(unit?.outputSha256??'')&&/^[a-f0-9]{64}$/.test(unit?.inputSha256??''),'preserved complete input/output digests');
+    need(unit?.reference?.tested>=66&&unit.reference.mismatches===0,'independent sampled arithmetic reference');
+  }else{
+    need(Array.isArray(unit?.readbacks)&&unit.readbacks.length===source?.units?.length&&unit.readbacks.length>0,'complete native readbacks');
+    for(const row of source?.units??[]){
+      const actual=unit?.readbacks?.find(x=>x.name===row.name);
+      need(actual?.bytes===row.expandedBytes&&Array.isArray(actual?.f32Words)&&actual.f32Words.length>0&&JSON.stringify(actual.f32Words)===JSON.stringify(row.expectedF32Words),'exact independent F32 reference: '+row.name);
+    }
   }
   need(unit?.budget?.cpu?.liveBytes===0&&unit?.budget?.gpu?.liveBytes===0,'native unit resources retired');
   need(unit?.budget?.cpu?.maxBytes===report.requested?.cpuBytes&&unit?.budget?.gpu?.maxBytes===report.requested?.gpuBytes,'effective caller allowances');

@@ -8,6 +8,7 @@ for(const [name,args,phase]of [
   ['missing arguments',[],'arguments'],
   ['wrong source',['--repo-root',root,'--expected-revision','b'.repeat(40),'--chrome','/nonexistent/chrome','--process-budget-bytes','1'],'source-identity'],
   ['canonical missing allowances',['--canonical-tensor-unit','--repo-root',root,'--expected-revision','b'.repeat(40),'--chrome','/nonexistent/chrome','--process-budget-bytes','1'],'arguments'],
+  ['learned phase missing input',['--canonical-patch-phase','--repo-root',root,'--expected-revision','b'.repeat(40),'--chrome','/nonexistent/chrome','--process-budget-bytes','1','--weights','canonical.bin','--cpu-budget-bytes','67108864','--gpu-budget-bytes','33554432'],'arguments'],
 ]){
   const report=path.join(tmp,phase+'.json');
   const run=spawnSync(process.execPath,[path.join(root,'tools/smoke_loader_memory.mjs'),...args,'--report',report],{encoding:'utf8'});

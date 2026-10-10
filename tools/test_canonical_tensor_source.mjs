@@ -21,6 +21,12 @@ try{
     const bytes=new Uint8Array(await response.arrayBuffer());assert.deepEqual(bytes,fixture.bytes.slice(0,bytes.length));
   }
   source.close();source=null;
+  source=await prepareCanonicalTensorSource({weightsPath:p,expectedSha256:createHash('sha256').update(fixture.bytes).digest('hex'),
+    tensorNames:['image_tokenizer.image_mean'],cpuBytes:1048576,gpuBytes:16384,referenceMode:'source-file'});
+  assert.equal(source.receipt.referenceMode,'source-file','a learned phase preserves the raw source by immutable file/offset/digest, without large JSON numeric duplicates');
+  assert.equal(source.receipt.units[0].rawHex,undefined);
+  assert.equal(source.receipt.units[0].expectedF32Words,undefined);
+  source.close();source=null;
 }finally{
   if(server)await new Promise(resolve=>server.close(resolve));
   try{source?.close();}catch{}

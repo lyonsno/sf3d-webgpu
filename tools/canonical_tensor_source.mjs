@@ -18,7 +18,8 @@ function expandedWords(bytes,dtype){
   });
 }
 
-export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,tensorNames,cpuBytes,gpuBytes}){
+export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,tensorNames,cpuBytes,gpuBytes,referenceMode='inline-words'}){
+  if(!['inline-words','source-file'].includes(referenceMode))throw Error('explicit supported canonical reference mode required');
   if(!/^[a-f0-9]{64}$/.test(expectedSha256??''))throw Error('explicit expected canonical SHA256 required');
   if(!Array.isArray(tensorNames)||!tensorNames.length||new Set(tensorNames).size!==tensorNames.length)throw Error('explicit unique tensor names required');
   const fd=fs.openSync(weightsPath,'r');
@@ -38,7 +39,7 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
       if(2*info.size+expandedBytes>cpuBytes||totalGpuBytes+expandedBytes>gpuBytes)
         throw Error('canonical unit/reference/readback exceeds declared diagnostic allowance');
       const bytes=Buffer.alloc(info.size);if(fs.readSync(fd,bytes,0,bytes.length,info.offset)!==bytes.length)throw Error('canonical tensor truncated');
-      units.push({name,...info,rawHex:bytes.toString('hex'),sha256:digest(bytes),expandedBytes,expectedF32Words:expandedWords(bytes,info.dtype)});
+      units.push({name,...info,sha256:digest(bytes),expandedBytes,...(referenceMode==='inline-words'?{rawHex:bytes.toString('hex'),expectedF32Words:expandedWords(bytes,info.dtype)}:{})});
     }
     const hash=createHash('sha256');
     for await(const chunk of fs.createReadStream(weightsPath,{fd,autoClose:false,start:0}))hash.update(chunk);
@@ -46,7 +47,7 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
     if(sha256!==expectedSha256)throw Error('canonical artifact SHA256 mismatch');
     const etag='"sha256-'+sha256+'"';
     let closed=false;
-    return {receipt:{path:fs.realpathSync(weightsPath),sha256,byteLength:before.size,headerSha256:digest(header),headerBytes:headerSize,
+    return {receipt:{path:fs.realpathSync(weightsPath),sha256,byteLength:before.size,headerSha256:digest(header),headerBytes:headerSize,referenceMode,
       tensorCount:tensors.size,etag,units,totalGpuBytes,cpuBytes,gpuBytes,sourceStat:{dev:before.dev,ino:before.ino,size:before.size,mtimeMs:before.mtimeMs,ctimeMs:before.ctimeMs}},
       serve(req,res){
         try{
