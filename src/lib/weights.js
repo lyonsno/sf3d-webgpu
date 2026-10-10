@@ -15,6 +15,7 @@
 
 import { createStorageBuffer } from './gpu.js';
 import { isLoaderMemoryBudget } from './loader_memory_budget.js';
+import { createFlatTensorRangeSource } from './flat_tensor_ranges.js';
 
 const MAGIC = 0x33445346; // "SF3D" in little-endian
 const ENTRY_SIZE = 160;
@@ -217,11 +218,13 @@ function extractBytes(chunkedBuffer, offset, size, context = null) {
 /**
  * Load SF3D weights and organize into component structure.
  */
-export async function loadWeights(device, url, onProgress, {memoryBudget = null, expectedWeightBytes} = {}) {
+export async function loadWeights(device, url, onProgress, {memoryBudget = null, expectedWeightBytes, loadingMode='whole-file', expectedSourceETag} = {}) {
   if (memoryBudget && !isLoaderMemoryBudget(memoryBudget)) throw new TypeError('authenticated loader budget required');
   if (memoryBudget && (!Number.isSafeInteger(expectedWeightBytes) || expectedWeightBytes < 16))
     throw new TypeError('budgeted load requires explicit expectedWeightBytes');
   memoryBudget?.assertDevice(device);
+  if(loadingMode==='tensor-ranges')return loadRangeWeights(device,url,onProgress,{memoryBudget,expectedWeightBytes,expectedSourceETag});
+  if(loadingMode!=='whole-file')throw TypeError('unknown weight loadingMode');
   memoryBudget?.setPhase('weight-source');
   const ownedCpu = new Set(), ownedBuffers = new Set(), context = memoryBudget ? {budget:memoryBudget, ownedCpu} : null;
   // This reservation precedes fetch, not just append of already allocated chunks.
@@ -273,7 +276,7 @@ export async function loadWeights(device, url, onProgress, {memoryBudget = null,
   } finally { sourceLease?.release(); await reader?.cancel().catch(() => {}); }
 }
 
-function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = null) {
+function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = null, staged = null) {
   const upload = (buffer, info) => {
     const gpuBuffer = extractTensor(device, buffer, info, context);
     ownedBuffers.add(gpuBuffer);
@@ -284,14 +287,14 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = 
     const info = tensors.get(name);
     if (!info) throw new Error(`Missing weight: ${name}`);
     consumed.add(name);
-    return upload(chunkedBuffer, info);
+    return staged?.dryRun ? {} : staged ? staged.buffers.get(name) : upload(chunkedBuffer, info);
   };
 
   const tryGet = (name) => {
     const info = tensors.get(name);
     if (!info) return null;
     consumed.add(name);
-    return upload(chunkedBuffer, info);
+    return staged?.dryRun ? {} : staged ? staged.buffers.get(name) : upload(chunkedBuffer, info);
   };
 
   const getCPU = (name) => {
@@ -477,6 +480,7 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = 
     imageEstimator.heads[headName] = subLayers;
   }
 
+  if(staged?.dryRun)return consumed;
   console.log(`Loaded ${tensors.size} SF3D tensors from weight file`);
 
   // Raw tensor access for modules that read weights lazily by name (the CLIP
@@ -484,7 +488,7 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = 
   // (and anything the builders above did not consume) are kept, as standalone
   // copies; the streamed chunks are released so the page does not carry the
   // whole weight file in JS heap for the producer's lifetime.
-  const compact = compactRetainedTensors(tensors, chunkedBuffer, consumed, LAZILY_READ_TENSOR_PREFIXES, context);
+  const compact = staged?.compact ?? compactRetainedTensors(tensors, chunkedBuffer, consumed, LAZILY_READ_TENSOR_PREFIXES, context);
   console.log(`Retained ${(compact.retainedBytes / 1048576).toFixed(0)} MB of raw tensor bytes for lazy readers; released ${(compact.droppedBytes / 1048576).toFixed(0)} MB of streamed chunks`);
   const lazyBuffers = new Map();
   let disposed = false;
@@ -535,6 +539,7 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = 
     postProcessor,
     decoder,
     imageEstimator,
+    ...(staged ? {loadingReport:staged.report} : {}),
     dispose,
     _assertActive,
     _rawGet,
@@ -542,4 +547,71 @@ function buildWeightSet(device, chunkedBuffer, tensors, ownedBuffers, context = 
     _rawTryGet,
     _rawHas,
   };
+}
+
+function rangeLoadContext(device,memoryBudget){
+  if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('tensor-ranges requires authenticated loader budget');
+  memoryBudget.assertDevice(device);
+  const ownedBuffers=new Set(),ownedCpu=new Set();
+  const context={budget:memoryBudget,ownedCpu};
+  const cleanup=error=>{
+    const failures=retireOwnedBuffers(ownedBuffers);
+    for(const lease of ownedCpu)lease.release();ownedCpu.clear();
+    if(failures.length)throw new AggregateError(error?[error,...failures]:failures,'SF3D range cleanup encountered failures',{cause:error});
+  };
+  return {ownedBuffers,ownedCpu,context,cleanup};
+}
+
+async function uploadRangeTensor(device,source,name,owner,{retain=false}={}){
+  let unit=await source.readTensor(name);
+  try{
+    const info=source.tensors.get(name);
+    const buffer=extractTensor(device,unit.bytes.buffer,{...info,offset:0},owner.context);
+    owner.ownedBuffers.add(buffer);
+    // Backpressure before another source unit; queue completion is not GC or
+    // proven physical reclamation. The parent process observer remains needed.
+    await device.queue.onSubmittedWorkDone();
+    if(retain){owner.ownedCpu.add(unit);const bytes=unit.bytes;unit=null;return {buffer,bytes};}
+    return {buffer};
+  }finally{unit?.release();if(unit)unit.bytes=null;}
+}
+
+/** Small identified tensor consumer, not a truncated model or inference route. */
+export async function loadWeightTensorUnit(device,url,tensorNames,options={}){
+  const owner=rangeLoadContext(device,options.memoryBudget);
+  if(!Array.isArray(tensorNames)||!tensorNames.length||new Set(tensorNames).size!==tensorNames.length)
+    throw TypeError('explicit unique nonempty tensorNames required');
+  try{
+    const source=await createFlatTensorRangeSource(url,options),tensors=new Map();
+    for(const name of tensorNames)if(!source.tensors.has(name))throw Error('Missing weight: '+name);
+    for(const name of tensorNames)tensors.set(name,(await uploadRangeTensor(device,source,name,owner)).buffer);
+    return {tensors,loadingReport:source.report,dispose:()=>{owner.cleanup();tensors.clear();}};
+  }catch(error){owner.cleanup(error);throw error;}
+}
+
+async function loadRangeWeights(device,url,onProgress,options){
+  const owner=rangeLoadContext(device,options.memoryBudget);
+  try{
+    const source=await createFlatTensorRangeSource(url,{...options,onProgress});
+    // Exercise the SAME builders without allocation to identify eager consumers
+    // and validate required names before payload acquisition. No second model
+    // schema or asynchronous consumer API is introduced.
+    const consumed=buildWeightSet(device,null,source.tensors,new Set(),null,{dryRun:true});
+    const retained=new Map(),buffers=new Map();let retainedBytes=0,droppedBytes=0,disposed=false;
+    for(const [name,info]of source.tensors){
+      const keep=!consumed.has(name)||LAZILY_READ_TENSOR_PREFIXES.some(p=>name.startsWith(p));
+      if(consumed.has(name)){
+        const result=await uploadRangeTensor(device,source,name,owner,{retain:keep});buffers.set(name,result.buffer);
+        if(keep){retained.set(name,result.bytes);retainedBytes+=info.size;}else droppedBytes+=info.size;
+      }else{
+        const unit=await source.readTensor(name);owner.ownedCpu.add(unit);retained.set(name,unit.bytes);retainedBytes+=info.size;
+      }
+    }
+    const compact={retained,retainedBytes,droppedBytes,rawBytes(name){
+      if(disposed)throw Error('SF3D weights are disposed');
+      if(!retained.has(name))throw Error(`tensor ${name} was uploaded at load and its raw bytes were released`);
+      return retained.get(name);
+    },dispose(){disposed=true;retained.clear();}};
+    return buildWeightSet(device,null,source.tensors,owner.ownedBuffers,owner.context,{buffers,compact,report:source.report});
+  }catch(error){owner.cleanup(error);throw error;}
 }

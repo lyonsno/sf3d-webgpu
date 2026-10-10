@@ -11,22 +11,34 @@ import {weightFixture} from './fixtures/weight_resource_fixture.mjs';
 import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction, stopOwnedBrowser, ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
-import {acceptLoaderMemoryWitness} from './loader_memory_witness_acceptance.mjs';
+import {acceptLoaderMemoryWitness,acceptStagedTensorWitness} from './loader_memory_witness_acceptance.mjs';
+import {prepareCanonicalTensorSource} from './canonical_tensor_source.mjs';
 const arg = name => {const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root = arg('--repo-root') ? path.resolve(arg('--repo-root')) : null;
 const reportPath = path.resolve(arg('--report') ?? path.join(os.tmpdir(),'sf3d-loader-memory-'+randomUUID()+'.json'));
+const canonicalMode=process.argv.includes('--canonical-tensor-unit');
 const report = {schema:'sf3d.loader-native-memory-witness.v0', status:'running', phase:'arguments', receiver:'mini-wake-and-bake-pit-boss',
   route:'sf3d-loader-native-refusal-synthetic-weights-no-inference.v0', reportPath, runId:randomUUID(),
   requested:{repoRoot:root, revision:arg('--expected-revision'), chrome:arg('--chrome'), processBudgetBytes:Number(arg('--process-budget-bytes'))},
   claim:'real loader refusal/cleanup and owned-process stop only; synthetic weights, no learned compute or M2 fit claim'};
 report.evidencePaths={report:reportPath, browserLog:reportPath+'.chrome.log', process:reportPath+'.process.jsonl', processRefusal:reportPath+'.refusal-process.jsonl'};
+if(canonicalMode){
+  report.route='sf3d-canonical-tensor-ranges-no-inference.v0';
+  report.claim='exact identified canonical weight conversion/upload/readback and process stopping; no learned compute, phase-fit or full-route claim';
+  Object.assign(report.requested,{weightsPath:arg('--weights'),weightsSha256:arg('--expected-weights-sha256'),cpuBytes:Number(arg('--cpu-budget-bytes')),gpuBytes:Number(arg('--gpu-budget-bytes'))});
+}
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 const persist = async () => writeJsonReportAtomic(reportPath,report);
-let browser, child, server, monitor, profile;
+let browser, child, server, monitor, profile, canonical;
 try {
   await persist();
   if(!root || !arg('--chrome') || !arg('--expected-revision') || !Number.isSafeInteger(report.requested.processBudgetBytes) || report.requested.processBudgetBytes<1)
     throw Error('explicit --repo-root, --expected-revision, --chrome and --process-budget-bytes required');
+  if(canonicalMode){
+    report.requested.tensorNames=JSON.parse(arg('--tensor-names')??'null');
+    if(!report.requested.weightsPath||!Number.isSafeInteger(report.requested.cpuBytes)||report.requested.cpuBytes<1||!Number.isSafeInteger(report.requested.gpuBytes)||report.requested.gpuBytes<1)
+      throw Error('canonical unit requires explicit weights, tensor names and CPU/GPU diagnostic allowances');
+  }
   report.phase='source-identity';
   const git = args => execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
   report.source={revision:git(['rev-parse','HEAD']), clean:git(['status','--porcelain'])==='', repoRoot:root, hostname:os.hostname()};
@@ -34,6 +46,7 @@ try {
   report.browserExecutable=fs.realpathSync(arg('--chrome'));
   if(/\/Google Chrome\.app\//.test(report.browserExecutable))throw Error('independent browser required; installed GUI Chrome cannot run headlessly');
   report.phase='fixture-preparation';
+  if(canonicalMode){canonical=await prepareCanonicalTensorSource({...report.requested,expectedSha256:report.requested.weightsSha256});report.canonicalSource=canonical.receipt;await persist();}
   const fixtures={f32:weightFixture().bytes, f16:weightFixture({tensorShapes:new Map([['image_tokenizer.image_mean',[300000]]]),fp16Names:new Set(['image_tokenizer.image_mean'])}).bytes};
   const digest = bytes => createHash('sha256').update(bytes).digest('hex');
   report.fixtures=Object.fromEntries(Object.entries(fixtures).map(([name,bytes])=>{
@@ -41,7 +54,7 @@ try {
     return [name,{bytes:bytes.length,headerBytes:view.getUint32(12,true),firstTensorBytes:view.getUint32(16+156,true),sha256:digest(bytes),meaning:'synthetic flat-v1 loader fixture; not canonical model weights'}];
   }));
   const sources=new Map();
-  for(const relative of ['src/lib/weights.js','src/lib/gpu.js','src/lib/loader_memory_budget.js']) {
+  for(const relative of ['src/lib/weights.js','src/lib/gpu.js','src/lib/loader_memory_budget.js','src/lib/flat_tensor_ranges.js']) {
     const bytes=fs.readFileSync(path.join(root,relative)), committed=execFileSync('git',['show',report.source.revision+':'+relative],{cwd:root});
     if(digest(bytes)!==digest(committed))throw Error('served source differs from commit: '+relative);
     sources.set('/'+relative,bytes);
@@ -51,6 +64,7 @@ try {
     const name=new URL(req.url,'http://localhost').pathname;
     if(name==='/'){res.setHeader('content-type','text/html');res.end('<title>SF3D native loader refusal — no inference</title>');return;}
     if(name==='/favicon.ico'){res.writeHead(204).end();return;}
+    if(name==='/canonical-weights.bin'&&canonical){canonical.serve(req,res);return;}
     const bytes=name.startsWith('/fixture/')?fixtures[name.slice(9)]:sources.get(name);
     if(!bytes){res.writeHead(404).end();return;}
     res.setHeader('content-type',name.endsWith('.js')?'text/javascript':'application/octet-stream');res.setHeader('content-length',bytes.length);res.setHeader('cache-control','no-store');res.end(bytes);
@@ -85,6 +99,30 @@ try {
   browser=await puppeteer.connect({browserWSEndpoint:endpoint});report.browserVersion=await browser.version();
   const page=await browser.newPage();await page.goto(report.url);
   report.phase='native-loader-refusal';await persist();
+  if(canonicalMode){
+    report.phase='native-canonical-tensor-unit';await persist();
+    Object.assign(report,await page.evaluate(async config=>{
+      const {loadWeightTensorUnit}=await import('/src/lib/weights.js'),{createLoaderMemoryBudget}=await import('/src/lib/loader_memory_budget.js');
+      const adapter=await navigator.gpu?.requestAdapter();if(!adapter)throw Error('actual WebGPU adapter required');
+      const info=adapter.info,backend={vendor:info.vendor,architecture:info.architecture,description:info.description,isFallbackAdapter:info.isFallbackAdapter??adapter.isFallbackAdapter};
+      if(backend.isFallbackAdapter!==false||!/apple/i.test(backend.vendor))throw Error('nonfallback Apple route required');
+      const device=await adapter.requestDevice(),budget=createLoaderMemoryBudget(config.requested);budget.bindOwnedDevice(device);device.pushErrorScope('validation');
+      let unit;const readbacks=[];
+      try{
+        unit=await loadWeightTensorUnit(device,'/canonical-weights.bin',config.requested.tensorNames,{memoryBudget:budget,expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag});
+        for(const [name,buffer]of unit.tensors){
+          const output=device.createBuffer({size:buffer.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+          try{
+            const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(buffer,0,output,0,buffer.size);device.queue.submit([encoder.finish()]);
+            await output.mapAsync(GPUMapMode.READ);readbacks.push({name,bytes:buffer.size,f32Words:Array.from(new Uint32Array(output.getMappedRange()))});output.unmap();
+          }finally{output.destroy();}
+        }
+        const loadingReport=unit.loadingReport;unit.dispose();unit=null;
+        const validation=await device.popErrorScope();
+        return {backend,tensorUnit:{loadingReport,readbacks,budget:budget.snapshot(),events:budget.events},validationError:validation?.message??null};
+      }finally{unit?.dispose();device.destroy();budget.restore();}
+    },{requested:report.requested,source:report.canonicalSource}));
+  }else{
   Object.assign(report,await page.evaluate(async fixtures=>{
     const {loadWeights}=await import('/src/lib/weights.js'),{createLoaderMemoryBudget}=await import('/src/lib/loader_memory_budget.js');
     const adapter=await navigator.gpu?.requestAdapter();if(!adapter)throw Error('actual WebGPU adapter required');
@@ -113,6 +151,7 @@ try {
       const validation=await device.popErrorScope();return{backend,cases,deviceControl,validationError:validation?.message??null};
     }finally{device.destroy();}
   },report.fixtures));
+  }
   report.phase='native-process-stop';report.processObservation=await monitor.stop();monitor=null;await persist();
   // Force refusal below an already observed tiny-run charge; never provoke growth/OOM.
   const observed=report.processObservation.lastObservation.sampledAggregatePhysicalFootprintBytes;
@@ -128,8 +167,9 @@ finally{
   try{if(monitor)report.processObservation=await monitor.stop();}catch(error){report.cleanup.observerError=error.message;report.status='failed';}
   try{report.cleanup.browser=child?await stopOwnedBrowser(child):{status:'not-started',exitObserved:true};}catch(error){report.cleanup.browser={error:error.message};report.status='failed';}
   if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';
+  canonical?.close();
   if(profile && report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});
-  report.verdict=acceptLoaderMemoryWitness(report);if(!report.verdict.ok)report.status='failed';
+  report.verdict=canonicalMode?acceptStagedTensorWitness(report):acceptLoaderMemoryWitness(report);if(!report.verdict.ok)report.status='failed';
   report.terminalAt=new Date().toISOString();await persist();console.log(JSON.stringify({status:report.status,phase:report.phase,report:reportPath,errors:report.verdict.errors}));
   if(report.status!=='passed')process.exitCode=1;
 }

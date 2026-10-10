@@ -231,6 +231,8 @@ export async function createSf3dProducer({
   onWeightsProgress = null,
   memoryBudget = null,
   expectedWeightBytes = undefined,
+  weightLoadingMode = 'whole-file',
+  expectedSourceETag = undefined,
   commit = (typeof __COMMIT_HASH__ !== 'undefined' ? __COMMIT_HASH__ : 'dev'),
 } = {}) {
   if (memoryBudget && !isLoaderMemoryBudget(memoryBudget)) throw new TypeError('authenticated loader budget required');
@@ -247,7 +249,7 @@ export async function createSf3dProducer({
   let modelWeights, backend;
   try {
     backend = await describeBackend(gpu.adapter, dev);
-    modelWeights = weights ?? await loadWeights(dev, weightsUrl, onWeightsProgress || undefined, {memoryBudget, expectedWeightBytes});
+    modelWeights = weights ?? await loadWeights(dev, weightsUrl, onWeightsProgress || undefined, {memoryBudget, expectedWeightBytes, loadingMode:weightLoadingMode, expectedSourceETag});
   }
   catch (error) {
     try { retireBudgetDevice(); }
