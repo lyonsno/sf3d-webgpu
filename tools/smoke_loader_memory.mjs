@@ -15,12 +15,14 @@ import {acceptLoaderMemoryWitness,acceptStagedTensorWitness} from './loader_memo
 import {prepareCanonicalTensorSource,closeCanonicalSource} from './canonical_tensor_source.mjs';
 import {observeMacMemory} from './memory_admission.mjs';
 import {PATCH_TENSOR_NAMES,patchPhaseDemand,checkPatchOutput} from './patch_phase_reference.mjs';
+import {installForegroundAcquisition} from './foreground_guard_browser.js';
 const arg = name => {const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root = arg('--repo-root') ? path.resolve(arg('--repo-root')) : null;
 const reportPath = path.resolve(arg('--report') ?? path.join(os.tmpdir(),'sf3d-loader-memory-'+randomUUID()+'.json'));
 const patchMode=process.argv.includes('--canonical-patch-phase');
 const canonicalMode=patchMode||process.argv.includes('--canonical-tensor-unit');
 const sharedMode=process.argv.includes('--shared-allowance');
+const foregroundRoot=arg('--foreground-repo-root')?path.resolve(arg('--foreground-repo-root')):null;
 const report = {schema:'sf3d.loader-native-memory-witness.v0', status:'running', phase:'arguments', receiver:'mini-wake-and-bake-pit-boss',
   route:'sf3d-loader-native-refusal-synthetic-weights-no-inference.v0', reportPath, runId:randomUUID(),
   requested:{repoRoot:root, revision:arg('--expected-revision'), chrome:arg('--chrome'), processBudgetBytes:Number(arg('--process-budget-bytes'))},
@@ -33,13 +35,22 @@ if(canonicalMode){
 }
 if(patchMode){report.route='sf3d-canonical-patch-embedding.v0';report.claim='selected canonical learned patch projection on M2 Pro with explicit backing demand, live baseline, process stop and raw tensor replay; not full-model fit or production admission';
   Object.assign(report.requested,{inputPath:arg('--input'),inputSha256:arg('--expected-input-sha256')});}
+if(foregroundRoot){
+  report.requested.foreground={repoRoot:foregroundRoot,revision:arg('--expected-foreground-revision'),grid:Number(arg('--foreground-grid')),rendererCpuBytes:Number(arg('--renderer-cpu-bytes'))};
+  report.requested.totalBytes=Number(arg('--combined-budget-bytes'));
+  report.claim+='; actual ordinary flame and selected learned operation on its pre-bound device under one explicit allowance; explicit grid variant, not unchanged basin/full-model fit';
+}
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 if(sharedMode){report.requested.sharedAllowance=true;report.claim+='; shared explicit allowance contention on two actual owned devices with compute/readback, not host-wide coverage';}
 const persist = async () => writeJsonReportAtomic(reportPath,report);
-let browser, child, server, monitor, profile, canonical;
+let browser, child, server, monitor, profile, canonical,foregroundPage;
 try {
   await persist();
   if(sharedMode&&canonicalMode)throw Error('shared tiny diagnostic and canonical learned/unit routes must be invoked separately');
+  if(foregroundRoot&&(!patchMode||![32,48,64,96,128,136,140,160].includes(report.requested.foreground.grid)||
+    !Number.isSafeInteger(report.requested.foreground.rendererCpuBytes)||report.requested.foreground.rendererCpuBytes<1||!report.requested.foreground.revision||
+    !Number.isSafeInteger(report.requested.totalBytes)||report.requested.totalBytes<1))
+    throw Error('foreground requires canonical patch mode and explicit source revision, supported grid and CPU initialization allowance');
   if(!root || !arg('--chrome') || !arg('--expected-revision') || !Number.isSafeInteger(report.requested.processBudgetBytes) || report.requested.processBudgetBytes<1)
     throw Error('explicit --repo-root, --expected-revision, --chrome and --process-budget-bytes required');
   if(canonicalMode){
@@ -52,6 +63,40 @@ try {
   const git = args => execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
   report.source={revision:git(['rev-parse','HEAD']), clean:git(['status','--porcelain'])==='', repoRoot:root, hostname:os.hostname()};
   if(!report.source.clean || report.source.revision!==report.requested.revision)throw Error('clean exact requested source required');
+  const foregroundSources=new Map();
+  if(foregroundRoot){
+    const fgGit=args=>execFileSync('git',args,{cwd:foregroundRoot,encoding:'utf8'}).trim();
+    report.foreground={source:{repoRoot:foregroundRoot,revision:fgGit(['rev-parse','HEAD']),trackedClean:fgGit(['status','--porcelain','--untracked-files=no'])==='',
+      untracked:fgGit(['ls-files','--others','--exclude-standard']).split('\n').filter(Boolean)},servedSources:{},visibility:'headed-independent-browser'};
+    if(!report.foreground.source.trackedClean||report.foreground.source.revision!==report.requested.foreground.revision)throw Error('exact tracked foreground source required');
+    const html=fs.readFileSync(path.join(foregroundRoot,'sf3d-elfinblue.html'),'utf8');
+    if(html!==fgGit(['show',report.foreground.source.revision+':sf3d-elfinblue.html'])+'\n'&&html.trim()!==fgGit(['show',report.foreground.source.revision+':sf3d-elfinblue.html']))throw Error('foreground route capsule differs from commit');
+    const match=html.match(/content="0;url=([^"]+)"/);if(!match)throw Error('existing ordinary foreground route capsule required');
+    const route=new URL(match[1].replaceAll('&amp;','&'),'http://source.invalid');
+    report.foreground.originalRoute=route.href;report.foreground.originalGrid=Number(route.searchParams.get('volume_resolution'));
+    route.hash='';route.searchParams.delete('settings_preset');route.searchParams.delete('settings_preset_authority');
+    route.searchParams.set('volume_resolution',String(report.requested.foreground.grid));
+    route.searchParams.set('volume_quality_reason','mini-explicit-memory-guard-grid-variant');
+    report.foreground.route='/foreground/index.html'+route.search;
+    report.foreground.variant='same recorded ordinary source controls with explicitly changed grid; no accepted immutable basin identity claimed';
+    // Pin the source-level large initialization cliff before navigating. The
+    // observed source has a tall (2*g^3) domain, sixteen fluid floats/cell,
+    // paired front/quench/pressure arrays, sidecar and scalar/texture stores.
+    // 160 component bytes/cell covers those identified initialization stores;
+    // metadata, repeated transient arrays, padding and private backing remain
+    // observed, not certified by this lower initialization calculation.
+    const volumeSource=fs.readFileSync(path.join(foregroundRoot,'volume-core.js'),'utf8');
+    if(!volumeSource.includes('const FLUID_SLOTS_PER_CELL = 4;')||!volumeSource.includes('const VOLUME_VERTICAL_DOMAIN_EXTENT_MULTIPLIER = 2;'))throw Error('ordinary initialization source contract changed; recalculate before launch');
+    report.foreground.initialization={cells:2*report.requested.foreground.grid**3,knownComponentBytesPerCell:160,
+      requiredCpuBytes:2*report.requested.foreground.grid**3*160,requestedCpuBytes:report.requested.foreground.rendererCpuBytes,
+      meaning:'identified initial component stores only; not an upper bound on opaque/repeated browser backing'};
+    if(report.foreground.initialization.requiredCpuBytes>report.requested.foreground.rendererCpuBytes||
+      report.requested.foreground.rendererCpuBytes>=report.requested.cpuBytes)throw Error('foreground initialization CPU reservation insufficient before navigation');
+    report.foreground.preflight={host:observeMacMemory(),combinedExplicitBytes:report.requested.totalBytes};
+    if(report.foreground.preflight.host.source!=='live-macos'||report.foreground.preflight.host.observerErrors.length||
+      report.foreground.preflight.host.hostFreeBytes<report.requested.totalBytes)throw Error('current live host headroom insufficient for combined explicit foreground allowance before browser launch');
+    Object.assign(report.evidencePaths,{foregroundBefore:reportPath+'.foreground-before.png',foregroundAfter:reportPath+'.foreground-after.png'});
+  }
   report.browserExecutable=fs.realpathSync(arg('--chrome'));
   if(/\/Google Chrome\.app\//.test(report.browserExecutable))throw Error('independent browser required; installed GUI Chrome cannot run headlessly');
   report.phase='fixture-preparation';
@@ -77,6 +122,7 @@ try {
   const sources=new Map();
   const served=['src/lib/weights.js','src/lib/gpu.js','src/lib/loader_memory_budget.js','src/lib/flat_tensor_ranges.js'];
   if(sharedMode)served.push('tools/shared_allowance_browser.js');
+  if(foregroundRoot)served.push('tools/foreground_guard_browser.js');
   if(patchMode)served.push('src/lib/sf3d_backbone.js','src/lib/preprocess_core.js','tools/patch_phase_browser.js',
     ...['patch_embed_dinov2','layernorm_vit','attention','linear','linear_gelu','layerscale','activations'].map(n=>'src/shaders/'+n+'.wgsl'));
   for(const relative of served) {
@@ -87,6 +133,21 @@ try {
   report.servedSources=Object.fromEntries([...sources].map(([name,bytes])=>[name,digest(bytes)]));
   server=http.createServer((req,res)=>{
     const name=new URL(req.url,'http://localhost').pathname;
+    if(foregroundRoot&&name.startsWith('/foreground/')){
+      try{
+        const relative=decodeURIComponent(name.slice('/foreground/'.length)),file=path.resolve(foregroundRoot,relative);
+        if(path.relative(foregroundRoot,file).startsWith('..')||/\.(bin|glb|gltf)$/i.test(file))throw Error('unadmitted model/asset source refused by selected consumer host');
+        let data=foregroundSources.get(relative);
+        if(!data){
+          const committed=execFileSync('git',['show',report.foreground.source.revision+':'+relative],{cwd:foregroundRoot,stdio:['ignore','pipe','pipe']});
+          data=fs.readFileSync(file);
+          if(digest(data)!==digest(committed))throw Error('foreground served source differs from commit: '+relative);
+          foregroundSources.set(relative,data);report.foreground.servedSources[relative]=digest(data);
+        }
+        const ext=path.extname(file),type={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.png':'image/png','.svg':'image/svg+xml','.jpg':'image/jpeg','.json':'application/json'}[ext]??'application/octet-stream';
+        res.writeHead(200,{'Content-Type':type,'Content-Length':data.length,'Cache-Control':'no-store'}).end(data);return;
+      }catch(error){res.writeHead(503,{'Content-Type':'text/plain','Cache-Control':'no-store'}).end(error.message);return;}
+    }
     if(name==='/'){res.setHeader('content-type','text/html');res.end('<title>SF3D native loader refusal — no inference</title>');return;}
     if(name==='/favicon.ico'){res.writeHead(204).end();return;}
     if(name==='/canonical-weights.bin'&&canonical){canonical.serve(req,res);return;}
@@ -128,7 +189,7 @@ try {
   const allowed=['HOME','TMPDIR','PATH','LANG','LC_ALL','LC_CTYPE','__CF_USER_TEXT_ENCODING'];
   const env=Object.fromEntries(allowed.filter(name=>process.env[name]!=null).map(name=>[name,process.env[name]]));
   report.childEnvironment={policy:'positive-allowlist',names:Object.keys(env),valuesRecorded:false};
-  const args=await ownedBrowserArguments(puppeteer,{profile});report.browserArguments=args;
+  const args=await ownedBrowserArguments(puppeteer,{profile,headless:!foregroundRoot});report.browserArguments=args;
   if(report.memorySafety)throw Error('memory guard prevented browser launch');
   // Own the child synchronously, before awaiting its endpoint. A threshold
   // crossing during launch can stop this exact child, not a pending promise.
@@ -145,6 +206,27 @@ try {
   if(report.memorySafety)throw Error('memory guard intervened during browser launch');
   browser=await puppeteer.connect({browserWSEndpoint:endpoint});report.browserVersion=await browser.version();
   const page=await browser.newPage();await page.goto(report.url);
+  if(foregroundRoot){
+    await page.setViewport({width:1280,height:960});
+    await page.evaluateOnNewDocument(installForegroundAcquisition,{allowance:{cpuBytes:report.requested.cpuBytes,gpuBytes:report.requested.gpuBytes,totalBytes:report.requested.totalBytes},rendererCpuBytes:report.requested.foreground.rendererCpuBytes});
+    report.phase='ordinary-foreground-initialization';await persist();
+    foregroundPage=page;
+    report.foreground.console=[];report.foreground.pageErrors=[];
+    page.on('console',message=>report.foreground.console.push({type:message.type(),text:message.text()}));
+    page.on('pageerror',error=>report.foreground.pageErrors.push(error.message));
+    let failStartup;
+    const startupFailure=new Promise((_resolve,reject)=>{failStartup=error=>reject(Error('foreground startup exception: '+error.message));});
+    page.on('pageerror',failStartup);
+    try{
+      await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'networkidle0',timeout:0}),startupFailure]);
+      await Promise.race([page.waitForFunction(()=>window.__kaminosVolumePrototype?.debugState().active||window.__kaminosVolumePrototype?.debugState().error,{timeout:0}),startupFailure]);
+    }finally{page.off('pageerror',failStartup);}
+    const initial=await page.evaluate(()=>window.__kaminosVolumePrototype.debugState());
+    if(!initial.active||initial.error)throw Error('ordinary foreground initialization failed: '+initial.error);
+    await page.waitForFunction(()=>window.__kaminosVolumePrototype.debugState().frameCount>=3||window.__kaminosVolumePrototype.debugState().error,{timeout:0});
+    const settled=await page.evaluate(()=>window.__kaminosVolumePrototype.debugState());if(settled.error)throw Error('ordinary foreground frame failed: '+settled.error);
+    await page.screenshot({path:report.evidencePaths.foregroundBefore});
+  }
   report.phase='native-loader-refusal';await persist();
   if(canonicalMode){
     report.phase='native-canonical-tensor-unit';await persist();
@@ -158,9 +240,28 @@ try {
         throw Error('current successful owned-process baseline required before learned allocation');
       report.phaseProcessBaseline=baseline;
       await persist();
-      Object.assign(report,await page.evaluate(async config=>{const {runPatchPhase}=await import('/tools/patch_phase_browser.js');return runPatchPhase(config);},
+      if(foregroundRoot)report.foreground.before=await page.evaluate(async()=>{const p=window.__kaminosVolumePrototype,g=await window.__miniForegroundGuardPromise,s=p.debugState(),context=p.foregroundGpuContext();
+        return{active:s.active,error:s.error,renderer:context.renderer,grid:s.simGrid,frameCount:s.frameCount,simStepCount:s.simStepCount,submissions:g.queueSubmissions.length,budget:g.snapshot()};});
+      Object.assign(report,await page.evaluate(async config=>{const {runPatchPhase}=await import('/tools/patch_phase_browser.js');
+        const hostGpu=config.requested.foreground?(await window.__miniForegroundGuardPromise).forDevice(window.__kaminosVolumePrototype.foregroundGpuContext().device):null;
+        const result=await runPatchPhase(config,hostGpu);
+        if(hostGpu)result.foregroundSameDevice=window.__kaminosVolumePrototype.foregroundGpuContext().device===hostGpu.device;
+        if(hostGpu)result.foregroundDeviceIndex=hostGpu.deviceIndex;
+        return result;},
         {requested:report.requested,source:report.canonicalSource,demand:report.phaseDemand,input:report.inputArtifact}));
       Object.assign(report.patchPhase,checkPatchOutput({source:report.canonicalSource,inputPath:report.evidencePaths.phaseInput,outputPath:report.evidencePaths.phaseOutput}));
+      if(foregroundRoot){
+        report.foreground.sameDevice=report.foregroundSameDevice;
+        report.foreground.after=await page.evaluate(async()=>{const p=window.__kaminosVolumePrototype,g=await window.__miniForegroundGuardPromise,s=p.debugState(),context=p.foregroundGpuContext();
+          return{active:s.active,error:s.error,renderer:context.renderer,grid:s.simGrid,frameCount:s.frameCount,simStepCount:s.simStepCount,submissions:g.queueSubmissions.length,budget:g.snapshot()};});
+        await page.screenshot({path:report.evidencePaths.foregroundAfter});
+        report.patchPhase.hostBudgetAfterPhase=report.patchPhase.budget;
+        report.foreground.terminalBudget=await page.evaluate(async()=>{const guard=await window.__miniForegroundGuardPromise;window.__kaminosVolumePrototype.dispose();return guard.retire();});
+        // Preserve raw allocation identity separately from the terminal snapshot.
+        report.foreground.textureEvents=await page.evaluate(async()=>{const g=await window.__miniForegroundGuardPromise;return g.children.flatMap(row=>row.memoryBudget.events.filter(e=>e.kind==='host-texture-allocated'));});
+        report.patchPhase.budget=report.foreground.terminalBudget.children[report.foregroundDeviceIndex]?.budget;
+        foregroundPage=null;
+      }
     }else{
     Object.assign(report,await page.evaluate(async config=>{
       const {loadWeightTensorUnit}=await import('/src/lib/weights.js'),{createLoaderMemoryBudget}=await import('/src/lib/loader_memory_budget.js');
@@ -230,6 +331,7 @@ try {
 }catch(error){report.status='failed';report.error={name:error.name,message:error.message,stack:error.stack};}
 finally{
   report.cleanup={};
+  if(foregroundPage){try{report.foreground.failedCleanup=await foregroundPage.evaluate(async()=>{window.__kaminosVolumePrototype?.dispose();const g=await window.__miniForegroundGuardPromise;return g?.retire();});}catch(error){report.cleanup.foregroundError=error.message;}}
   try{if(monitor)report.processObservation=await monitor.stop();}catch(error){report.cleanup.observerError=error.message;report.status='failed';}
   try{report.cleanup.browser=child?await stopOwnedBrowser(child):{status:'not-started',exitObserved:true};}catch(error){report.cleanup.browser={error:error.message};report.status='failed';}
   if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';

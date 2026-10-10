@@ -75,6 +75,21 @@ export function acceptStagedTensorWitness(report){
     need(unit?.finiteCount===1328128&&unit?.nonzeroCount>0,'finite nonblank learned output');
     need(/^[a-f0-9]{64}$/.test(unit?.outputSha256??'')&&/^[a-f0-9]{64}$/.test(unit?.inputSha256??''),'preserved complete input/output digests');
     need(unit?.reference?.tested>=66&&unit.reference.mismatches===0,'independent sampled arithmetic reference');
+    if(report.requested.foreground){
+      const fg=report.foreground;
+      need(fg?.source?.revision===report.requested.foreground.revision&&fg.source.trackedClean===true,'exact tracked foreground source');
+      need(report.browserArguments?.every(value=>!value.startsWith('--headless'))&&fg?.visibility==='headed-independent-browser','visible independent foreground route');
+      need(fg?.sameDevice===true&&unit?.deviceOwnership==='pre-bound-caller-host','actual host device shared with learned operation');
+      need(fg?.before?.active===true&&fg.after?.active===true&&!fg.after?.error,'ordinary foreground remains active');
+      need(fg?.before?.renderer==='ordinary-volume'&&fg.after?.renderer==='ordinary-volume','actual ordinary renderer, not alternate/synthetic rendering');
+      need(fg?.before?.grid===report.requested.foreground.grid&&fg.after?.grid===report.requested.foreground.grid,'effective requested grid variant');
+      need(fg?.after?.frameCount>fg?.before?.frameCount&&fg?.after?.simStepCount>fg?.before?.simStepCount,'ordinary simulation and presentation advance through learned work');
+      need(fg?.after?.submissions>fg?.before?.submissions,'native host queue submits through learned work');
+      need(typeof report.evidencePaths?.foregroundBefore==='string'&&typeof report.evidencePaths?.foregroundAfter==='string','retained actual foreground frames');
+      need(fg?.terminalBudget?.root?.cpu?.liveBytes===0&&fg.terminalBudget.root.gpu.liveBytes===0,'shared host allowance retired');
+      need(fg?.terminalBudget?.children?.length>0&&fg.terminalBudget.children.every(row=>row.budget?.cpu?.liveBytes===0&&row.budget?.gpu?.liveBytes===0),'every guarded host device retired');
+      need(fg?.textureEvents?.length>0&&fg.textureEvents.every(row=>row.bytes>0&&row.effective?.format===row.descriptor?.format),'native texture reservations and effective identity retained');
+    }
   }else{
     need(Array.isArray(unit?.readbacks)&&unit.readbacks.length===source?.units?.length&&unit.readbacks.length>0,'complete native readbacks');
     for(const row of source?.units??[]){

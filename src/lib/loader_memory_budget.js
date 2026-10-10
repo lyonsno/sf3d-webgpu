@@ -11,14 +11,16 @@ const bytes = (value, name) => {
 };
 export const isLoaderMemoryBudget = value => authenticated.has(value);
 
-export function createLoaderMemoryBudget({cpuBytes, gpuBytes, parentBudget} = {}) {
+export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuBytes+gpuBytes, parentBudget} = {}) {
   bytes(cpuBytes, 'cpuBytes'); bytes(gpuBytes, 'gpuBytes');
+  bytes(totalBytes,'totalBytes');
   if (parentBudget !== undefined && !authenticated.has(parentBudget)) throw new TypeError('authenticated parent loader budget required');
   const parent = parentBudget === undefined ? null : controllers.get(parentBudget);
   parent?.assertActive();
   const cpu = {liveBytes:0, peakLiveBytes:0, maxBytes:cpuBytes}, gpu = {liveBytes:0, peakLiveBytes:0, maxBytes:gpuBytes};
+  let peakCombinedBytes=0;
   const events = [], buffers = new Map(), unresolvedAllocations = new Set();
-  let phase = 'new', refusal = null, device, originalCreate, originalDestroy, wrappedCreate, wrappedDestroy, restored = false;
+  let phase = 'new', refusal = null, device, originalCreate, originalTexture, originalDestroy, wrappedCreate, wrappedTexture, wrappedDestroy, restored = false;
   const emit = (kind, details) => events.push({kind, phase, atMs:performance.now(), ...details});
   const refuse = (ledger, size, label, scope) => {
     bytes(size, 'requestedBytes');
@@ -45,10 +47,12 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, parentBudget} = {}
     assertActive();
     const ledger = scope === 'cpu-loader' ? cpu : gpu;
     refuse(ledger, size, label, scope);
+    refuse({liveBytes:cpu.liveBytes+gpu.liveBytes,maxBytes:totalBytes},size,label,'unified-explicit');
     // No allocator runs until every ancestor has charged the same resource.
     // These are nested views of one allowance, not additive RAM discovery.
     const parentLease = parent?.reserve(scope, size, label);
     const lease = charge(ledger, size, label, scope);
+    peakCombinedBytes=Math.max(peakCombinedBytes,cpu.liveBytes+gpu.liveBytes);
     let released = false;
     return Object.freeze({release() {
       if (released) return; released = true;
@@ -61,14 +65,23 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, parentBudget} = {}
     reserveCpu(size, label) {
       return reserve('cpu-loader', size, label);
     },
+    // A host may reserve an explicitly sized non-buffer GPU store before its
+    // own allocator. It owns retirement of this lease; this is not automatic
+    // texture discovery or driver-backing measurement.
+    reserveGpu(size, label) {
+      return reserve('gpu-buffer', size, label);
+    },
     assertDevice(value) {
-      if (!device || restored || value !== device || device.createBuffer !== wrappedCreate || device.destroy !== wrappedDestroy)
+      if (!device || restored || value !== device || device.createBuffer !== wrappedCreate || device.destroy !== wrappedDestroy || (wrappedTexture && device.createTexture!==wrappedTexture))
         throw new Error('loader budget must be installed on this exact owned device');
     },
-    bindOwnedDevice(value) {
+    bindOwnedDevice(value,{textureBytes=null}={}) {
       if (device || restored || devices.has(value)) throw new Error('device already has a loader budget');
       if (typeof value?.createBuffer !== 'function' || typeof value.destroy !== 'function') throw new TypeError('owned device createBuffer/destroy required');
+      if(textureBytes!==null&&(typeof textureBytes!=='function'||typeof value.createTexture!=='function'))throw new TypeError('host texture estimator and owned allocator required');
+      wrappedTexture=null;
       originalCreate = value.createBuffer; originalDestroy = value.destroy;
+      originalTexture=value.createTexture;
       wrappedCreate = function(descriptor) {
         if (this !== value) throw new Error('budgeted allocator requires the exact owned device');
         // Pin the authority-bearing size once, including accessor-bearing input.
@@ -107,6 +120,29 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, parentBudget} = {}
         }
         return buffer;
       };
+      if(textureBytes)wrappedTexture=function(descriptor){
+        if(this!==value)throw Error('budgeted texture allocator requires the exact owned device');
+        const plan=textureBytes(descriptor),size=bytes(plan?.bytes,'explicit GPUTexture bytes');
+        if(!plan?.descriptor||typeof plan.descriptor!=='object')throw Error('pinned host texture descriptor required');
+        const label=plan.descriptor.label??'',lease=reserve('gpu-buffer',size,label);
+        let texture;
+        try{texture=Reflect.apply(originalTexture,value,[plan.descriptor]);}catch(error){lease.release();throw error;}
+        if(buffers.has(texture)){lease.release();return texture;}
+        const destroy=texture?.destroy;
+        if(typeof destroy!=='function'){unresolvedAllocations.add(lease);throw Error('GPUTexture retirement contract unavailable');}
+        buffers.set(texture,{lease,destroy});
+        try{
+          const wrapped=function(...args){const result=Reflect.apply(destroy,this,args);buffers.get(this)?.lease.release();return result;};
+          texture.destroy=wrapped;if(texture.destroy!==wrapped)throw Error('GPUTexture retirement hook installation failed');
+        }catch(error){
+          try{Reflect.apply(destroy,texture,[]);lease.release();buffers.delete(texture);}
+          catch(cleanupError){throw new AggregateError([error,cleanupError],'GPUTexture hook and cleanup failed',{cause:error});}
+          throw error;
+        }
+        emit('host-texture-allocated',{label,bytes:size,descriptor:plan.descriptor,
+          effective:{width:texture.width,height:texture.height,depthOrArrayLayers:texture.depthOrArrayLayers,format:texture.format,mipLevelCount:texture.mipLevelCount,sampleCount:texture.sampleCount}});
+        return texture;
+      };
       wrappedDestroy = function(...args) {
         const result = Reflect.apply(originalDestroy, this, args);
         if (this === value) {
@@ -117,30 +153,34 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, parentBudget} = {}
         return result;
       };
       try {
-        value.createBuffer = wrappedCreate; value.destroy = wrappedDestroy;
-        if (value.createBuffer !== wrappedCreate || value.destroy !== wrappedDestroy) throw new Error('device budget installation failed');
-      } catch (error) { value.createBuffer = originalCreate; value.destroy = originalDestroy; throw error; }
+        value.createBuffer = wrappedCreate; value.destroy = wrappedDestroy;if(wrappedTexture)value.createTexture=wrappedTexture;
+        if (value.createBuffer !== wrappedCreate || value.destroy !== wrappedDestroy || (wrappedTexture&&value.createTexture!==wrappedTexture)) throw new Error('device budget installation failed');
+      } catch (error) { value.createBuffer = originalCreate; value.destroy = originalDestroy;if(wrappedTexture)value.createTexture=originalTexture;throw error; }
       device = value; devices.add(value); return budget;
     },
     snapshot() {
       return {schema:'sf3d.loader-memory-budget.v0', phase, refusal,
         accounting:'own and descendant explicit reservations; nested ledgers are not additive physical RAM',
-        parentAllowance:parent ? {cpuBytes:parent.cpuBytes,gpuBytes:parent.gpuBytes} : null,
+        parentAllowance:parent ? {cpuBytes:parent.cpuBytes,gpuBytes:parent.gpuBytes,totalBytes:parent.totalBytes} : null,
+        total:{liveBytes:cpu.liveBytes+gpu.liveBytes,peakLiveBytes:peakCombinedBytes,maxBytes:totalBytes,physicalMemoryMeasured:false,
+          meaning:'combined explicit CPU/GPU stores, not total unified physical memory'},
         cpu:{...cpu, physicalMemoryMeasured:false, meaning:'explicit loader reservations; retirement is not proven GC'},
-        gpu:{...gpu, physicalMemoryMeasured:false, meaning:'API-visible buffers; destruction request is not reclaimed physical backing'},
-        excludes:['JS/parse metadata', 'released JS backing before GC', 'network/browser/driver-private backing', 'textures', 'other processes']};
+        gpu:{...gpu, physicalMemoryMeasured:false, meaning:wrappedTexture?'API-visible buffers and declared logical texture stores; not reclaimed physical backing':'API-visible buffers; destruction request is not reclaimed physical backing'},
+        hostTextures:wrappedTexture?'explicit caller-estimated logical texture stores; not physical backing':'not tracked',
+        excludes:['JS/parse metadata', 'released JS backing before GC', 'network/browser/driver-private backing', ...(wrappedTexture?['texture padding/private backing']:['textures']), 'other processes']};
     },
     restore() {
       if (restored) return;
       if (cpu.liveBytes || gpu.liveBytes) throw new Error('retire loader allocations before restoring the budget');
       if (device) {
         device.createBuffer = originalCreate; device.destroy = originalDestroy;
+        if(wrappedTexture)device.createTexture=originalTexture;
         for (const [buffer, row] of buffers) buffer.destroy = row.destroy;
         devices.delete(device); buffers.clear();
       }
       restored = true;
     },
   });
-  controllers.set(budget,{assertActive,reserve,cpuBytes,gpuBytes});
+  controllers.set(budget,{assertActive,reserve,cpuBytes,gpuBytes,totalBytes});
   authenticated.add(budget); return budget;
 }

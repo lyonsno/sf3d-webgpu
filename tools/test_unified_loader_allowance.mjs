@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {createLoaderMemoryBudget} from '../src/lib/loader_memory_budget.js';
+import {fakeWeightDevice} from './fixtures/weight_resource_fixture.mjs';
+const root=createLoaderMemoryBudget({cpuBytes:100,gpuBytes:100,totalBytes:150});
+const model=createLoaderMemoryBudget({cpuBytes:100,gpuBytes:100,parentBudget:root});
+const device=fakeWeightDevice();model.bindOwnedDevice(device);
+const input=model.reserveCpu(100,'host-input');
+assert.throws(()=>device.createBuffer({size:60}),/before allocation/,'CPU and GPU cannot each spend the same unified headroom');
+assert.equal(device.buffers.length,0);
+const b=device.createBuffer({size:50});assert.equal(root.snapshot().total.liveBytes,150);
+input.release();b.destroy();assert.equal(root.snapshot().total.liveBytes,0);
+assert.equal(root.snapshot().total.peakLiveBytes,150);model.restore();root.restore();
+console.log('CPU and GPU stores share the combined explicit ceiling before allocation.');

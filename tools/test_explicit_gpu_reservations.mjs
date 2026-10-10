@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {createLoaderMemoryBudget} from '../src/lib/loader_memory_budget.js';
+import {fakeWeightDevice} from './fixtures/weight_resource_fixture.mjs';
+const root=createLoaderMemoryBudget({cpuBytes:100,gpuBytes:100});
+const renderer=createLoaderMemoryBudget({cpuBytes:100,gpuBytes:100,parentBudget:root});
+assert.equal(typeof renderer.reserveGpu,'function','host texture reservations must share the actual GPU allowance, not disappear or be mislabelled CPU');
+const device=fakeWeightDevice();renderer.bindOwnedDevice(device);
+const texture=renderer.reserveGpu(70,'ordinary-renderer-texture');
+assert.equal(root.snapshot().gpu.liveBytes,70);
+assert.throws(()=>device.createBuffer({size:31}),/before allocation/);
+assert.equal(device.buffers.length,0);
+const b=device.createBuffer({size:30});b.destroy();
+assert.throws(()=>renderer.restore(),/retire/);
+texture.release();texture.release();renderer.restore();root.restore();
+console.log('Explicit host GPU stores and actual buffers consume one authenticated allowance before allocation.');

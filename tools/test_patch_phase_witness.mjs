@@ -17,6 +17,29 @@ const valid=()=>({status:'passed',route:'sf3d-canonical-patch-embedding.v0',runI
     lastObservation:{status:'observed',runId:runId+'-refusal',rootPid,effectiveRoute:'darwin-libproc-proc_pid_rusage/RUSAGE_INFO_V4',sampledAggregatePhysicalFootprintBytes:100,processes:[{pid:rootPid},{pid:ownedPid}]}},
   cleanup:{browser:{exitObserved:true,ownedPid},server:'closed'}});
 assert.equal(acceptStagedTensorWitness(valid()).ok,true,'actual patch-phase receipt must have its own learned-operation acceptance, not weight-upload acceptance');
+{
+  const omitted=valid();omitted.requested.foreground={revision:'c'.repeat(40),grid:32};
+  assert.equal(acceptStagedTensorWitness(omitted).ok,false,'requested actual foreground cannot pass on a learned-only report');
+}
+{
+  const r=valid();r.requested.foreground={revision:'c'.repeat(40),grid:32};r.browserArguments=['--window-size=1280,960'];
+  const state={active:true,error:null,renderer:'ordinary-volume',grid:32,frameCount:2,simStepCount:2,submissions:2};
+  const budget={cpu:{liveBytes:0},gpu:{liveBytes:0}};
+  r.patchPhase.deviceOwnership='pre-bound-caller-host';
+  r.evidencePaths={foregroundBefore:'/explicit/before.png',foregroundAfter:'/explicit/after.png'};
+  r.foreground={source:{revision:r.requested.foreground.revision,trackedClean:true},sameDevice:true,visibility:'headed-independent-browser',
+    before:state,after:{...state,frameCount:4,simStepCount:4,submissions:4},terminalBudget:{root:budget,children:[{budget}]},
+    textureEvents:[{bytes:16,descriptor:{format:'r32float'},effective:{format:'r32float'}}]};
+  assert.equal(acceptStagedTensorWitness(r).ok,true,'actual foreground must have its own positive acceptance path');
+  for(const [label,mutate]of [
+    ['offscreen',x=>x.browserArguments.push('--headless=new')],['wrong source',x=>x.foreground.source.revision='d'.repeat(40)],
+    ['second device',x=>x.foreground.sameDevice=false],['rAF-only',x=>x.foreground.after.simStepCount=2],
+    ['not presented',x=>x.foreground.after.frameCount=2],['no submits',x=>x.foreground.after.submissions=2],
+    ['fallback renderer',x=>x.foreground.after.renderer='alternate-volume'],['silent smaller grid',x=>x.foreground.after.grid=16],
+    ['no frame',x=>delete x.evidencePaths.foregroundAfter],['no textures',x=>x.foreground.textureEvents=[]],
+    ['live host backing',x=>x.foreground.terminalBudget.root.gpu.liveBytes=1],
+  ]){const changed=structuredClone(r);mutate(changed);assert.equal(acceptStagedTensorWitness(changed).ok,false,label);}
+}
 for(const [name,mutate]of [
   ['fallback',r=>r.backend.isFallbackAdapter=true],['wrong route',r=>r.route='full-model-fit'],
   ['wrong input',r=>r.inputArtifact.sha256='c'.repeat(64)],['no live admission',r=>r.phaseAdmission.host.source='replay'],

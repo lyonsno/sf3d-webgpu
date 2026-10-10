@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {createLoaderMemoryBudget} from '../src/lib/loader_memory_budget.js';
+let allocations=0,destroyed=0,failDestroy=false;
+const device={createBuffer(){throw Error('not used');},destroy(){destroyed++;},createTexture(descriptor){allocations++;return{destroy(){if(failDestroy)throw Error('injected texture retirement failure');},descriptor};}};
+const budget=createLoaderMemoryBudget({cpuBytes:0,gpuBytes:16});
+budget.bindOwnedDevice(device,{textureBytes:d=>({bytes:d.size[0]*d.size[1]*4,descriptor:d})});
+const first=device.createTexture({size:[2,2],format:'rgba8unorm'});
+assert.equal(budget.snapshot().gpu.liveBytes,16,'ordinary texture allocation must charge the same allowance as model buffers');
+assert.throws(()=>device.createTexture({size:[1,1],format:'rgba8unorm'}),/before allocation/);assert.equal(allocations,1);
+failDestroy=true;assert.throws(()=>first.destroy(),/retirement failure/);assert.equal(budget.snapshot().gpu.liveBytes,16);
+device.destroy();assert.equal(destroyed,1);assert.equal(budget.snapshot().gpu.liveBytes,0);budget.restore();
+console.log('Host texture allocation refuses before allocator and failed destruction cannot restore capacity.');

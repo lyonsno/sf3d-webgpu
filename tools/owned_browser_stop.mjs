@@ -23,10 +23,12 @@ export async function stopOwnedBrowser(child, {graceMs = 10000} = {}) {
   } finally { clearTimeout(timer); child.removeListener('exit',onExit); }
 }
 
-export async function ownedBrowserArguments(puppeteer,{profile}) {
-  const args=await puppeteer.defaultArgs({headless:true,userDataDir:profile,
+export async function ownedBrowserArguments(puppeteer,{profile,headless=true}) {
+  if(typeof headless!=='boolean')throw Error('explicit boolean browser visibility required');
+  const args=await puppeteer.defaultArgs({headless,userDataDir:profile,
     args:['--remote-debugging-port=0','--enable-unsafe-webgpu','--use-angle=metal','--no-first-run','--use-mock-keychain','--password-store=basic']});
-  if(!Array.isArray(args)||args.some(value=>typeof value!=='string')||!args.includes('--headless=new')||!args.includes('--user-data-dir='+profile))
+  if(!Array.isArray(args)||args.some(value=>typeof value!=='string')||
+    (headless?!args.includes('--headless=new'):args.some(value=>value.startsWith('--headless')))||!args.includes('--user-data-dir='+profile))
     throw Error('resolved isolated headless browser arguments required before spawn');
   return args;
 }
