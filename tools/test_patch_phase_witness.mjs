@@ -24,11 +24,20 @@ assert.equal(acceptStagedTensorWitness(valid()).ok,true,'actual patch-phase rece
 {
   const r=valid();r.requested.foreground={revision:'c'.repeat(40),grid:32};r.browserArguments=['--window-size=1280,960'];
   const state={active:true,error:null,renderer:'ordinary-volume',grid:32,frameCount:2,simStepCount:2,submissions:2};
-  const budget={cpu:{liveBytes:0},gpu:{liveBytes:0}};
+  r.requested.totalBytes=1152;
+  const allowance={cpuBytes:1024,gpuBytes:128,totalBytes:1152};
+  const budget={cpu:{maxBytes:1024,liveBytes:0},gpu:{maxBytes:128,liveBytes:0},total:{maxBytes:1152,liveBytes:0}};
+  const child={...structuredClone(budget),parentAllowance:allowance};
+  Object.assign(r.patchPhase.budget,{total:{maxBytes:1152,liveBytes:0},parentAllowance:allowance});
+  r.patchPhase.hostBaseline=structuredClone(child);
+  r.patchPhase.hostBudgetAfterPhase=structuredClone(child);
   r.patchPhase.deviceOwnership='pre-bound-caller-host';
   r.evidencePaths={foregroundBefore:'/explicit/before.png',foregroundAfter:'/explicit/after.png'};
   r.foreground={source:{revision:r.requested.foreground.revision,trackedClean:true},sameDevice:true,visibility:'headed-independent-browser',
-    before:state,after:{...state,frameCount:4,simStepCount:4,submissions:4},terminalBudget:{root:budget,children:[{budget}]},
+    progressInterval:'before-selected-operation-to-immediate-operation-return',
+    before:{...state,budget:{root:structuredClone(budget),children:[{budget:structuredClone(child)}]}},
+    after:{...state,frameCount:4,simStepCount:4,submissions:4,budget:{root:structuredClone(budget),children:[{budget:structuredClone(child)}]}},
+    terminalBudget:{root:budget,children:[{budget:child}]},
     textureEvents:[{bytes:16,descriptor:{format:'r32float'},effective:{format:'r32float'}}]};
   assert.equal(acceptStagedTensorWitness(r).ok,true,'actual foreground must have its own positive acceptance path');
   for(const [label,mutate]of [
@@ -38,6 +47,15 @@ assert.equal(acceptStagedTensorWitness(valid()).ok,true,'actual patch-phase rece
     ['fallback renderer',x=>x.foreground.after.renderer='alternate-volume'],['silent smaller grid',x=>x.foreground.after.grid=16],
     ['no frame',x=>delete x.evidencePaths.foregroundAfter],['no textures',x=>x.foreground.textureEvents=[]],
     ['live host backing',x=>x.foreground.terminalBudget.root.gpu.liveBytes=1],
+    ['missing total',x=>delete x.patchPhase.budget.total],
+    ['wrong child total',x=>x.patchPhase.budget.total.maxBytes=999999],
+    ['wrong parent total',x=>x.patchPhase.budget.parentAllowance.totalBytes=999999],
+    ['missing root total',x=>delete x.foreground.terminalBudget.root.total],
+    ['wrong root total',x=>x.foreground.terminalBudget.root.total.maxBytes=999999],
+    ['wrong baseline total',x=>x.patchPhase.hostBaseline.total.maxBytes=999999],
+    ['wrong active total',x=>x.foreground.after.budget.root.total.maxBytes=999999],
+    ['later progress interval',x=>x.foreground.progressInterval='after-reference'],
+    ['missing host parent',x=>delete x.patchPhase.hostBaseline.parentAllowance],
   ]){const changed=structuredClone(r);mutate(changed);assert.equal(acceptStagedTensorWitness(changed).ok,false,label);}
 }
 for(const [name,mutate]of [

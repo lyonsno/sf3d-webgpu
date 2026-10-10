@@ -71,7 +71,7 @@ try {
     if(!report.foreground.source.trackedClean||report.foreground.source.revision!==report.requested.foreground.revision)throw Error('exact tracked foreground source required');
     const html=fs.readFileSync(path.join(foregroundRoot,'sf3d-elfinblue.html'),'utf8');
     if(html!==fgGit(['show',report.foreground.source.revision+':sf3d-elfinblue.html'])+'\n'&&html.trim()!==fgGit(['show',report.foreground.source.revision+':sf3d-elfinblue.html']))throw Error('foreground route capsule differs from commit');
-    const match=html.match(/content="0;url=([^"]+)"/);if(!match)throw Error('existing ordinary foreground route capsule required');
+    const match=html.match(/content="0;\s*url=([^"]+)"/);if(!match)throw Error('existing ordinary foreground route capsule required');
     const route=new URL(match[1].replaceAll('&amp;','&'),'http://source.invalid');
     report.foreground.originalRoute=route.href;report.foreground.originalGrid=Number(route.searchParams.get('volume_resolution'));
     route.hash='';route.searchParams.delete('settings_preset');route.searchParams.delete('settings_preset_authority');
@@ -249,11 +249,13 @@ try {
         if(hostGpu)result.foregroundDeviceIndex=hostGpu.deviceIndex;
         return result;},
         {requested:report.requested,source:report.canonicalSource,demand:report.phaseDemand,input:report.inputArtifact}));
-      Object.assign(report.patchPhase,checkPatchOutput({source:report.canonicalSource,inputPath:report.evidencePaths.phaseInput,outputPath:report.evidencePaths.phaseOutput}));
       if(foregroundRoot){
         report.foreground.sameDevice=report.foregroundSameDevice;
         report.foreground.after=await page.evaluate(async()=>{const p=window.__kaminosVolumePrototype,g=await window.__miniForegroundGuardPromise,s=p.debugState(),context=p.foregroundGpuContext();
           return{active:s.active,error:s.error,renderer:context.renderer,grid:s.simGrid,frameCount:s.frameCount,simStepCount:s.simStepCount,submissions:g.queueSubmissions.length,budget:g.snapshot()};});
+        // Capture progress at phase completion, before the CPU reference can
+        // create a later idle interval that masquerades as concurrent work.
+        report.foreground.progressInterval='before-selected-operation-to-immediate-operation-return';
         await page.screenshot({path:report.evidencePaths.foregroundAfter});
         report.patchPhase.hostBudgetAfterPhase=report.patchPhase.budget;
         report.foreground.terminalBudget=await page.evaluate(async()=>{const guard=await window.__miniForegroundGuardPromise;window.__kaminosVolumePrototype.dispose();return guard.retire();});
@@ -262,6 +264,7 @@ try {
         report.patchPhase.budget=report.foreground.terminalBudget.children[report.foregroundDeviceIndex]?.budget;
         foregroundPage=null;
       }
+      Object.assign(report.patchPhase,checkPatchOutput({source:report.canonicalSource,inputPath:report.evidencePaths.phaseInput,outputPath:report.evidencePaths.phaseOutput}));
     }else{
     Object.assign(report,await page.evaluate(async config=>{
       const {loadWeightTensorUnit}=await import('/src/lib/weights.js'),{createLoaderMemoryBudget}=await import('/src/lib/loader_memory_budget.js');

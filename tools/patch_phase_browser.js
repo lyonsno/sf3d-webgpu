@@ -10,7 +10,11 @@ export async function runPatchPhase(config,hostGpu=null){
     if(!isLoaderMemoryBudget(hostGpu.memoryBudget))throw Error('authenticated pre-bound host budget required');
     hostGpu.memoryBudget.assertDevice(hostGpu.device);
     const snapshot=hostGpu.memoryBudget.snapshot();
-    if(snapshot.cpu.maxBytes!==config.requested?.cpuBytes||snapshot.gpu.maxBytes!==config.requested?.gpuBytes)
+    const requested=config.requested,total=requested?.totalBytes??requested?.cpuBytes+requested?.gpuBytes;
+    const parent=snapshot.parentAllowance;
+    if(snapshot.cpu.maxBytes!==requested?.cpuBytes||snapshot.gpu.maxBytes!==requested?.gpuBytes||snapshot.total?.maxBytes!==total||
+      (parent&&(parent.cpuBytes!==requested?.cpuBytes||parent.gpuBytes!==requested?.gpuBytes||parent.totalBytes!==total))||
+      (requested?.foreground&&!parent))
       throw Error('effective host allowance differs from requested phase configuration');
   }
   const admissionResponse=await fetch('/phase-admission',{cache:'no-store'});

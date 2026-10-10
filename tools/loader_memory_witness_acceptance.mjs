@@ -85,10 +85,21 @@ export function acceptStagedTensorWitness(report){
       need(fg?.before?.grid===report.requested.foreground.grid&&fg.after?.grid===report.requested.foreground.grid,'effective requested grid variant');
       need(fg?.after?.frameCount>fg?.before?.frameCount&&fg?.after?.simStepCount>fg?.before?.simStepCount,'ordinary simulation and presentation advance through learned work');
       need(fg?.after?.submissions>fg?.before?.submissions,'native host queue submits through learned work');
+      need(fg?.progressInterval==='before-selected-operation-to-immediate-operation-return','foreground progress excludes later CPU-reference interval');
       need(typeof report.evidencePaths?.foregroundBefore==='string'&&typeof report.evidencePaths?.foregroundAfter==='string','retained actual foreground frames');
       need(fg?.terminalBudget?.root?.cpu?.liveBytes===0&&fg.terminalBudget.root.gpu.liveBytes===0,'shared host allowance retired');
       need(fg?.terminalBudget?.children?.length>0&&fg.terminalBudget.children.every(row=>row.budget?.cpu?.liveBytes===0&&row.budget?.gpu?.liveBytes===0),'every guarded host device retired');
       need(fg?.textureEvents?.length>0&&fg.textureEvents.every(row=>row.bytes>0&&row.effective?.format===row.descriptor?.format),'native texture reservations and effective identity retained');
+      const requested=report.requested;
+      const sameAllowance=(budget,parent)=>budget?.cpu?.maxBytes===requested.cpuBytes&&budget?.gpu?.maxBytes===requested.gpuBytes&&
+        budget?.total?.maxBytes===requested.totalBytes&&Number.isSafeInteger(requested.totalBytes)&&requested.totalBytes>0&&
+        (parent?budget?.parentAllowance?.cpuBytes===requested.cpuBytes&&budget.parentAllowance.gpuBytes===requested.gpuBytes&&
+          budget.parentAllowance.totalBytes===requested.totalBytes:budget?.parentAllowance==null);
+      for(const [label,snapshot]of [['before',fg?.before?.budget],['after',fg?.after?.budget],['terminal',fg?.terminalBudget]]){
+        need(sameAllowance(snapshot?.root,false),'exact combined root allowance '+label);
+        need(snapshot?.children?.length>0&&snapshot.children.every(row=>sameAllowance(row.budget,true)),'exact combined child/parent allowances '+label);
+      }
+      need(sameAllowance(unit?.hostBaseline,true)&&sameAllowance(unit?.hostBudgetAfterPhase,true)&&sameAllowance(unit?.budget,true),'exact combined phase host allowances');
     }
   }else{
     need(Array.isArray(unit?.readbacks)&&unit.readbacks.length===source?.units?.length&&unit.readbacks.length>0,'complete native readbacks');
