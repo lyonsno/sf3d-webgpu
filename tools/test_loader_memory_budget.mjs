@@ -92,6 +92,20 @@ const budgetFor = (cpuBytes, gpuBytes = 1_000_000) => api.createLoaderMemoryBudg
   await assert.rejects(loadWeights(device, 'fixture.bin', null, {memoryBudget:budget}), /expectedWeightBytes/);
 }
 console.log('SF3D source/copy/conversion reservations and device refusal precede allocation; partial and lazy ownership clean up without physical-memory claims.');
+for(const lazy of [false,true]){
+  const device=fakeWeightDevice(),budget=budgetFor(3*fixture.bytes.length),restore=installWeightFetch(fixture);
+  let failMap=!lazy;const create=device.createBuffer;
+  device.createBuffer=function(desc){const buffer=create.call(device,desc);if(failMap)buffer.getMappedRange=()=>{throw Error('injected mapped upload failure');};return buffer;};
+  budget.bindOwnedDevice(device);let weights;
+  try{
+    if(lazy)weights=await loadWeights(device,'fixture.bin',null,{memoryBudget:budget,expectedWeightBytes:fixture.bytes.length});
+    const before=budget.snapshot().gpu.liveBytes;failMap=true;
+    if(lazy)assert.throws(()=>weights._rawGet('image_estimator.model.visual.ln_pre.weight'),/mapped upload failure/);
+    else await assert.rejects(loadWeights(device,'fixture.bin',null,{memoryBudget:budget,expectedWeightBytes:fixture.bytes.length}),/mapped upload failure/);
+    assert.equal(device.buffers.at(-1).destroyed,1,'successful allocation must retire after failed mapped upload');
+    assert.equal(budget.snapshot().gpu.liveBytes,before,'failed eager/lazy upload cannot strand a charge');
+  }finally{restore();weights?.dispose();device.destroy();budget.restore();}
+}
 {
   const budget=budgetFor(8,8);let destroyed=0;
   const buffer={size:4};Object.defineProperty(buffer,'destroy',{value(){destroyed++;},writable:false});

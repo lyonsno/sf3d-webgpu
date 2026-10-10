@@ -120,9 +120,16 @@ export function createStorageBuffer(device, data, usage = 0, label = '') {
     mappedAtCreation: true,
     label: label || `storage_${data.byteLength}`,
   });
-  new (data.constructor)(buffer.getMappedRange()).set(data);
-  buffer.unmap();
-  return recordBufferAllocation(buffer, size, label);
+  try {
+    new (data.constructor)(buffer.getMappedRange()).set(data);
+    buffer.unmap();
+    return recordBufferAllocation(buffer, size, label);
+  } catch (error) {
+    // Allocation succeeded but no caller can own the buffer until return.
+    try { buffer.destroy(); }
+    catch (cleanupError) { throw new AggregateError([error,cleanupError],'storage buffer initialization and cleanup failed',{cause:error}); }
+    throw error;
+  }
 }
 
 /**

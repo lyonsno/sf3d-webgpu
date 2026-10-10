@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import puppeteer from 'puppeteer-core';
+import {ownedBrowserArguments} from './owned_browser_stop.mjs';
+const profile='/explicit-test-profile-no-browser-launched';
+const args=await ownedBrowserArguments(puppeteer,{profile});
+assert.ok(Array.isArray(args));assert.ok(args.includes('--headless=new'));assert.ok(args.includes('--user-data-dir='+profile));
+assert.ok(args.includes('--remote-debugging-port=0'));assert.ok(args.includes('--use-angle=metal'));
+await assert.rejects(ownedBrowserArguments({defaultArgs:async()=>({})},{profile}),/resolved isolated/);
+await assert.rejects(ownedBrowserArguments({defaultArgs:async()=>['--headless=new']},{profile}),/resolved isolated/);
+console.log('Installed Puppeteer async argument contract resolves to explicit headless/profile/native route arguments before any child spawn.');

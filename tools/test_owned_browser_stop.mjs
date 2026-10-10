@@ -11,4 +11,8 @@ const noExit = new EventEmitter();Object.assign(noExit,{pid:43,exitCode:null,sig
 await assert.rejects(stopOwnedBrowser(noExit,{graceMs:5}),/has not exited/,'signal request alone is not successful cleanup');
 assert.equal(noExit.listenerCount('exit'),0);
 await assert.rejects(stopOwnedBrowser(null),/exact owned/);
+const stubborn=new EventEmitter();let sent=[];
+Object.assign(stubborn,{pid:44,exitCode:null,signalCode:null,kill(signal){sent.push(signal);if(signal==='SIGKILL')queueMicrotask(()=>stubborn.emit('exit',null,signal));return true;}});
+const stopped=await stopOwnedBrowser(stubborn,{graceMs:5});
+assert.deepEqual(sent,['SIGTERM','SIGKILL']);assert.equal(stopped.exitObserved,true);assert.equal(stopped.exitSignal,'SIGKILL');
 console.log('Actual safety callback stops the exact owned child despite report failure; signal-only and missing custody cannot claim exit.');

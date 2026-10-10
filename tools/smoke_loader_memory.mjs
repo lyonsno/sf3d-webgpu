@@ -9,7 +9,7 @@ import {execFileSync, spawn} from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 import {weightFixture} from './fixtures/weight_resource_fixture.mjs';
 import {startProcessMemory} from './process_memory_guard.mjs';
-import {memoryStopAction, stopOwnedBrowser} from './owned_browser_stop.mjs';
+import {memoryStopAction, stopOwnedBrowser, ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
 import {acceptLoaderMemoryWitness} from './loader_memory_witness_acceptance.mjs';
 const arg = name => {const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
@@ -36,7 +36,10 @@ try {
   report.phase='fixture-preparation';
   const fixtures={f32:weightFixture().bytes, f16:weightFixture({tensorShapes:new Map([['image_tokenizer.image_mean',[300000]]]),fp16Names:new Set(['image_tokenizer.image_mean'])}).bytes};
   const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-  report.fixtures=Object.fromEntries(Object.entries(fixtures).map(([name,bytes])=>[name,{bytes:bytes.length,headerBytes:new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength).getUint32(12,true),sha256:digest(bytes),meaning:'synthetic flat-v1 loader fixture; not canonical model weights'}]));
+  report.fixtures=Object.fromEntries(Object.entries(fixtures).map(([name,bytes])=>{
+    const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+    return [name,{bytes:bytes.length,headerBytes:view.getUint32(12,true),firstTensorBytes:view.getUint32(16+156,true),sha256:digest(bytes),meaning:'synthetic flat-v1 loader fixture; not canonical model weights'}];
+  }));
   const sources=new Map();
   for(const relative of ['src/lib/weights.js','src/lib/gpu.js','src/lib/loader_memory_budget.js']) {
     const bytes=fs.readFileSync(path.join(root,relative)), committed=execFileSync('git',['show',report.source.revision+':'+relative],{cwd:root});
@@ -64,8 +67,8 @@ try {
   const allowed=['HOME','TMPDIR','PATH','LANG','LC_ALL','LC_CTYPE','__CF_USER_TEXT_ENCODING'];
   const env=Object.fromEntries(allowed.filter(name=>process.env[name]!=null).map(name=>[name,process.env[name]]));
   report.childEnvironment={policy:'positive-allowlist',names:Object.keys(env),valuesRecorded:false};
-  const args=puppeteer.defaultArgs({headless:true,userDataDir:profile,
-    args:['--remote-debugging-port=0','--enable-unsafe-webgpu','--use-angle=metal','--no-first-run','--use-mock-keychain','--password-store=basic']});
+  const args=await ownedBrowserArguments(puppeteer,{profile});report.browserArguments=args;
+  if(report.memorySafety)throw Error('memory guard prevented browser launch');
   // Own the child synchronously, before awaiting its endpoint. A threshold
   // crossing during launch can stop this exact child, not a pending promise.
   child=spawn(report.browserExecutable,args,{env,stdio:['ignore','ignore','pipe']});report.ownedBrowserPid=child.pid;
@@ -89,7 +92,9 @@ try {
     if(backend.isFallbackAdapter!==false || !/apple/i.test(backend.vendor))throw Error('nonfallback Apple route required');
     const device=await adapter.requestDevice();device.pushErrorScope('validation');
     const cases={},configs={sourceRefusal:{name:'f32',cpuBytes:fixtures.f32.bytes-1,gpuBytes:8},
-      conversionRefusal:{name:'f16',cpuBytes:fixtures.f16.bytes+fixtures.f16.headerBytes,gpuBytes:8},
+      // Allow native response chunking to require a raw/header copy; refuse
+      // the much larger FP32 conversion, not an incidental stream boundary.
+      conversionRefusal:{name:'f16',cpuBytes:fixtures.f16.bytes+fixtures.f16.firstTensorBytes+2*fixtures.f16.headerBytes,gpuBytes:8},
       gpuRefusal:{name:'f32',cpuBytes:3*fixtures.f32.bytes,gpuBytes:8}};
     try {
       for(const [key,config]of Object.entries(configs)){
