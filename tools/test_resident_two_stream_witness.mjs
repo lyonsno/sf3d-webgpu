@@ -14,4 +14,8 @@ assert.equal(subject.twoStreamPhaseDemand({name:'two-stream-duty',duty:{kind:'fi
 assert.throws(()=>subject.twoStreamPhaseDemand({name:'two-stream-duty',duty:{kind:'fuse-geglu-linear-range'}}),/resident/);
 assert.throws(()=>subject.twoStreamPhaseDemand({name:'two-stream-final',tensors:[{size:-1,dtype:0}]}),/tensor/);
 assert.throws(()=>subject.inspectTwoStreamOutputBytes(Buffer.alloc(4)),/complete/);
+assert.equal(subject.twoStreamPhaseDemand({name:'two-stream-duty',duty:{kind:'fuse-prepare',direction:'in'},
+  attentionRowsPerDuty:32,normX:false}).workGpuBytes,
+  (3*3089+2*27648)*1024*4+16*32*27648*4+32*1024*4+1024*4+4096,
+  'actual smaller query score scratch and canonical absent normalization must identify only new backing');
 console.log('complete backbone cliff demand and incomplete output refusal');

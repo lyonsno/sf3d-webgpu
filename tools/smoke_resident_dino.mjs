@@ -30,8 +30,9 @@ const report={schema:throughBackbone?'sf3d.native-resident-backbone.v0':'sf3d.na
   receiver:'mini-wake-and-bake-pit-boss',claim:throughBackbone?'complete native DINO plus existing two-stream backbone; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim':'complete native DINO only; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim',
   requested:{report:requestedReportPath,repoRoot:root,revision:arg('--expected-revision'),weightsPath:arg('--weights'),weightsSha256:arg('--expected-weights-sha256'),
     input:arg('--input'),inputSha256:arg('--expected-input-sha256'),chrome:arg('--chrome'),processBudgetBytes:Number(arg('--process-budget-bytes')),
-    throughBackbone,cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
-  allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V,128-query scores and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
+    throughBackbone,attentionRowsPerDuty:Number(arg('--attention-rows-per-duty')??128),
+    cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
+  allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V, caller-declared complete-query score scratch and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
   evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',twoStreamOutput:reportPath+'.triplane.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
@@ -46,7 +47,7 @@ try{
     report.phase='backbone-graph-import';await persist();
     const backboneModule=await import('../src/lib/two_stream.js');
     groups=(await import('../src/lib/cooperative_two_stream.js')).groupTwoStreamDuties(
-      backboneModule.createTwoStreamAttentionDutyPlan(1297,{residentFFN:true,linearRowsPerDuty:128}));
+      backboneModule.createTwoStreamAttentionDutyPlan(1297,{residentFFN:true,linearRowsPerDuty:128,attentionRowsPerDuty:report.requested.attentionRowsPerDuty}));
   }
   const git=args=>execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
   report.source={repoRoot:root,revision:git(['rev-parse','HEAD']),clean:git(['status','--porcelain'])==='',hostname:os.hostname()};
@@ -76,11 +77,11 @@ try{
     order.push('two-stream-embedding-weights','two-stream-embedding-rearrange');
     for(const group of groups){
       order.push('two-stream-'+group.stageId);
-      for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty}).requiredBytes>0)
+      for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty,attentionRowsPerDuty:report.requested.attentionRowsPerDuty}).requiredBytes>0)
         order.push('two-stream-duty-'+duty.dutyIndex);
     }
     order.push('two-stream-output');
-    if(order.join(',')!==residentTwoStreamExpectedPhases().join(','))throw Error('effective source graph differs from approved complete backbone cliffs');
+    if(order.join(',')!==residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty).join(','))throw Error('effective source graph differs from approved complete backbone cliffs');
   }
   report.expectedPhaseOrder=order;
   const readBody=async req=>{const chunks=[];for await(const chunk of req)chunks.push(chunk);return Buffer.concat(chunks);};
@@ -100,6 +101,7 @@ try{
       if(name===report.artifact.entry){report.artifact.servedSha256=digest(artifact);res.writeHead(200,{'Content-Type':'text/javascript','Cache-Control':'no-store'}).end(artifact);return;}
       if(name==='/image.png'){res.writeHead(200,{'Content-Type':'image/png','Cache-Control':'no-store'}).end(image);return;}
       if(name==='/phase'&&req.method==='POST'){
+        const phaseRequestedAtUnixMs=Date.now();
         const phase=JSON.parse((await readBody(req)).toString());
         if(!report.backend||report.backend.isFallbackAdapter!==false||phase.name!==order[report.phaseObservations.length]||report.memorySafety||report.phaseObservations.some(o=>o.verdict!=='admitted'))throw Error('effective backend, phase order or safety hold prevents allocation');
         for(const tensor of phase.tensors??[]){const observed=table.get(tensor.name);
@@ -113,17 +115,31 @@ try{
               phase.duty?.kind!==expected.kind||phase.duty?.rowStart!==expected.rowStart||
               phase.duty?.rowCount!==expected.rowCount||phase.duty?.direction!==expected.direction)
               throw Error('effective complete backbone duty identity mismatch');
-            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected});
+            if(phase.attentionRowsPerDuty!==report.requested.attentionRowsPerDuty)throw Error('effective attention allocation granule mismatch');
+            let normX=true;
+            if(expected.kind==='fuse-prepare'){
+              const prefix='backbone.main_blocks.'+expected.block+'.fuse_block_'+expected.direction+'.norm_x';
+              const weight=table.has(prefix+'.weight'),bias=table.has(prefix+'.bias');
+              if(weight!==bias||phase.normX!==weight)throw Error('actual optional normalization differs from canonical complete source metadata');
+              normX=weight;
+            }
+            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,normX});
           }else demand=twoStreamPhaseDemand(phase);
         }else demand=dinoPhaseDemand(phase);
-        const processObservation=await monitor.sample();
+        const processObservation=await monitor.sample({fresh:true});
         const host={...observeMacMemory(),model:execFileSync('sysctl',['-n','hw.model'],{encoding:'utf8'}).trim(),processor:execFileSync('sysctl',['-n','machdep.cpu.brand_string'],{encoding:'utf8'}).trim()};
         const processRow=processObservation.lastObservation;
-        const observation={phase:phase.name,descriptor:phase,demand,host,process:processObservation,
+        const observation={phase:phase.name,phaseRequestedAtUnixMs,descriptor:phase,demand,host,process:processObservation,
           authority:'reversible encoder phase with observed baseline and diagnostic process stop; not production physical fit',
           verdict:host.hostname===report.source.hostname&&host.model==='Mac14,9'&&host.processor==='Apple M2 Pro'&&!host.observerErrors.length&&
             host.hostFreeBytes>=demand.requiredBytes&&processObservation.coverage==='sampled-owned-process-tree'&&processRow?.status==='observed'&&
-            processRow.runId===report.runId&&processRow.rootPid===process.pid&&processRow.sampledAggregatePhysicalFootprintBytes+demand.requiredBytes<=report.requested.processBudgetBytes&&!report.memorySafety?'admitted':'refused'};
+            processRow.runId===report.runId&&processRow.rootPid===process.pid&&
+            processObservation.freshness?.route==='new-probe-after-request'&&
+            processObservation.freshness.requestedAtUnixMs>=phaseRequestedAtUnixMs&&
+            processRow.atUnixMs>=processObservation.freshness.requestedAtUnixMs&&
+            processObservation.freshness.probeAtUnixMs===processRow.atUnixMs&&
+            processObservation.freshness.observationIndex===processObservation.sampleCount&&
+            processRow.sampledAggregatePhysicalFootprintBytes+demand.requiredBytes<=report.requested.processBudgetBytes&&!report.memorySafety?'admitted':'refused'};
         report.phaseObservations.push(observation);report.phase='phase-'+phase.name;await persist();
         res.writeHead(observation.verdict==='admitted'?200:409,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(observation));return;
       }
@@ -211,14 +227,15 @@ try{
             const backbone=new TwoStreamBackbone(device);backbone.init();
             twoStream=await runResidentTwoStream({device,backbone,memoryBudget:budget,weightsUrl:'/canonical-weights.bin',
               expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag,
-              imageTokensBuf:result.tokensBuf,N_img:result.N,onBeforePhase:observe,
-              async onBeforeDuty(duty){
+              imageTokensBuf:result.tokensBuf,N_img:result.N,onBeforePhase:observe,attentionRowsPerDuty:config.requested.attentionRowsPerDuty,
+              async onBeforeDuty(duty,state){
                 if(duty.kind==='output')return observe({name:'two-stream-output',tensors:[]});
                 // Fresh observation at every new work-storage cliff; uniform
                 // backing is accounted up front, not a needless host probe for
                 // every allocation-free attention/FFN row dispatch.
                 if(config.allocatingDutyIndices.includes(duty.dutyIndex))
-                  await observe({name:'two-stream-duty-'+duty.dutyIndex,duty,tensors:[]});
+                  await observe({name:'two-stream-duty-'+duty.dutyIndex,duty,tensors:[],attentionRowsPerDuty:state.attentionRowsPerDuty,
+                    ...(duty.kind==='fuse-prepare'?{normX:!!state.weights.mainBlocks[duty.block][duty.direction==='in'?'fuseBlockIn':'fuseBlockOut'].normX}:{})});
               },
               onProgress:p=>{document.querySelector('#status').textContent='Actual complete two-stream backbone '+(p.completedItems??0)+' duties';},
               async withResult(output){
@@ -249,7 +266,7 @@ try{
       catch(error){throw failed?new AggregateError([failure,error],'native DINO failed and cleanup failed',{cause:failure}):error;}
     }
   },{requested:report.requested,source:report.canonicalSource,input:report.inputArtifact,
-    allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
+    allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d,attentionRowsPerDuty:report.requested.attentionRowsPerDuty}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
   if(throughBackbone)report.twoStreamOutput=inspectTwoStreamOutput(report.evidencePaths.twoStreamOutput);
   report.output=inspectDinoOutput(report.evidencePaths.output);report.phase='complete';report.status='passed';
 }catch(error){report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};}

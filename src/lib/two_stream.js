@@ -103,11 +103,14 @@ export function createTwoStreamAttentionDutyPlan(N_img, options = {}) {
     throw new TypeError('N_img must be a positive safe integer');
   }
   const linearRowsPerDuty = options.linearRowsPerDuty ?? 128;
+  const attentionRowsPerDuty = options.attentionRowsPerDuty ?? 128;
   const residentFFN = options.residentFFN ?? false;
   if (typeof residentFFN !== 'boolean') throw TypeError('residentFFN must be boolean');
   if (!Number.isSafeInteger(linearRowsPerDuty) || linearRowsPerDuty <= 0) {
     throw new TypeError('linearRowsPerDuty must be a positive safe integer');
   }
+  if (!Number.isSafeInteger(attentionRowsPerDuty) || attentionRowsPerDuty <= 0)
+    throw new TypeError('attentionRowsPerDuty must be a positive safe integer');
   const duties = [];
   const append = duty => {
     duties.push(Object.freeze({
@@ -144,8 +147,8 @@ export function createTwoStreamAttentionDutyPlan(N_img, options = {}) {
       });
     }
   };
-  const latentTiles = ceilDiv(N_img + CONFIG.numLatents, 128);
-  const triplaneTiles = ceilDiv(CONFIG.triplaneTokens, 128);
+  const latentTiles = ceilDiv(N_img + CONFIG.numLatents, attentionRowsPerDuty);
+  const triplaneTiles = ceilDiv(CONFIG.triplaneTokens, attentionRowsPerDuty);
   const triplaneRowRanges = createLinearRowRanges(
     CONFIG.triplaneTokens,
     linearRowsPerDuty,
@@ -404,6 +407,7 @@ export class TwoStreamBackbone {
     state.finePlan = createTwoStreamAttentionDutyPlan(N_img, options);
     state.residentFFN = options.residentFFN ?? false;
     state.ffnRowsPerTile = options.linearRowsPerDuty ?? 128;
+    state.attentionRowsPerDuty = options.attentionRowsPerDuty ?? 128;
     return state;
   }
 
@@ -575,6 +579,7 @@ export class TwoStreamBackbone {
         N_z,
         N_x,
         D,
+        state.attentionRowsPerDuty,
       ),
     };
   }
@@ -925,6 +930,7 @@ export class TwoStreamBackbone {
         state.N_latent,
         state.N_latent,
         D,
+        state.attentionRowsPerDuty,
       ),
     };
   }
@@ -962,6 +968,7 @@ export class TwoStreamBackbone {
       state.N_latent,
       state.N_img,
       operation.D,
+      state.attentionRowsPerDuty,
     );
   }
 
@@ -1202,7 +1209,8 @@ export class TwoStreamBackbone {
     return zOutBuf;
   }
 
-  _createAttentionState(encoder, qInputBuf, kvInputBuf, attnWeights, N_q, N_kv, D) {
+  _createAttentionState(encoder, qInputBuf, kvInputBuf, attnWeights, N_q, N_kv, D, tileQCapacity = 128) {
+    if(!Number.isSafeInteger(tileQCapacity)||tileQCapacity<=0)throw TypeError('attentionRowsPerDuty must be a positive safe integer');
     const device = this.device;
     const numHeads = CONFIG.numHeads;
     const qBuf = createEmptyBuffer(device, N_q * D * 4);
@@ -1212,7 +1220,6 @@ export class TwoStreamBackbone {
     this._dispatchLinearNoBias(encoder, kvInputBuf, kBuf, attnWeights.wk, N_kv, D, D);
     this._dispatchLinearNoBias(encoder, kvInputBuf, vBuf, attnWeights.wv, N_kv, D, D);
 
-    const tileQCapacity = 128;
     const scoreBufSize = numHeads * tileQCapacity * N_kv * 4;
     const scoreBuf = createEmptyBuffer(device, scoreBufSize);
     const tileAttnOutBuf = createEmptyBuffer(device, tileQCapacity * D * 4);

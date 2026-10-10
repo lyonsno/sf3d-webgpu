@@ -21,7 +21,7 @@ export function selectTwoStreamPhase(template,stageId){
 /** Complete same-backbone consumer; diagnostic admission remains caller-owned. */
 export async function runResidentTwoStream({device,backbone,memoryBudget,weightsUrl,expectedWeightBytes,
   expectedSourceETag,imageTokensBuf,N_img,onBeforePhase,onBeforeDuty,onAfterDuty,onProgress,withResult,
-  foregroundOpportunities=null,linearRowsPerDuty=128}){
+  foregroundOpportunities=null,linearRowsPerDuty=128,attentionRowsPerDuty=128}){
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
   if(backbone?.device!==device||backbone._residentAdapterOwner)throw Error('owned nonquarantined backbone required');
@@ -47,7 +47,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
       device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();
     });
     const executed=await runCooperativeTwoStream({device,backbone,imageTokensBuf,N_img,weights:{},
-      dutyGranularity:'attention-tile',linearRowsPerDuty,residentFFN:true,retireIntermediateBuffers:true,
+      dutyGranularity:'attention-tile',linearRowsPerDuty,attentionRowsPerDuty,residentFFN:true,retireIntermediateBuffers:true,
       foregroundOpportunities,onProgress,onBeforeDuty,onAfterDuty,
       async withGroupWeights(group,work){
         const selection=selectTwoStreamPhase(template,group.stageId);
@@ -61,7 +61,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
     await onBeforeDuty({kind:'output',dutyId:'two-stream-output'},null);
     const value=await withResult(executed.result);
     return {value,cooperative:executed.report,loadingReport:source.loadingReport,weightPhases:source.phases,
-      shape:[3,1024,96,96],blocks:4,basicBlocks:12,residentFFN:true,linearRowsPerDuty};
+      shape:[3,1024,96,96],blocks:4,basicBlocks:12,residentFFN:true,linearRowsPerDuty,attentionRowsPerDuty};
   }catch(error){failed=true;failure=error;throw error;}
   finally{
     try{await disposeResidentTwoStream(backbone);}

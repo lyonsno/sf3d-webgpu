@@ -101,6 +101,21 @@ export async function startProcessMemory({python,script,rootPid=process.pid,rawP
   // Callers needing a pre-allocation baseline consume this current snapshot,
   // not a summary file that is only promised at failure/terminal boundaries.
   // Isolate caller mutations from the running guard's safety state.
-  return{async sample(){await request();return structuredClone(summary);},async stop(){if(stopped)return summary;await request();stopped=true;clearInterval(timer);if(pending)await pending;
+  return{async sample({fresh=false}={}){
+    if(typeof fresh!=='boolean')throw TypeError('fresh process observation mode must be boolean');
+    if(!fresh){await request();return structuredClone(summary);}
+    const requestedAtUnixMs=Date.now();
+    // Timer callers may coalesce. A boundary cannot consume an older probe.
+    if(pending)await pending;
+    if(stopped||failed)throw failed??Error('fresh process observer is stopped');
+    const prior=summary.sampleCount;
+    await request();
+    if(failed)throw failed;
+    const row=summary.lastObservation;
+    if(summary.sampleCount<=prior||!Number.isFinite(row?.atUnixMs)||row.atUnixMs<requestedAtUnixMs)
+      throw Error('fresh post-request process measurement required');
+    return {...structuredClone(summary),freshness:{route:'new-probe-after-request',requestedAtUnixMs,
+      probeAtUnixMs:row.atUnixMs,observationIndex:summary.sampleCount}};
+  },async stop(){if(stopped)return summary;await request();stopped=true;clearInterval(timer);if(pending)await pending;
     summary.status=failed?(summary.safety?.reason==='process-footprint-budget'?'budget-refused':'failed'):'observed';await persist();return summary;}};
 }

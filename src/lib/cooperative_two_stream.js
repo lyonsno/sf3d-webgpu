@@ -30,13 +30,14 @@ export function defineTwoStreamManifest(options = {}) {
     dutyGranularity = 'stage',
     N_img,
     linearRowsPerDuty = 128,
+    attentionRowsPerDuty = 128,
     residentFFN = false,
   } = options;
   if (!['stage', 'attention-tile'].includes(dutyGranularity)) {
     throw new RangeError(`unknown two-stream duty granularity ${dutyGranularity}`);
   }
   const attentionPlan = dutyGranularity === 'attention-tile'
-    ? createTwoStreamAttentionDutyPlan(N_img, { linearRowsPerDuty, residentFFN })
+    ? createTwoStreamAttentionDutyPlan(N_img, { linearRowsPerDuty, attentionRowsPerDuty, residentFFN })
     : null;
   const boundaryId = attentionPlan ? TWO_STREAM_ATTENTION_BOUNDARY_ID : TWO_STREAM_BOUNDARY_ID;
   const totalItems = attentionPlan?.length ?? TWO_STREAM_DUTY_COUNT;
@@ -74,6 +75,7 @@ export function defineTwoStreamManifest(options = {}) {
       source: 'sf3d-webgpu-cooperative-two-stream',
       dutyGranularity,
       linearRowsPerDuty: attentionPlan ? linearRowsPerDuty : null,
+      attentionRowsPerDuty: attentionPlan ? attentionRowsPerDuty : null,
       residentFFN,
     },
   });
@@ -285,6 +287,7 @@ export async function runCooperativeTwoStream(options) {
     schedulingMode = 'cooperative',
     dutyGranularity = 'stage',
     linearRowsPerDuty = 128,
+    attentionRowsPerDuty = 128,
     residentFFN = false,
     retireIntermediateBuffers = false,
     withGroupWeights = null,
@@ -300,7 +303,7 @@ export async function runCooperativeTwoStream(options) {
   if(withGroupWeights!==null&&typeof withGroupWeights!=='function')throw TypeError('withGroupWeights must be a function');
   if(backbone._residentWorkOwner||backbone._failedUniforms?.size)throw Error('two-stream work cleanup is quarantined');
   const attentionPlan = dutyGranularity === 'attention-tile'
-    ? createTwoStreamAttentionDutyPlan(N_img, { linearRowsPerDuty, residentFFN })
+    ? createTwoStreamAttentionDutyPlan(N_img, { linearRowsPerDuty, attentionRowsPerDuty, residentFFN })
     : null;
   const now = () => globalThis.performance?.now?.() ?? Date.now();
   const queueFences = [];
@@ -321,6 +324,7 @@ export async function runCooperativeTwoStream(options) {
       dutyGranularity,
       N_img,
       linearRowsPerDuty,
+      attentionRowsPerDuty,
       residentFFN,
     }),
     invocationId,
@@ -333,7 +337,7 @@ export async function runCooperativeTwoStream(options) {
       imageTokensBuf,
       N_img,
       weights,
-      { linearRowsPerDuty, residentFFN },
+      { linearRowsPerDuty, attentionRowsPerDuty, residentFFN },
     )
     : backbone.createForwardState(imageTokensBuf, N_img, weights);
   let stageTelemetry = [];
@@ -408,6 +412,7 @@ export async function runCooperativeTwoStream(options) {
         dutyGranularity,
         residentFFN,
         linearRowsPerDuty:attentionPlan?linearRowsPerDuty:null,
+        attentionRowsPerDuty:attentionPlan?attentionRowsPerDuty:null,
         declaredDutyCount: attentionPlan?.length ?? TWO_STREAM_DUTY_COUNT,
         stageDuties: Object.freeze(stageTelemetry),
         queueFences: Object.freeze(queueFences),
