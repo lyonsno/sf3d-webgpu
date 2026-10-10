@@ -11,6 +11,11 @@
  * worker removes it from the main thread entirely with no per-duty fence floor.
  */
 
+export const SF3D_IMAGE_PREPROCESS = Object.freeze({
+  condImageSize:512, bgColor:Object.freeze([0.5,0.5,0.5]),
+  imageMean:Object.freeze([0.485,0.456,0.406]), imageStd:Object.freeze([0.229,0.224,0.225]),
+});
+
 export function lanczosKernel(x, a = 3) {
   if (x === 0) return 1;
   if (Math.abs(x) >= a) return 0;

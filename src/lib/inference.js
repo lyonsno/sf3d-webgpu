@@ -15,6 +15,7 @@
 
 import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
 import { prepareConditionImage, validateConditionReply } from './condition_image.js';
+import { SF3D_IMAGE_PREPROCESS } from './preprocess_core.js';
 import { callWorker } from './worker_call.js';
 import { withForegroundScope } from './foreground_scope.js';
 import { SF3DImageTokenizer } from './sf3d_backbone.js';
@@ -31,7 +32,7 @@ const DEBUG = false;
 
 // SF3D model configuration
 const CONFIG = {
-  condImageSize: 512,
+  ...SF3D_IMAGE_PREPROCESS,
   patchSize: 14,
   hiddenDim: 1024,
   numHeads: 16,
@@ -47,11 +48,6 @@ const CONFIG = {
   radius: 0.87,
   defaultFovDeg: 40.0,
   defaultDistance: 1.6,
-  // ImageNet normalization for DINOv2
-  imageMean: [0.485, 0.456, 0.406],
-  imageStd: [0.229, 0.224, 0.225],
-  // Background color
-  bgColor: [0.5, 0.5, 0.5],
 };
 
 /**

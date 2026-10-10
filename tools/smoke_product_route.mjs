@@ -25,7 +25,10 @@
  * Usage:
  *   node tools/smoke_product_route.mjs [--arm product-default|no-workers|workers-only|monolithic|'{json overrides}']
  *     [--contend | --contend-same-device] [--image P] [--report P] [--expected-glb-sha SHA|none]
+ *     [--weights P] [--memory-admission-plan P] [--memory-observation P]
  *     [--max-gap-budget-ms N] [--allow-dirty] [--label TEXT]
+ * Memory plan/observation/weight overrides are diagnostic-only: they can
+ * explain or force refusal, but cannot authorize this full route to launch.
  */
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
@@ -33,6 +36,7 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import { spawn, execSync } from 'node:child_process';
+import { applyExecutableMemoryCircuitBreaker, runMemoryAdmission } from './memory_admission.mjs';
 import {
   CANONICAL_DEMO_CHAIR_DUTY_COUNTS,
   CANONICAL_DEMO_CHAIR_GLB_SHA256,
@@ -50,6 +54,9 @@ const ARM = argVal('--arm', 'product-default');
 const CONTEND = hasFlag('--contend');
 const CONTEND_SAME = hasFlag('--contend-same-device');
 const IMAGE = path.resolve(argVal('--image', path.join(REPO, 'public/demo_chair.png')));
+const WEIGHTS_PATH = path.resolve(argVal('--weights', path.join(REPO, 'public/weights.bin')));
+const MEMORY_ADMISSION_PLAN_PATH = argVal('--memory-admission-plan', null);
+const MEMORY_OBSERVATION_PATH = argVal('--memory-observation', null);
 const LABEL = argVal('--label', '');
 const ARM_NAME = `${ARM.startsWith('{') ? 'custom' : ARM}${CONTEND ? '+contend' : ''}${CONTEND_SAME ? '+contend-same-device' : ''}`;
 const REPORT_PATH = path.resolve(argVal('--report', `/tmp/sf3d-product-route-witness-${ARM_NAME}.json`));
@@ -91,7 +98,7 @@ function writeFailure(failurePhase, error, partial = {}) {
     ok: false,
     arm: ARM_NAME,
     failurePhase,
-    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, expectedGlbSha: EXPECTED_GLB_SHA, report: REPORT_PATH },
+    requested: { arm: ARM, contend: CONTEND, contendSameDevice: CONTEND_SAME, image: IMAGE, weights: WEIGHTS_PATH, memoryAdmissionPlan: MEMORY_ADMISSION_PLAN_PATH, memoryObservation: MEMORY_OBSERVATION_PATH, expectedGlbSha: EXPECTED_GLB_SHA, report: REPORT_PATH },
     // Effective identity as far as it was established when the run died.
     source: source ?? null,
     error: { message: error?.message || String(error), stack: error?.stack || null },
@@ -112,6 +119,7 @@ function allocatePort() {
 
 let source = null;
 let commit = null, dirty = null, kitVersion = null;
+let memoryAdmission = null;
 const procs = [];
 const cleanup = () => { for (const p of procs) { try { p.kill(); } catch { /* gone */ } } };
 let browser = null;
@@ -130,6 +138,44 @@ try {
   enterPhase('kit-identity');
   kitVersion = JSON.parse(fs.readFileSync(path.join(REPO, 'node_modules/@kaminos/webgpu-inference-kit/package.json'), 'utf8')).version;
   source = { ...source, kitVersion };
+
+  // --- Host-survival admission (before Vite, Chrome, weight download, or GPU allocation) ---
+  enterPhase('memory-admission');
+  try {
+    memoryAdmission = runMemoryAdmission({
+      repoRoot: REPO,
+      weightPath: WEIGHTS_PATH,
+      planPath: MEMORY_ADMISSION_PLAN_PATH,
+      observationPath: MEMORY_OBSERVATION_PATH,
+      requiredThrough: 'product-route-terminal',
+    });
+  } catch (error) {
+    memoryAdmission = {
+      schema: 'sf3d.memory-admission-result.v0',
+      verdict: 'unobservable',
+      authority: 'circuit-breaker-only',
+      targetPhase: 'weight-and-model-load',
+      requiredThrough: 'product-route-terminal',
+      effective: {
+        planPath: MEMORY_ADMISSION_PLAN_PATH ? path.resolve(MEMORY_ADMISSION_PLAN_PATH) : null,
+        observationReplayPath: MEMORY_OBSERVATION_PATH ? path.resolve(MEMORY_OBSERVATION_PATH) : null,
+      },
+      decision: { reasons: [error.message] },
+    };
+    throw error;
+  }
+  const diagnosticOverrideRequested = Boolean(
+    MEMORY_ADMISSION_PLAN_PATH
+    || MEMORY_OBSERVATION_PATH
+    || WEIGHTS_PATH !== path.join(REPO, 'public/weights.bin')
+  );
+  memoryAdmission = applyExecutableMemoryCircuitBreaker({ memoryAdmission, diagnosticOverrideRequested });
+  source = { ...source, memoryAdmission };
+  if (memoryAdmission.verdict === 'refused') {
+    const error = new Error(`memory admission circuit breaker refused ${memoryAdmission.targetPhase}: ${memoryAdmission.decision.reasons.join('; ')}`);
+    error.code = 'SF3D_MEMORY_ADMISSION_REFUSED';
+    throw error;
+  }
 
   // --- Serve the checkout ---
   enterPhase('vite-start');
@@ -396,7 +442,7 @@ try {
   if (raw.routeReceiptValidation && raw.routeReceiptValidation.ok !== true) {
     throw new Error(`producer route receipt failed validation: ${(raw.routeReceiptValidation.errors || []).join('; ')}`);
   }
-  const durable = { ...report, verdict: { ok: verdict.ok, errors: [...verdict.errors] } };
+  const durable = { ...report, memoryAdmission, verdict: { ok: verdict.ok, errors: [...verdict.errors] } };
   fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
   fs.writeFileSync(REPORT_PATH, JSON.stringify(durable, null, 2));
 
@@ -430,7 +476,7 @@ try {
     console.log('\nWITNESS ACCEPTED');
   }
 } catch (err) {
-  writeFailure(phase, err);
+  writeFailure(phase, err, memoryAdmission ? { memoryAdmission } : {});
   process.exitCode = 1;
 } finally {
   if (browser) await browser.close().catch(() => {});

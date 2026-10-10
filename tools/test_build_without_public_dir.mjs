@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,7 @@ try {
     path.join(fixtureRoot, 'vite.config.js'),
     await readFile(path.join(repoRoot, 'vite.config.js')),
   );
+  await symlink(path.join(repoRoot,'tools'),path.join(fixtureRoot,'tools'),'dir');
 
   const result = spawnSync(
     process.execPath,

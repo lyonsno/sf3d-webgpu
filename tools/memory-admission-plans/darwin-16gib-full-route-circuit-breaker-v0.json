@@ -1,0 +1,21 @@
+{
+  "schema": "sf3d.memory-admission-plan.v0",
+  "id": "darwin-16gib-full-route-circuit-breaker-v0",
+  "targetPhase": "weight-and-model-load",
+  "projectionCoverage": {
+    "through": "weight-and-model-load"
+  },
+  "appliesTo": {
+    "minHostTotalBytes": 16106127360,
+    "maxHostTotalBytes": 19327352832
+  },
+  "predecessor": {
+    "phase": "model-ready",
+    "hostMemoryPressureFreePercentLowWater": 24,
+    "provenance": "projects/kaminos/topoi/codex-mini-wake-and-bake-pit-boss-0724.md: successful M2 model prefix reached 24% memory_pressure free while swap was exhausted; Mini refused the next pipeline phase"
+  },
+  "refusalContinuation": {
+    "kind": "smaller-rung-or-packed-storage",
+    "summary": "Do not allocate the current weight/model phase. Run the setup-only rung, or develop a separately reviewed true-admission path around an exact observed packed-storage revision before any model/DINO progression."
+  }
+}
