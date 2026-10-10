@@ -351,6 +351,8 @@ try {
     report.sharedAllowance=await page.evaluate(async()=>{const {runSharedAllowanceWitness}=await import('/tools/shared_allowance_browser.js');return runSharedAllowanceWitness();});
   }
   report.phase='native-process-stop';report.processObservation=await monitor.stop();monitor=null;await persist();
+  if(report.processObservation.status!=='observed'||report.processObservation.safety||report.memorySafety)
+    throw Error('consumer memory guard did not complete normally: '+(report.processObservation.error??report.processObservation.status));
   // Force refusal below an already observed tiny-run charge; never provoke growth/OOM.
   const observed=report.processObservation.lastObservation.sampledAggregatePhysicalFootprintBytes;
   const stopThreshold=Math.max(1,Math.floor(observed/4));

@@ -9,7 +9,7 @@ const valid=()=>{
   return {status:'passed',runId,route:'sf3d-loader-native-refusal-synthetic-weights-no-inference.v0',
     source:{clean:true,revision},requested:{revision},backend:{vendor:'apple',isFallbackAdapter:false},cases,
     deviceControl:[7,11,13,17],validationError:null,ownedBrowserPid:ownedPid,
-    memorySafety:{stop:{exitObserved:true,ownedPid}},processObservation:{runId,rootPid},
+    memorySafety:{stop:{exitObserved:true,ownedPid}},processObservation:{runId,rootPid,status:'observed'},
     processRefusal:{status:'budget-refused',runId:runId+'-refusal',rootPid,coverage:'sampled-owned-process-tree',
       safety:{reason:'process-footprint-budget',observedBytes:100,maxFootprintBytes:25,actionStatus:'returned'},
       lastObservation:{status:'observed',runId:runId+'-refusal',rootPid,effectiveRoute:'darwin-libproc-proc_pid_rusage/RUSAGE_INFO_V4',

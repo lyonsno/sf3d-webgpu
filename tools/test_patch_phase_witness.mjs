@@ -11,7 +11,7 @@ const valid=()=>({status:'passed',route:'sf3d-canonical-patch-embedding.v0',runI
     outputSha256:sha,inputSha256:sha,reference:{tested:66,mismatches:0},
     loadingReport:{mode:'tensor-ranges',sourceETag:'"canonical"',expectedWeightBytes:512,ranges:[{},{},{}]},
     budget:{cpu:{maxBytes:1024,liveBytes:0,physicalMemoryMeasured:false},gpu:{maxBytes:128,liveBytes:0,physicalMemoryMeasured:false}}},
-  memorySafety:{stop:{exitObserved:true,ownedPid}},processObservation:{runId,rootPid},
+  memorySafety:{stop:{exitObserved:true,ownedPid}},processObservation:{runId,rootPid,status:'observed'},
   processRefusal:{status:'budget-refused',runId:runId+'-refusal',rootPid,coverage:'sampled-owned-process-tree',
     safety:{reason:'process-footprint-budget',observedBytes:100,maxFootprintBytes:25,actionStatus:'returned'},
     lastObservation:{status:'observed',runId:runId+'-refusal',rootPid,effectiveRoute:'darwin-libproc-proc_pid_rusage/RUSAGE_INFO_V4',sampledAggregatePhysicalFootprintBytes:100,processes:[{pid:rootPid},{pid:ownedPid}]}},
@@ -34,6 +34,7 @@ assert.equal(acceptStagedTensorWitness(valid()).ok,true,'actual patch-phase rece
   r.patchPhase.deviceOwnership='pre-bound-caller-host';
   r.evidencePaths={foregroundBefore:'/explicit/before.png',foregroundAfter:'/explicit/after.png'};
   r.foreground={source:{revision:r.requested.foreground.revision,trackedClean:true},sameDevice:true,visibility:'headed-independent-browser',
+    console:[],
     progressInterval:'before-selected-operation-to-immediate-operation-return',
     before:{...state,budget:{root:structuredClone(budget),children:[{budget:structuredClone(child)}]}},
     after:{...state,frameCount:4,simStepCount:4,submissions:4,budget:{root:structuredClone(budget),children:[{budget:structuredClone(child)}]}},
@@ -50,6 +51,7 @@ assert.equal(acceptStagedTensorWitness(valid()).ok,true,'actual patch-phase rece
   r.cleanup.foregroundService={ownedPid:57,exitObserved:true};
   assert.equal(acceptStagedTensorWitness(r).ok,true,'actual foreground must have its own positive acceptance path');
   for(const [label,mutate]of [
+    ['observed black-route failure',x=>x.foreground.console.push({type:'error',text:"Scene route load failed: TypeError: Failed to execute 'createView' on 'GPUTexture'"})],
     ['offscreen',x=>x.browserArguments.push('--headless=new')],['wrong source',x=>x.foreground.source.revision='d'.repeat(40)],
     ['second device',x=>x.foreground.sameDevice=false],['rAF-only',x=>x.foreground.after.simStepCount=2],
     ['not presented',x=>x.foreground.after.frameCount=2],['no submits',x=>x.foreground.after.submissions=2],
@@ -85,4 +87,9 @@ for(const [name,mutate]of [
   ['no raw output',r=>delete r.patchPhase.outputSha256],['unretired buffers',r=>r.patchPhase.budget.gpu.liveBytes=4],
   ['unobserved owned exit',r=>r.memorySafety.stop.exitObserved=false],['stale observer',r=>r.processRefusal.lastObservation.runId='old'],
 ]){const r=valid();mutate(r);assert.equal(acceptStagedTensorWitness(r).ok,false,name);}
+{
+  const crossed=valid();crossed.processObservation.status='budget-refused';
+  crossed.processObservation.safety={reason:'process-footprint-budget',observedBytes:1192699536,maxFootprintBytes:1073741824};
+  assert.equal(acceptStagedTensorWitness(crossed).ok,false,'a real consumer memory stop must not be overwritten by a later passing refusal control');
+}
 console.log('learned patch phase accepts source/input/host-bound complete numerics and rejects false closure');

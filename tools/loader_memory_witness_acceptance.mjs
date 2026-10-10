@@ -39,6 +39,7 @@ export function acceptLoaderMemoryWitness(report) {
 function acceptOwnedProcessWitness(report){
   const errors=[],need=(condition,text)=>{if(!condition)errors.push(text);};
   need(report?.memorySafety?.stop?.exitObserved === true && report.memorySafety.stop.ownedPid === report.ownedBrowserPid, 'exact owned browser exit');
+  need(report?.processObservation?.status==='observed'&&!report.processObservation.safety,'consumer process guard completed without intervention');
   need(report?.processRefusal?.status === 'budget-refused' && report.processRefusal?.safety?.reason === 'process-footprint-budget', 'actual process threshold refusal');
   need(report?.processRefusal?.lastObservation?.effectiveRoute === 'darwin-libproc-proc_pid_rusage/RUSAGE_INFO_V4', 'actual Darwin observer');
   const summary=report?.processRefusal, observation=summary?.lastObservation;
@@ -90,6 +91,8 @@ export function acceptStagedTensorWitness(report){
       need(report.browserArguments?.every(value=>!value.startsWith('--headless'))&&fg?.visibility==='headed-independent-browser','visible independent foreground route');
       need(fg?.sameDevice===true&&unit?.deviceOwnership==='pre-bound-caller-host','actual host device shared with learned operation');
       need(fg?.before?.active===true&&fg.after?.active===true&&!fg.after?.error,'ordinary foreground remains active');
+      need(Array.isArray(fg?.console)&&!fg.console.some(row=>row.type==='error'&&/^(Volume cockpit initialization failed:|Volume route initialization failed:|initScene failed:|Scene route load failed:)/.test(row.text)),
+        'actual foreground startup and scene route did not fail');
       need(fg?.before?.renderer==='ordinary-volume'&&fg.after?.renderer==='ordinary-volume','actual ordinary renderer, not alternate/synthetic rendering');
       need(fg?.before?.grid===report.requested.foreground.grid&&fg.after?.grid===report.requested.foreground.grid,'effective requested grid variant');
       need(fg?.after?.frameCount>fg?.before?.frameCount&&fg?.after?.simStepCount>fg?.before?.simStepCount,'ordinary simulation and presentation advance through learned work');

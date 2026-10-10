@@ -7,7 +7,7 @@ const valid=()=>({status:'passed',route:'sf3d-canonical-tensor-ranges-no-inferen
   canonicalSource:{sha256:sha,etag:'"canonical"',byteLength:512,units:[{name:'mean',expandedBytes:4,expectedF32Words:[1065353216]}]},
   tensorUnit:{loadingReport:{mode:'tensor-ranges',sourceETag:'"canonical"',expectedWeightBytes:512,ranges:[{},{},{}]},
     readbacks:[{name:'mean',bytes:4,f32Words:[1065353216]}],budget:{cpu:{maxBytes:1024,liveBytes:0,physicalMemoryMeasured:false},gpu:{maxBytes:128,liveBytes:0,physicalMemoryMeasured:false}}},
-  memorySafety:{stop:{exitObserved:true,ownedPid}},processObservation:{runId,rootPid},
+  memorySafety:{stop:{exitObserved:true,ownedPid}},processObservation:{runId,rootPid,status:'observed'},
   processRefusal:{status:'budget-refused',runId:runId+'-refusal',rootPid,coverage:'sampled-owned-process-tree',
     safety:{reason:'process-footprint-budget',observedBytes:100,maxFootprintBytes:25,actionStatus:'returned'},
     lastObservation:{status:'observed',runId:runId+'-refusal',rootPid,effectiveRoute:'darwin-libproc-proc_pid_rusage/RUSAGE_INFO_V4',sampledAggregatePhysicalFootprintBytes:100,processes:[{pid:rootPid},{pid:ownedPid}]}},
