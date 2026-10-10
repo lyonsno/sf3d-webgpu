@@ -12,7 +12,7 @@ import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction, stopOwnedBrowser, ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
 import {acceptLoaderMemoryWitness,acceptStagedTensorWitness} from './loader_memory_witness_acceptance.mjs';
-import {prepareCanonicalTensorSource} from './canonical_tensor_source.mjs';
+import {prepareCanonicalTensorSource,closeCanonicalSource} from './canonical_tensor_source.mjs';
 const arg = name => {const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root = arg('--repo-root') ? path.resolve(arg('--repo-root')) : null;
 const reportPath = path.resolve(arg('--report') ?? path.join(os.tmpdir(),'sf3d-loader-memory-'+randomUUID()+'.json'));
@@ -167,8 +167,9 @@ finally{
   try{if(monitor)report.processObservation=await monitor.stop();}catch(error){report.cleanup.observerError=error.message;report.status='failed';}
   try{report.cleanup.browser=child?await stopOwnedBrowser(child):{status:'not-started',exitObserved:true};}catch(error){report.cleanup.browser={error:error.message};report.status='failed';}
   if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';
-  canonical?.close();
-  if(profile && report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});
+  closeCanonicalSource(report,canonical);
+  try{if(profile && report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});}
+  catch(error){report.cleanup.profileError=error.message;report.status='failed';}
   report.verdict=canonicalMode?acceptStagedTensorWitness(report):acceptLoaderMemoryWitness(report);if(!report.verdict.ok)report.status='failed';
   report.terminalAt=new Date().toISOString();await persist();console.log(JSON.stringify({status:report.status,phase:report.phase,report:reportPath,errors:report.verdict.errors}));
   if(report.status!=='passed')process.exitCode=1;

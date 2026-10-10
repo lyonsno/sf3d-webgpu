@@ -45,6 +45,7 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
     const sha256=hash.digest('hex');check();
     if(sha256!==expectedSha256)throw Error('canonical artifact SHA256 mismatch');
     const etag='"sha256-'+sha256+'"';
+    let closed=false;
     return {receipt:{path:fs.realpathSync(weightsPath),sha256,byteLength:before.size,headerSha256:digest(header),headerBytes:headerSize,
       tensorCount:tensors.size,etag,units,totalGpuBytes,cpuBytes,gpuBytes,sourceStat:{dev:before.dev,ino:before.ino,size:before.size,mtimeMs:before.mtimeMs,ctimeMs:before.ctimeMs}},
       serve(req,res){
@@ -55,9 +56,20 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
           const start=Number(match[1]),end=Number(match[2]);
           if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||end>=before.size){res.writeHead(416).end();return;}
           res.writeHead(206,{'Content-Type':'application/octet-stream','Content-Length':end-start+1,'Content-Range':`bytes ${start}-${end}/${before.size}`,ETag:etag,'Cache-Control':'no-store'});
-          const stream=fs.createReadStream(weightsPath,{fd,autoClose:false,start,end});
+          // destroy() closes a ReadStream fd even with autoClose:false. Each
+          // HTTP response owns a separately checked fd, never the source anchor.
+          const responseFd=fs.openSync(weightsPath,'r');
+          if(stamp(fs.fstatSync(responseFd))!==identity){fs.closeSync(responseFd);throw Error('canonical range descriptor changed');}
+          let stream;
+          try{stream=fs.createReadStream(weightsPath,{fd:responseFd,autoClose:true,start,end});}
+          catch(error){fs.closeSync(responseFd);throw error;}
           stream.on('error',error=>res.destroy(error));res.on('close',()=>stream.destroy());stream.pipe(res);
         }catch(error){res.writeHead(409).end(error.message);}
-      },close(){fs.closeSync(fd);}};
+      },close(){if(closed)return;closed=true;try{check();}finally{fs.closeSync(fd);}}};
   }catch(error){fs.closeSync(fd);throw error;}
+}
+
+export function closeCanonicalSource(report,source){
+  try{source?.close();}
+  catch(error){report.cleanup.canonicalSourceError=error.message;report.status='failed';}
 }
