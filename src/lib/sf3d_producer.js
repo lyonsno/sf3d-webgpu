@@ -39,6 +39,8 @@ import { isLoaderMemoryBudget } from './loader_memory_budget.js';
 export { createLoaderMemoryBudget } from './loader_memory_budget.js';
 // Opt-in complete encoder consumer; this does not enable the held full model.
 export { runResidentDino,selectDinoPhase } from './resident_dino.js';
+export {runResidentTwoStream,disposeResidentTwoStream} from './resident_two_stream.js';
+export {TwoStreamBackbone} from './two_stream.js';
 export { preprocessImage } from './inference.js';
 import { initPipelines } from './inference.js';
 import { retainClipPrepWorker, releaseClipPrepWorker } from './clip_estimator.js';

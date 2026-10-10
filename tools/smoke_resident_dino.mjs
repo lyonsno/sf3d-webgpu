@@ -15,18 +15,24 @@ import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction,stopOwnedBrowser,ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
+import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream} from './resident_two_stream_acceptance.mjs';
+const throughBackbone=process.argv.includes('--through-backbone');
+const backboneModule=throughBackbone?await import('../src/lib/two_stream.js'):null;
+const groups=throughBackbone?(await import('../src/lib/cooperative_two_stream.js')).groupTwoStreamDuties(
+  backboneModule.createTwoStreamAttentionDutyPlan(1297,{residentFFN:true,linearRowsPerDuty:128})):null;
 const arg=name=>{const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root=arg('--repo-root')?path.resolve(arg('--repo-root')):null;
 const requestedReportPath=path.resolve(arg('--report')??path.join(os.tmpdir(),'sf3d-dino-'+randomUUID()+'.json'));
-const occupied=fs.existsSync(requestedReportPath)||fs.existsSync(requestedReportPath+'.input.f32')||fs.existsSync(requestedReportPath+'.output.f32');
+const occupied=fs.existsSync(requestedReportPath)||fs.existsSync(requestedReportPath+'.input.f32')||fs.existsSync(requestedReportPath+'.output.f32')||fs.existsSync(requestedReportPath+'.triplane.f32');
 const reportPath=occupied?requestedReportPath+'.refused-'+randomUUID()+'.json':requestedReportPath;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
-const report={schema:'sf3d.native-resident-dino.v0',status:'running',phase:'arguments',runId:randomUUID(),rootPid:process.pid,
-  receiver:'mini-wake-and-bake-pit-boss',claim:'complete native DINO only; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim',
+const report={schema:throughBackbone?'sf3d.native-resident-backbone.v0':'sf3d.native-resident-dino.v0',status:'running',phase:'arguments',runId:randomUUID(),rootPid:process.pid,
+  receiver:'mini-wake-and-bake-pit-boss',claim:throughBackbone?'complete native DINO plus existing two-stream backbone; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim':'complete native DINO only; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim',
   requested:{report:requestedReportPath,repoRoot:root,revision:arg('--expected-revision'),weightsPath:arg('--weights'),weightsSha256:arg('--expected-weights-sha256'),
     input:arg('--input'),inputSha256:arg('--expected-input-sha256'),chrome:arg('--chrome'),processBudgetBytes:Number(arg('--process-budget-bytes')),
-    cpuBytes:128*1024*1024,gpuBytes:384*1024*1024,totalBytes:512*1024*1024},
-  evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
+    throughBackbone,cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
+  allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V,128-query scores and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
+  evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',twoStreamOutput:reportPath+'.triplane.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 const persist=()=>writeJsonReportAtomic(reportPath,report);
@@ -60,6 +66,16 @@ try{
   report.artifact={sha256:digest(artifact),kitVersion:JSON.parse(fs.readFileSync(path.join(root,'node_modules/@kaminos/webgpu-inference-kit/package.json'))).version,
     entry:'/dist-lib/sf3d-producer.js',sourceRevision:report.source.revision,lockSha256:digest(fs.readFileSync(path.join(root,'package-lock.json')))};
   const order=['preprocess','camera',...Array.from({length:24},(_,i)=>'dino-block-'+i),'dino-output'];
+  if(throughBackbone){
+    order.push('two-stream-embedding');
+    for(const group of groups){
+      order.push('two-stream-'+group.stageId);
+      for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty}).requiredBytes>0)
+        order.push('two-stream-duty-'+duty.dutyIndex);
+    }
+    order.push('two-stream-output');
+  }
+  report.expectedPhaseOrder=order;
   const readBody=async req=>{const chunks=[];for await(const chunk of req)chunks.push(chunk);return Buffer.concat(chunks);};
   server=http.createServer(async(req,res)=>{
     try{
@@ -81,7 +97,19 @@ try{
         if(!report.backend||report.backend.isFallbackAdapter!==false||phase.name!==order[report.phaseObservations.length]||report.memorySafety||report.phaseObservations.some(o=>o.verdict!=='admitted'))throw Error('effective backend, phase order or safety hold prevents allocation');
         for(const tensor of phase.tensors??[]){const observed=table.get(tensor.name);
           if(!observed||observed.size!==tensor.size||observed.offset!==tensor.offset||observed.dtype!==tensor.dtype)throw Error('effective tensor source metadata mismatch');}
-        const demand=dinoPhaseDemand(phase),processObservation=await monitor.sample();
+        let demand;
+        if(phase.name.startsWith('two-stream-')){
+          if(!throughBackbone)throw Error('requested route does not include backbone');
+          if(phase.name.startsWith('two-stream-duty-')){
+            const index=Number(phase.name.slice('two-stream-duty-'.length)),expected=groups.flatMap(g=>g.duties)[index];
+            if(!expected||phase.duty?.dutyIndex!==expected.dutyIndex||phase.duty?.dutyId!==expected.dutyId||
+              phase.duty?.kind!==expected.kind||phase.duty?.rowStart!==expected.rowStart||
+              phase.duty?.rowCount!==expected.rowCount||phase.duty?.direction!==expected.direction)
+              throw Error('effective complete backbone duty identity mismatch');
+            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected});
+          }else demand=twoStreamPhaseDemand(phase);
+        }else demand=dinoPhaseDemand(phase);
+        const processObservation=await monitor.sample();
         const host={...observeMacMemory(),model:execFileSync('sysctl',['-n','hw.model'],{encoding:'utf8'}).trim(),processor:execFileSync('sysctl',['-n','machdep.cpu.brand_string'],{encoding:'utf8'}).trim()};
         const processRow=processObservation.lastObservation;
         const observation={phase:phase.name,descriptor:phase,demand,host,process:processObservation,
@@ -91,6 +119,17 @@ try{
             processRow.runId===report.runId&&processRow.rootPid===process.pid&&processRow.sampledAggregatePhysicalFootprintBytes+demand.requiredBytes<=report.requested.processBudgetBytes&&!report.memorySafety?'admitted':'refused'};
         report.phaseObservations.push(observation);report.phase='phase-'+phase.name;await persist();
         res.writeHead(observation.verdict==='admitted'?200:409,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(observation));return;
+      }
+      if(name==='/triplane.f32'&&req.method==='POST'){
+        if(!throughBackbone)throw Error('backbone output not requested');
+        const offset=Number(req.headers['x-byte-offset']),bytes=await readBody(req),expected=3*1024*96*96*4;
+        if(offset!==(report.twoStreamReadbackBytes??0)||offset%4||!bytes.length||bytes.length%4||
+          bytes.length>128*1024*4||offset+bytes.length>expected)throw Error('partial, skipped, duplicate or oversized readback chunk');
+        // Append all bytes in order; no result cap, cached file or overwrite.
+        if(offset===0)fs.writeFileSync(report.evidencePaths.twoStreamOutput,bytes,{flag:'wx'});
+        else fs.appendFileSync(report.evidencePaths.twoStreamOutput,bytes);
+        report.twoStreamReadbackBytes=offset+bytes.length;
+        await persist();res.writeHead(200).end();return;
       }
       if(req.method==='POST'&&['/input.f32','/output.f32'].includes(name)){
         const bytes=await readBody(req),expected=name==='/input.f32'?3*512*512*4:1297*1024*4;
@@ -129,7 +168,7 @@ try{
   const page=await browser.newPage();await page.setViewport({width:1280,height:960});await page.goto(report.url,{timeout:0});
   report.phase='native-dino';await persist();
   Object.assign(report,await page.evaluate(async config=>{
-    const {createLoaderMemoryBudget,runResidentDino,preprocessImage}=await import('/dist-lib/sf3d-producer.js');
+    const {createLoaderMemoryBudget,runResidentDino,runResidentTwoStream,TwoStreamBackbone,preprocessImage}=await import('/dist-lib/sf3d-producer.js');
     const observe=async phase=>{const response=await fetch('/phase',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(phase)});
       if(!response.ok)throw Error('fresh phase observation refused: '+await response.text());};
     const persistTensor=async(url,bytes)=>{const response=await fetch(url,{method:'POST',body:bytes});if(!response.ok)throw Error('complete tensor persistence failed: '+await response.text());};
@@ -139,7 +178,7 @@ try{
     if(!backendResponse.ok)throw Error('native backend identity refused: '+await backendResponse.text());
     if(backend.isFallbackAdapter!==false||!/apple/i.test(backend.vendor))throw Error('actual nonfallback Apple adapter required');
     const budget=createLoaderMemoryBudget(config.requested),device=await budget.requestOwnedDevice(adapter,{requiredLimits:{maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
-    let imageLease,bitmap,staging,failure,failed=false;
+    let imageLease,bitmap,staging,failure,failed=false,twoStream;
     device.pushErrorScope('validation');
     try{
       await observe({name:'preprocess',tensors:[],width:config.input.width,height:config.input.height});
@@ -150,6 +189,10 @@ try{
       const inputHash=await crypto.subtle.digest('SHA-256',inputBytes);
       const inputConsumed={sha256:Array.from(new Uint8Array(inputHash),b=>b.toString(16).padStart(2,'0')).join(''),bytes:inputBytes.byteLength};
       await persistTensor('/input.f32',inputBytes);
+      if(config.requested.throughBackbone){
+        bitmap.close();bitmap=null;imageLease.release();
+        imageLease=budget.reserveCpu(chw.byteLength,'complete-preprocessed-CHW');
+      }
       const dino=await runResidentDino({device,memoryBudget:budget,imageChw:chw,weightsUrl:'/canonical-weights.bin',
         expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag,onBeforePhase:observe,
         onProgress:p=>{document.querySelector('#status').textContent='DINO '+(p.completedItems??0)+'/24 blocks';},
@@ -157,18 +200,50 @@ try{
           staging=device.createBuffer({size:result.tokensBuf.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ,label:'complete-dino-readback'});
           const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(result.tokensBuf,0,staging,0,result.tokensBuf.size);device.queue.submit([encoder.finish()]);
           await staging.mapAsync(GPUMapMode.READ);await persistTensor('/output.f32',new Uint8Array(staging.getMappedRange()));staging.unmap();staging.destroy();staging=null;
+          if(config.requested.throughBackbone){
+            const backbone=new TwoStreamBackbone(device);backbone.init();
+            twoStream=await runResidentTwoStream({device,backbone,memoryBudget:budget,weightsUrl:'/canonical-weights.bin',
+              expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag,
+              imageTokensBuf:result.tokensBuf,N_img:result.N,onBeforePhase:observe,
+              async onBeforeDuty(duty){
+                if(duty.kind==='output')return observe({name:'two-stream-output',tensors:[]});
+                // Fresh observation at every new work-storage cliff; uniform
+                // backing is accounted up front, not a needless host probe for
+                // every allocation-free attention/FFN row dispatch.
+                if(config.allocatingDutyIndices.includes(duty.dutyIndex))
+                  await observe({name:'two-stream-duty-'+duty.dutyIndex,duty,tensors:[]});
+              },
+              onProgress:p=>{document.querySelector('#status').textContent='Actual complete two-stream backbone '+(p.completedItems??0)+' duties';},
+              async withResult(output){
+                const chunkBytes=128*1024*4;
+                staging=device.createBuffer({size:chunkBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ,label:'complete-backbone-stream-readback'});
+                for(let offset=0;offset<output.buffer.size;offset+=chunkBytes){
+                  const bytes=Math.min(chunkBytes,output.buffer.size-offset),encoder=device.createCommandEncoder();
+                  encoder.copyBufferToBuffer(output.buffer,offset,staging,0,bytes);device.queue.submit([encoder.finish()]);
+                  await staging.mapAsync(GPUMapMode.READ);
+                  const response=await fetch('/triplane.f32',{method:'POST',headers:{'X-Byte-Offset':String(offset)},body:new Uint8Array(staging.getMappedRange(),0,bytes)});
+                  if(!response.ok)throw Error('complete backbone persistence failed: '+await response.text());
+                  staging.unmap();
+                }
+                staging.destroy();staging=null;
+              },
+            });
+          }
         }});
       imageLease.release();imageLease=null;const validation=await device.popErrorScope();
       if(validation)throw Error('native validation: '+validation.message);
-      document.querySelector('#status').textContent='All24 DINO blocks completed; full SF3D not yet run';
-      return {backend,dino,inputConsumed,validationError:null,budget:budget.snapshot()};
+      document.querySelector('#status').textContent=config.requested.throughBackbone?
+        'All24 DINO blocks and complete four-block backbone completed; full mesh/material/GLB not yet run':'All24 DINO blocks completed; full SF3D not yet run';
+      return {backend,dino,twoStream,inputConsumed,validationError:null,budget:budget.snapshot()};
     }catch(error){failed=true;failure=error;throw error;}
     finally{
       bitmap?.close();
       try{await device.queue.onSubmittedWorkDone();staging?.destroy();imageLease?.release();device.destroy();budget.restore();}
       catch(error){throw failed?new AggregateError([failure,error],'native DINO failed and cleanup failed',{cause:failure}):error;}
     }
-  },{requested:report.requested,source:report.canonicalSource,input:report.inputArtifact}));
+  },{requested:report.requested,source:report.canonicalSource,input:report.inputArtifact,
+    allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
+  if(throughBackbone)report.twoStreamOutput=inspectTwoStreamOutput(report.evidencePaths.twoStreamOutput);
   report.output=inspectDinoOutput(report.evidencePaths.output);report.phase='complete';report.status='passed';
 }catch(error){report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};}
 finally{
@@ -178,7 +253,7 @@ finally{
   try{if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';}catch(error){report.cleanup.serverError=error.message;report.status='failed';}
   closeCanonicalSource(report,source);
   try{if(profile&&report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});}catch(error){report.cleanup.profileError=error.message;report.status='failed';}
-  report.verdict=acceptResidentDino(report);if(!report.verdict.ok)report.status='failed';report.terminalAt=new Date().toISOString();await persist();
+  report.verdict=throughBackbone?acceptResidentTwoStream(report):acceptResidentDino(report);if(!report.verdict.ok)report.status='failed';report.terminalAt=new Date().toISOString();await persist();
   console.log(JSON.stringify({status:report.status,phase:report.phase,report:reportPath,errors:report.verdict.errors}));
   if(report.status!=='passed')process.exitCode=1;
 }

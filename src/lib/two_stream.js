@@ -103,6 +103,8 @@ export function createTwoStreamAttentionDutyPlan(N_img, options = {}) {
     throw new TypeError('N_img must be a positive safe integer');
   }
   const linearRowsPerDuty = options.linearRowsPerDuty ?? 128;
+  const residentFFN = options.residentFFN ?? false;
+  if (typeof residentFFN !== 'boolean') throw TypeError('residentFFN must be boolean');
   if (!Number.isSafeInteger(linearRowsPerDuty) || linearRowsPerDuty <= 0) {
     throw new TypeError('linearRowsPerDuty must be a positive safe integer');
   }
@@ -197,6 +199,13 @@ export function createTwoStreamAttentionDutyPlan(N_img, options = {}) {
       block,
       direction: 'out',
     });
+    if (residentFFN) appendLinearRanges(
+      `${fuseOut}-ffn-projection`,
+      'fuse-resident-ffn-range',
+      block,
+      triplaneRowRanges,
+    );
+    else {
     appendLinearRanges(
       `${fuseOut}-geglu-expansion`,
       'fuse-geglu-linear-range',
@@ -215,6 +224,7 @@ export function createTwoStreamAttentionDutyPlan(N_img, options = {}) {
       block,
       triplaneRowRanges,
     );
+    }
     append({
       dutyId: `${fuseOut}-final-residual`,
       kind: 'fuse-final-residual',
@@ -382,6 +392,8 @@ export class TwoStreamBackbone {
   createAttentionForwardState(imageTokensBuf, N_img, weights, options = {}) {
     const state = this.createForwardState(imageTokensBuf, N_img, weights);
     state.finePlan = createTwoStreamAttentionDutyPlan(N_img, options);
+    state.residentFFN = options.residentFFN ?? false;
+    state.ffnRowsPerTile = options.linearRowsPerDuty ?? 128;
     return state;
   }
 
@@ -475,6 +487,9 @@ export class TwoStreamBackbone {
         break;
       case 'fuse-ffn-linear-range':
         this._dispatchFineFuseFFNLinearRange(encoder, state, duty);
+        break;
+      case 'fuse-resident-ffn-range':
+        this._dispatchFineFuseResidentFFNRange(encoder, state, duty);
         break;
       case 'fuse-final-residual':
         this._dispatchFineFuseFinalResidual(encoder, state, duty);
@@ -599,6 +614,7 @@ export class TwoStreamBackbone {
       operation.weights.ff,
       operation.N_z,
       operation.D,
+      {rowsPerTile:state.residentFFN?state.ffnRowsPerTile:null},
     );
     const zOutBuf = createEmptyBuffer(this.device, operation.N_z * operation.D * 4);
     encoder.copyBufferToBuffer(
@@ -736,6 +752,11 @@ export class TwoStreamBackbone {
       operation.N_z,
       operation.D,
     );
+    if(state.residentFFN){
+      // The residual/norm command has recorded its last reads. A caller may
+      // retire these only after this duty's actual queue prefix completes.
+      operation.attention=null;operation.attentionProjection=null;
+    }
   }
 
   _dispatchFineFuseGEGLULinearRange(encoder, state, duty) {
@@ -841,6 +862,28 @@ export class TwoStreamBackbone {
     state.activeOperation = null;
   }
 
+  _dispatchFineFuseResidentFFNRange(encoder,state,duty){
+    const operation=this._requireFineFuseOut(state,duty);
+    if(!state.residentFFN||!operation.z2NormBuf)throw Error('resident FFN requires completed residual norm');
+    let phase=operation.ffnProjection;
+    // Validate complete contiguous row provenance before allocating or dispatching.
+    const range=normalizeLinearRowRange(operation.N_z,duty.rowStart,duty.rowCount);
+    if(duty.ownerId!==`${operation.ownerId}-ffn-projection`||
+      duty.rangeIndex!==(phase?.nextRangeIndex??0)||
+      duty.rowStart!==(phase?.nextRowStart??0)||duty.rowEnd!==range.rowEnd||
+      duty.totalRows!==operation.N_z||duty.rangeCount!==Math.ceil(operation.N_z/state.ffnRowsPerTile)||
+      duty.rowCount!==Math.min(state.ffnRowsPerTile,operation.N_z-duty.rowStart))
+      throw Error('resident FFN duty is not the complete contiguous row plan');
+    if(!phase)phase=operation.ffnProjection={
+      ownerId:duty.ownerId,nextRangeIndex:0,nextRowStart:0,rangeCount:duty.rangeCount,
+      output:createEmptyBuffer(this.device,operation.N_z*operation.D*4),
+      scratch:this._createFFNScratch(Math.min(state.ffnRowsPerTile,operation.N_z),operation.D),
+    };
+    this._dispatchFFNRow(encoder,operation.z2NormBuf,phase.output,phase.scratch,
+      operation.weights.ff,duty.rowStart,duty.rowCount,operation.D);
+    phase.nextRangeIndex++;phase.nextRowStart=range.rowEnd;
+  }
+
   _dispatchFineBasicSelfPrepare(encoder, state, duty) {
     if (state.activeOperation != null) {
       throw new Error(`cannot prepare ${duty.dutyId} with active ${state.activeOperation.ownerId}`);
@@ -940,6 +983,7 @@ export class TwoStreamBackbone {
       operation.weights.ff,
       state.N_latent,
       operation.D,
+      {rowsPerTile:state.residentFFN?state.ffnRowsPerTile:null},
     );
     const zOutBuf = createEmptyBuffer(this.device, state.N_latent * operation.D * 4);
     encoder.copyBufferToBuffer(
@@ -1340,9 +1384,43 @@ export class TwoStreamBackbone {
   }
 
   // --- GEGLU FFN ---
-  _dispatchGEGLUFFN(encoder, inputBuf, ffWeights, N, D) {
+  _createFFNScratch(capacity,D){
+    return {input:createEmptyBuffer(this.device,capacity*D*4),
+      expanded:createEmptyBuffer(this.device,capacity*2*CONFIG.gegluInnerDim*4),
+      activated:createEmptyBuffer(this.device,capacity*CONFIG.gegluInnerDim*4),
+      projected:createEmptyBuffer(this.device,capacity*D*4)};
+  }
+
+  _dispatchFFNRow(encoder,input,output,scratch,ff,start,count,D){
+    const inner=CONFIG.gegluInnerDim;
+    encoder.copyBufferToBuffer(input,start*D*4,scratch.input,0,count*D*4);
+    this._dispatchLinear(encoder,scratch.input,scratch.expanded,ff.geglu.weight,ff.geglu.bias,count,D,2*inner);
+    this._dispatchGEGLUActivation(encoder,scratch.expanded,scratch.activated,count,inner);
+    this._dispatchLinear(encoder,scratch.activated,scratch.projected,ff.proj.weight,ff.proj.bias,count,inner,D);
+    encoder.copyBufferToBuffer(scratch.projected,0,output,start*D*4,count*D*4);
+  }
+
+  _dispatchGEGLUFFN(encoder, inputBuf, ffWeights, N, D, {rowsPerTile=null}={}) {
     const device = this.device;
     const innerDim = CONFIG.gegluInnerDim;
+
+    if(rowsPerTile!==null){
+      if(!Number.isSafeInteger(rowsPerTile)||rowsPerTile<=0)throw TypeError('rowsPerTile must be a positive safe integer');
+      if(!Number.isSafeInteger(N)||N<=0||!Number.isSafeInteger(D)||D<=0)throw TypeError('complete positive FFN dimensions required');
+      const capacity=Math.min(rowsPerTile,N);
+      const output=createEmptyBuffer(device,N*D*4);
+      const scratch=this._createFFNScratch(capacity,D);
+      // Rows have independent linear/GEGLU/linear reductions. Record the same
+      // existing kernels and global output placement, reusing scratch only
+      // after the preceding copy in this ordered command stream. No rows drop.
+      for(let start=0;start<N;start+=capacity){
+        const count=Math.min(capacity,N-start);
+        this._dispatchFFNRow(encoder,inputBuf,output,scratch,ffWeights,start,count,D);
+      }
+      // The model's command owner must drain and retire scratch; destroying it
+      // here would invalidate work that has not yet been submitted.
+      return output;
+    }
 
     // Linear: [N, D] → [N, 2*innerDim] (GEGLU projection)
     const geGluProjBuf = createEmptyBuffer(device, N * 2 * innerDim * 4);
