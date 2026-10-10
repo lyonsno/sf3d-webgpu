@@ -39,6 +39,11 @@ assert.equal(acceptStagedTensorWitness(valid()).ok,true,'actual patch-phase rece
     after:{...state,frameCount:4,simStepCount:4,submissions:4,budget:{root:structuredClone(budget),children:[{budget:structuredClone(child)}]}},
     terminalBudget:{root:budget,children:[{budget:child}]},
     textureEvents:[{bytes:16,descriptor:{format:'r32float'},effective:{format:'r32float'}}]};
+  r.foreground.source.packageLockSha256=sha;
+  const dependency='node_modules/three-mesh-bvh/build/index.module.js';
+  r.foreground.servedSources={[dependency]:sha};
+  r.foreground.dependencies={[dependency]:{package:'three-mesh-bvh',version:'0.8.3',lockSha256:sha,sha256:sha,
+    canonicalIntegrityVerified:true,installedBytesMatched:true,byteLength:192653}};
   assert.equal(acceptStagedTensorWitness(r).ok,true,'actual foreground must have its own positive acceptance path');
   for(const [label,mutate]of [
     ['offscreen',x=>x.browserArguments.push('--headless=new')],['wrong source',x=>x.foreground.source.revision='d'.repeat(40)],
@@ -56,6 +61,9 @@ assert.equal(acceptStagedTensorWitness(valid()).ok,true,'actual patch-phase rece
     ['wrong active total',x=>x.foreground.after.budget.root.total.maxBytes=999999],
     ['later progress interval',x=>x.foreground.progressInterval='after-reference'],
     ['missing host parent',x=>delete x.patchPhase.hostBaseline.parentAllowance],
+    ['missing dependency',x=>delete x.foreground.dependencies],
+    ['unverified dependency',x=>x.foreground.dependencies[dependency].canonicalIntegrityVerified=false],
+    ['changed served dependency',x=>x.foreground.servedSources[dependency]='c'.repeat(64)],
   ]){const changed=structuredClone(r);mutate(changed);assert.equal(acceptStagedTensorWitness(changed).ok,false,label);}
 }
 for(const [name,mutate]of [

@@ -78,6 +78,10 @@ export function acceptStagedTensorWitness(report){
     if(report.requested.foreground){
       const fg=report.foreground;
       need(fg?.source?.revision===report.requested.foreground.revision&&fg.source.trackedClean===true,'exact tracked foreground source');
+      const dependencyName='node_modules/three-mesh-bvh/build/index.module.js',dependency=fg?.dependencies?.[dependencyName];
+      need(dependency?.package==='three-mesh-bvh'&&dependency?.canonicalIntegrityVerified===true&&dependency.installedBytesMatched===true&&
+        dependency.byteLength>0&&/^[a-f0-9]{64}$/.test(dependency.sha256??'')&&dependency.sha256===fg?.servedSources?.[dependencyName]&&
+        /^[a-f0-9]{64}$/.test(dependency.lockSha256??'')&&dependency.lockSha256===fg?.source?.packageLockSha256,'canonical lock-identified foreground dependency actually served');
       need(report.browserArguments?.every(value=>!value.startsWith('--headless'))&&fg?.visibility==='headed-independent-browser','visible independent foreground route');
       need(fg?.sameDevice===true&&unit?.deviceOwnership==='pre-bound-caller-host','actual host device shared with learned operation');
       need(fg?.before?.active===true&&fg.after?.active===true&&!fg.after?.error,'ordinary foreground remains active');

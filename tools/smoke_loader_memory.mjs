@@ -16,6 +16,7 @@ import {prepareCanonicalTensorSource,closeCanonicalSource} from './canonical_ten
 import {observeMacMemory} from './memory_admission.mjs';
 import {PATCH_TENSOR_NAMES,patchPhaseDemand,checkPatchOutput} from './patch_phase_reference.mjs';
 import {installForegroundAcquisition} from './foreground_guard_browser.js';
+import {prepareForegroundDependency} from './foreground_dependency_source.mjs';
 const arg = name => {const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root = arg('--repo-root') ? path.resolve(arg('--repo-root')) : null;
 const reportPath = path.resolve(arg('--report') ?? path.join(os.tmpdir(),'sf3d-loader-memory-'+randomUUID()+'.json'));
@@ -63,7 +64,7 @@ try {
   const git = args => execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
   report.source={revision:git(['rev-parse','HEAD']), clean:git(['status','--porcelain'])==='', repoRoot:root, hostname:os.hostname()};
   if(!report.source.clean || report.source.revision!==report.requested.revision)throw Error('clean exact requested source required');
-  const foregroundSources=new Map();
+  const foregroundSources=new Map(),foregroundDependencies=new Map();
   if(foregroundRoot){
     const fgGit=args=>execFileSync('git',args,{cwd:foregroundRoot,encoding:'utf8'}).trim();
     report.foreground={source:{repoRoot:foregroundRoot,revision:fgGit(['rev-parse','HEAD']),trackedClean:fgGit(['status','--porcelain','--untracked-files=no'])==='',
@@ -96,6 +97,11 @@ try {
     if(report.foreground.preflight.host.source!=='live-macos'||report.foreground.preflight.host.observerErrors.length||
       report.foreground.preflight.host.hostFreeBytes<report.requested.totalBytes)throw Error('current live host headroom insufficient for combined explicit foreground allowance before browser launch');
     Object.assign(report.evidencePaths,{foregroundBefore:reportPath+'.foreground-before.png',foregroundAfter:reportPath+'.foreground-after.png'});
+    const dependency=await prepareForegroundDependency({repoRoot:foregroundRoot,revision:report.foreground.source.revision,
+      outputDir:path.join(path.dirname(reportPath),'foreground-dependencies')});
+    foregroundDependencies.set(dependency.relative,dependency.bytes);
+    report.foreground.dependencies={[dependency.relative]:dependency.receipt};
+    report.foreground.source.packageLockSha256=dependency.receipt.lockSha256;
   }
   report.browserExecutable=fs.realpathSync(arg('--chrome'));
   if(/\/Google Chrome\.app\//.test(report.browserExecutable))throw Error('independent browser required; installed GUI Chrome cannot run headlessly');
@@ -137,7 +143,8 @@ try {
       try{
         const relative=decodeURIComponent(name.slice('/foreground/'.length)),file=path.resolve(foregroundRoot,relative);
         if(path.relative(foregroundRoot,file).startsWith('..')||/\.(bin|glb|gltf)$/i.test(file))throw Error('unadmitted model/asset source refused by selected consumer host');
-        let data=foregroundSources.get(relative);
+        let data=foregroundSources.get(relative)??foregroundDependencies.get(relative);
+        if(data&&foregroundDependencies.has(relative))report.foreground.servedSources[relative]=digest(data);
         if(!data){
           const object=report.foreground.source.revision+':'+relative;
           const committedBytes=Number(execFileSync('git',['cat-file','-s',object],{cwd:foregroundRoot,encoding:'utf8'}).trim());
@@ -219,14 +226,20 @@ try {
     report.foreground.console=[];report.foreground.pageErrors=[];
     page.on('console',message=>report.foreground.console.push({type:message.type(),text:message.text()}));
     page.on('pageerror',error=>report.foreground.pageErrors.push(error.message));
-    let failStartup;
-    const startupFailure=new Promise((_resolve,reject)=>{failStartup=error=>reject(Error('foreground startup exception: '+error.message));});
+    let failStartup,startupError;
+    const startupFailure=new Promise((_resolve,reject)=>{failStartup=error=>{startupError=Error('foreground startup exception: '+error.message);reject(startupError);};});
+    const failRequiredResponse=response=>{if(response.status()>=400&&response.request().resourceType()==='script')
+      failStartup(Error('foreground required module refused: HTTP '+response.status()+' '+response.url()));};
+    const failRequiredRequest=request=>{if(request.resourceType()==='script')
+      failStartup(Error('foreground required module network failure: '+request.url()+' '+request.failure()?.errorText));};
     page.on('pageerror',failStartup);
+    page.on('response',failRequiredResponse);page.on('requestfailed',failRequiredRequest);
     try{
       const navigation=await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'networkidle0',timeout:0}),startupFailure]);
+      if(startupError)throw startupError;
       if(!navigation?.ok())throw Error('foreground navigation refused: HTTP '+navigation?.status());
       await Promise.race([page.waitForFunction(()=>window.__kaminosVolumePrototype?.debugState().active||window.__kaminosVolumePrototype?.debugState().error,{timeout:0}),startupFailure]);
-    }finally{page.off('pageerror',failStartup);}
+    }finally{page.off('pageerror',failStartup);page.off('response',failRequiredResponse);page.off('requestfailed',failRequiredRequest);}
     const initial=await page.evaluate(()=>window.__kaminosVolumePrototype.debugState());
     if(!initial.active||initial.error)throw Error('ordinary foreground initialization failed: '+initial.error);
     await page.waitForFunction(()=>window.__kaminosVolumePrototype.debugState().frameCount>=3||window.__kaminosVolumePrototype.debugState().error,{timeout:0});
