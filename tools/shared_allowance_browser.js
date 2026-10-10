@@ -6,13 +6,18 @@ export async function runSharedAllowanceWitness(){
   const requested={cpuBytes:64,gpuBytes:64},parent=createLoaderMemoryBudget(requested);
   const budgets=[0,1].map(()=>createLoaderMemoryBudget({...requested,parentBudget:parent}));
   const devices=[],leases=[];
-  const report={requested,outputs:[],validationErrors:[],refusals:{}};
+  const report={requested,outputs:[],validationErrors:[],refusals:{},backends:[]};
   const errorRow=e=>({name:e.name,message:e.message,memoryBudget:e.memoryBudget});
   try{
-    const adapter=await navigator.gpu?.requestAdapter();if(!adapter)throw Error('actual WebGPU adapter required');
-    const info=adapter.info;report.backend={vendor:info.vendor,architecture:info.architecture,description:info.description,isFallbackAdapter:info.isFallbackAdapter??adapter.isFallbackAdapter};
-    if(report.backend.isFallbackAdapter!==false||!/apple/i.test(info.vendor))throw Error('nonfallback Apple route required');
-    for(const budget of budgets){const device=await adapter.requestDevice();devices.push(device);budget.bindOwnedDevice(device);device.pushErrorScope('validation');}
+    for(const budget of budgets){
+      // Chromium/Dawn consumes an adapter on requestDevice. Distinct runtimes
+      // acquire distinct handles, verifying each effective route independently.
+      const adapter=await navigator.gpu?.requestAdapter();if(!adapter)throw Error('actual WebGPU adapter required');
+      const info=adapter.info,backend={vendor:info.vendor,architecture:info.architecture,description:info.description,isFallbackAdapter:info.isFallbackAdapter??adapter.isFallbackAdapter};
+      if(backend.isFallbackAdapter!==false||!/apple/i.test(info.vendor))throw Error('nonfallback Apple route required');
+      report.backends.push(backend);report.backend??=backend;
+      const device=await adapter.requestDevice();devices.push(device);budget.bindOwnedDevice(device);device.pushErrorScope('validation');
+    }
     report.distinctOwnedDevices=devices[0]!==devices[1];if(!report.distinctOwnedDevices)throw Error('two distinct owned devices required');
     const work=async(index,contend=false)=>{
       const device=devices[index],budget=budgets[index],owned=[];

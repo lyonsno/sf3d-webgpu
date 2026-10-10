@@ -35,6 +35,7 @@ const shared=()=>{
   const ledger=()=>({cpu:{maxBytes:64,liveBytes:0,peakLiveBytes:32,physicalMemoryMeasured:false},gpu:{maxBytes:64,liveBytes:0,peakLiveBytes:48,physicalMemoryMeasured:false}});
   r.sharedAllowance={requested:{cpuBytes:64,gpuBytes:64},backend:{vendor:'apple',isFallbackAdapter:false},distinctOwnedDevices:true,parent:ledger(),children:[ledger(),ledger()],validationErrors:[null,null],outputs:[[14,22,26,34],[14,22,26,34]],
     held:{cpu:{liveBytes:32},gpu:{liveBytes:48}},refusals:{cpu:{name:'SF3DMemoryBudgetError',memoryBudget:{requestedBytes:40,liveBytes:32,maxBytes:64}},gpu:{name:'SF3DMemoryBudgetError',memoryBudget:{requestedBytes:32,liveBytes:48,maxBytes:64}}}};
+  r.sharedAllowance.backends=[{vendor:'apple',isFallbackAdapter:false},{vendor:'apple',isFallbackAdapter:false}];
   return r;
 };
 for(const [name,mutate]of [
@@ -43,6 +44,7 @@ for(const [name,mutate]of [
   ['refusal without root contention',r=>r.sharedAllowance.refusals.gpu.memoryBudget.liveBytes=0],
   ['same device substituted',r=>r.sharedAllowance.distinctOwnedDevices=false],
   ['shared fallback route',r=>r.sharedAllowance.backend.isFallbackAdapter=true],
+  ['second adapter fallback',r=>r.sharedAllowance.backends[1].isFallbackAdapter=true],
   ['second compute missing',r=>r.sharedAllowance.outputs.pop()],
   ['wrong native numerics',r=>r.sharedAllowance.outputs[1][0]=0],
   ['stranded root charge',r=>r.sharedAllowance.parent.gpu.liveBytes=48],

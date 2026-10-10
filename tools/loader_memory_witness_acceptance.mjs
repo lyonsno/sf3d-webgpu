@@ -21,6 +21,7 @@ export function acceptLoaderMemoryWitness(report) {
     need(shared?.requested?.cpuBytes===64&&shared?.requested?.gpuBytes===64,'exact tiny shared diagnostic allowance');
     need(shared?.distinctOwnedDevices===true,'two distinct actual owned devices');
     need(shared?.backend?.isFallbackAdapter===false&&/apple/i.test(shared.backend.vendor),'actual shared nonfallback Apple adapter');
+    need(shared?.backends?.length===2&&shared.backends.every(b=>b?.isFallbackAdapter===false&&/apple/i.test(b.vendor)),'both independent adapter routes verified');
     need(JSON.stringify(shared?.outputs)==='[[14,22,26,34],[14,22,26,34]]','both guarded compute/readbacks complete');
     need(JSON.stringify(shared?.validationErrors)==='[null,null]','both shared-device validation scopes');
     for(const [scope,held,requested]of [['cpu',32,40],['gpu',48,32]]){
