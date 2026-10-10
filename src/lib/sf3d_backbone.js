@@ -184,6 +184,7 @@ export class SF3DImageTokenizer {
    * @param {(blockStart:number, blockEnd:number, encodeChunk:(enc:GPUCommandEncoder)=>void)=>Promise<void>} o.driver
    */
   async encodeCooperative({ imageBuf, cameraEmbedBuf, weights, numBlocks, chunkBlocks, driver, withChunkWeights = null, retireIntermediateBuffers = false }) {
+    if(this._capturedWorkOwner)throw Error('DINO work-buffer cleanup is quarantined');
     if (numBlocks !== VIT_CONFIG.numLayers) {
       throw new Error(
         `encodeCooperative numBlocks ${numBlocks} must equal VIT_CONFIG.numLayers ${VIT_CONFIG.numLayers}`,
@@ -195,7 +196,7 @@ export class SF3DImageTokenizer {
     let ctx = null;
     let result = null;
     const allocations=[];
-    let failure;
+    let failure,failed=false;
 
     try{
     for (let start = 0; start < numBlocks; start += chunkBlocks) {
@@ -224,21 +225,36 @@ export class SF3DImageTokenizer {
 
     if (!result) throw new Error('encodeCooperative produced no result');
     return result;
-    }catch(error){failure=error;throw error;}
+    }catch(error){failed=true;failure=error;throw error;}
     finally{
       if(retireIntermediateBuffers){
         // Capture only synchronous model encoding, never a yielding host turn.
         // Do not retire backing still referenced by an unresolved queue prefix.
-        try{await this.device.queue.onSubmittedWorkDone();}
-        catch(error){throw failure?new AggregateError([failure,error],'DINO failed and work-buffer drain is unresolved',{cause:failure}):error;}
-        const keep=failure?null:result?.tokensBuf,retired=new Set(),errors=[];
-        for(const {buffer} of allocations)if(buffer!==keep&&!retired.has(buffer)){
-          try{buffer.destroy();retired.add(buffer);}catch(error){errors.push(error);}
+        this._capturedWorkOwner={buffers:new Set(allocations.map(a=>a.buffer)),keep:failed?null:result?.tokensBuf};
+        try{await this.retireCapturedWorkBuffers();}
+        catch(error){
+          // The output was never returned when finally rejects: recovery owns
+          // it too. Keep the entire unresolved inventory on this tokenizer.
+          if(this._capturedWorkOwner)this._capturedWorkOwner.keep=null;
+          throw failed?new AggregateError([failure,error],'DINO failed and work-buffer cleanup is unresolved',{cause:failure}):error;
         }
-        for(const [name,buffer] of Object.entries(this._dinov2Diag??{}))if(retired.has(buffer))delete this._dinov2Diag[name];
-        if(errors.length)throw new AggregateError(failure?[failure,...errors]:errors,'DINO work-buffer retirement failed',{cause:failure});
       }
     }
+  }
+
+  /** Recover only after a new actual drain; unresolved backing stays owned. */
+  async retireCapturedWorkBuffers(){
+    const owner=this._capturedWorkOwner;if(!owner)return;
+    await this.device.queue.onSubmittedWorkDone();
+    const errors=[];
+    for(const buffer of owner.buffers)if(buffer!==owner.keep){
+      try{
+        buffer.destroy();owner.buffers.delete(buffer);
+        for(const [name,diag] of Object.entries(this._dinov2Diag??{}))if(diag===buffer)delete this._dinov2Diag[name];
+      }catch(error){errors.push(error);}
+    }
+    if(errors.length)throw new AggregateError(errors,'DINO work-buffer retirement failed');
+    this._capturedWorkOwner=null;
   }
 
   /**

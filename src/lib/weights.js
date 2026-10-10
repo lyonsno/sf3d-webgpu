@@ -645,6 +645,11 @@ export async function createWeightPhaseSource(device,url,options={}){
     return Object.fromEntries(entries.map(([key,v])=>[key,select(v,names,buffers)]));
   };
   return Object.freeze({template,loadingReport:source.report,phases,
+    describe(selection){
+      assertActive();const names=new Set();select(selection,names);
+      if(!names.size)throw TypeError('nonempty weight phase selection required');
+      return Object.freeze([...names].map(name=>Object.freeze({name,...source.tensors.get(name)})));
+    },
     async withWeights(selection,work){
       assertActive();if(typeof work!=='function')throw TypeError('weight phase computation required');
       const names=new Set();
@@ -654,19 +659,19 @@ export async function createWeightPhaseSource(device,url,options={}){
       const owner=rangeLoadContext(device,options.memoryBudget),buffers=new Map();
       const phase={tensorNames:[...names],status:'loading',retirementAuthority:'API destruction after queue drain; not physical reclamation'};
       phases.push(phase);
-      let value,error;
+      let value,error,failed=false;
       try{
         for(const name of names)buffers.set(name,(await uploadRangeTensor(device,source,name,owner)).buffer);
         phase.status='computing';value=await work(select(pinned,new Set(),buffers));
-      }catch(failure){error=failure;phase.error=String(failure?.message??failure);}
+      }catch(failure){failed=true;error=failure;phase.error=String(failure?.message??failure);}
       try{
         if(owner.ownedBuffers.size)await device.queue.onSubmittedWorkDone();
-        owner.cleanup();buffers.clear();phase.status=error?'failed-retired':'completed-retired';
+        owner.cleanup();buffers.clear();phase.status=failed?'failed-retired':'completed-retired';
       }catch(failure){
         quarantined=true;unresolvedOwner=owner;phase.status='cleanup-unresolved';phase.cleanupError=String(failure?.message??failure);
-        error=error?new AggregateError([error,failure],'weight phase failed and cleanup is unresolved',{cause:error}):failure;
+        error=failed?new AggregateError([error,failure],'weight phase failed and cleanup is unresolved',{cause:error}):failure;failed=true;
       }finally{active=false;}
-      if(error)throw error;return value;
+      if(failed)throw error;return value;
     },
     async dispose(){
       if(active)throw Error('cannot dispose an active weight phase');

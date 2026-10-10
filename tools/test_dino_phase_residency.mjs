@@ -33,4 +33,37 @@ const retained=await retiring.encodeCooperative({imageBuf:{},cameraEmbedBuf:{},w
   retireIntermediateBuffers:true,driver:async(start,end,encode)=>{encode({});}});
 assert.equal(device.buffers[0].destroyed,1,'completed DINO work buffers retire rather than accumulating into the next model phase');
 assert.equal(retained.tokensBuf.destroyed,0,'the complete encoder output survives for the backbone');
+retained.tokensBuf.destroy();
+const unresolved=Object.create(SF3DImageTokenizer.prototype),failedDevice=fakeWeightDevice();unresolved.device=failedDevice;
+unresolved._setupEncode=()=>({temporary:createEmptyBuffer(failedDevice,16),output:createEmptyBuffer(failedDevice,16)});
+unresolved._encodeBlock=()=>{};unresolved._finalizeEncode=(encoder,ctx)=>({tokensBuf:ctx.output,N:1297});
+failedDevice.queue.onSubmittedWorkDone=async()=>{throw Error('unresolved native drain');};
+const run=()=>unresolved.encodeCooperative({imageBuf:{},cameraEmbedBuf:{},weights:{},numBlocks:24,chunkBlocks:1,
+  retireIntermediateBuffers:true,driver:async(start,end,encode)=>{encode({});}});
+await assert.rejects(run,/unresolved native drain/);
+const count=failedDevice.buffers.length;
+failedDevice.queue.onSubmittedWorkDone=async()=>{};
+await assert.rejects(run,/quarantined/,'failed native work ownership cannot disappear into a local variable');
+assert.equal(failedDevice.buffers.length,count,'quarantine refuses another encode before allocation');
+await unresolved.retireCapturedWorkBuffers();
+assert.ok(failedDevice.buffers.every(b=>b.destroyed===1),'explicit successful recovery retires the failed complete inventory');
+const destruction=Object.create(SF3DImageTokenizer.prototype),destroyDevice=fakeWeightDevice();destruction.device=destroyDevice;
+destruction._setupEncode=()=>{
+  const temporary=createEmptyBuffer(destroyDevice,16),output=createEmptyBuffer(destroyDevice,16),original=temporary.destroy;let first=true;
+  temporary.destroy=function(){if(first){first=false;throw Error('native destroy failed');}return original.call(this);};
+  return {temporary,output};
+};
+destruction._encodeBlock=()=>{};destruction._finalizeEncode=(encoder,ctx)=>({tokensBuf:ctx.output,N:1297});
+await assert.rejects(()=>destruction.encodeCooperative({numBlocks:24,chunkBlocks:1,weights:{},retireIntermediateBuffers:true,
+  driver:async(start,end,encode)=>encode({})}),/retirement failed/);
+assert.ok(destruction._capturedWorkOwner.buffers.has(destroyDevice.buffers[1]),'unreturned output remains with cleanup owner');
+await destruction.retireCapturedWorkBuffers();assert.ok(destroyDevice.buffers.every(b=>b.destroyed===1));
+destruction._setupEncode=()=>({temporary:createEmptyBuffer(destroyDevice,16),output:createEmptyBuffer(destroyDevice,16)});
+const recovered=await destruction.encodeCooperative({numBlocks:24,chunkBlocks:1,weights:{},retireIntermediateBuffers:true,
+  driver:async(start,end,encode)=>encode({})});
+assert.equal(recovered.tokensBuf.destroyed,0);recovered.tokensBuf.destroy();
+failedDevice.queue.onSubmittedWorkDone=async()=>{throw null;};
+await assert.rejects(()=>unresolved.encodeCooperative({numBlocks:24,chunkBlocks:1,weights:{},retireIntermediateBuffers:true,
+  driver:async(start,end,encode)=>{encode({});throw 0;}}),e=>e instanceof AggregateError&&e.errors[0]===0&&e.errors[1]===null);
+failedDevice.queue.onSubmittedWorkDone=async()=>{};await unresolved.retireCapturedWorkBuffers();
 console.log('actual DINO cooperative loop loads/fences/retires all 24 blocks without changing setup/final order');

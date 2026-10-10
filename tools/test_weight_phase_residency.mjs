@@ -57,6 +57,11 @@ try{
   assert.equal(uploadDone,true);assert.ok(budget.snapshot().gpu.liveBytes>0,'submitted weights stay charged until the terminal fence');
   resolveFence();await held;assert.equal(budget.snapshot().gpu.liveBytes,0);
   device.queue.onSubmittedWorkDone=async()=>{};
+  for(const thrown of [null,undefined,0,false,'']){
+    await assert.rejects(()=>source.withWeights({camera:source.template.cameraEmbedder},async()=>{throw thrown;}),e=>e===thrown,
+      'every rejected computation remains a rejection regardless of error truthiness');
+    assert.equal(source.phases.at(-1).status,'failed-retired');
+  }
   await assert.rejects(()=>source.withWeights({camera:source.template.cameraEmbedder},async()=>{throw Error('compute failed');}),/compute failed/);
   assert.equal(budget.snapshot().gpu.liveBytes,0);
   wrongSource=true;
@@ -74,5 +79,12 @@ try{
   await source.dispose();
   assert.equal(budget.snapshot().gpu.liveBytes,0,'recovery drains before owned retirement');
   await assert.rejects(()=>source.withWeights({camera:source.template.cameraEmbedder},async()=>{}),/disposed/);
+  const terminal=await loader.createWeightPhaseSource(device,'fixture.bin',{memoryBudget:budget,expectedWeightBytes:fixture.bytes.length,expectedSourceETag:etag});
+  let rejectTerminal=false;device.queue.onSubmittedWorkDone=async()=>{if(rejectTerminal)throw null;};
+  await assert.rejects(()=>terminal.withWeights(terminal.template.cameraEmbedder,async()=>{rejectTerminal=true;throw 0;}),e=>
+    e instanceof AggregateError&&e.errors.length===2&&e.errors[0]===0&&e.errors[1]===null,'falsy computation and terminal failures remain distinct');
+  assert.equal(terminal.phases.at(-1).status,'cleanup-unresolved');assert.ok(budget.snapshot().gpu.liveBytes>0);
+  await assert.rejects(()=>terminal.withWeights(terminal.template.cameraEmbedder,async()=>{}),/quarantined/);
+  rejectTerminal=false;await terminal.dispose();assert.equal(budget.snapshot().gpu.liveBytes,0);
 }finally{globalThis.fetch=original;device.queue.onSubmittedWorkDone=async()=>{};await source?.dispose();device.destroy();budget.restore();}
 console.log('phase weight construction, all 24 blocks, pre-read selection/source refusal, fences and retirement pass');
