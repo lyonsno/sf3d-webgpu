@@ -17,6 +17,7 @@ import {observeMacMemory} from './memory_admission.mjs';
 import {PATCH_TENSOR_NAMES,patchPhaseDemand,checkPatchOutput} from './patch_phase_reference.mjs';
 import {installForegroundAcquisition} from './foreground_guard_browser.js';
 import {prepareForegroundDependency} from './foreground_dependency_source.mjs';
+import {startForegroundService} from './foreground_service.mjs';
 const arg = name => {const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root = arg('--repo-root') ? path.resolve(arg('--repo-root')) : null;
 const reportPath = path.resolve(arg('--report') ?? path.join(os.tmpdir(),'sf3d-loader-memory-'+randomUUID()+'.json'));
@@ -44,7 +45,7 @@ if(foregroundRoot){
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 if(sharedMode){report.requested.sharedAllowance=true;report.claim+='; shared explicit allowance contention on two actual owned devices with compute/readback, not host-wide coverage';}
 const persist = async () => writeJsonReportAtomic(reportPath,report);
-let browser, child, server, monitor, profile, canonical,foregroundPage;
+let browser, child, server, monitor, profile, canonical,foregroundPage,foregroundService,foregroundChild;
 try {
   await persist();
   if(sharedMode&&canonicalMode)throw Error('shared tiny diagnostic and canonical learned/unit routes must be invoked separately');
@@ -64,7 +65,6 @@ try {
   const git = args => execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
   report.source={revision:git(['rev-parse','HEAD']), clean:git(['status','--porcelain'])==='', repoRoot:root, hostname:os.hostname()};
   if(!report.source.clean || report.source.revision!==report.requested.revision)throw Error('clean exact requested source required');
-  const foregroundSources=new Map(),foregroundDependencies=new Map();
   if(foregroundRoot){
     const fgGit=args=>execFileSync('git',args,{cwd:foregroundRoot,encoding:'utf8'}).trim();
     report.foreground={source:{repoRoot:foregroundRoot,revision:fgGit(['rev-parse','HEAD']),trackedClean:fgGit(['status','--porcelain','--untracked-files=no'])==='',
@@ -99,7 +99,6 @@ try {
     Object.assign(report.evidencePaths,{foregroundBefore:reportPath+'.foreground-before.png',foregroundAfter:reportPath+'.foreground-after.png'});
     const dependency=await prepareForegroundDependency({repoRoot:foregroundRoot,revision:report.foreground.source.revision,
       outputDir:path.join(path.dirname(reportPath),'foreground-dependencies')});
-    foregroundDependencies.set(dependency.relative,dependency.bytes);
     report.foreground.dependencies={[dependency.relative]:dependency.receipt};
     report.foreground.source.packageLockSha256=dependency.receipt.lockSha256;
   }
@@ -139,27 +138,6 @@ try {
   report.servedSources=Object.fromEntries([...sources].map(([name,bytes])=>[name,digest(bytes)]));
   server=http.createServer((req,res)=>{
     const name=new URL(req.url,'http://localhost').pathname;
-    if(foregroundRoot&&name.startsWith('/foreground/')){
-      try{
-        const relative=decodeURIComponent(name.slice('/foreground/'.length)),file=path.resolve(foregroundRoot,relative);
-        if(path.relative(foregroundRoot,file).startsWith('..')||/\.(bin|glb|gltf)$/i.test(file))throw Error('unadmitted model/asset source refused by selected consumer host');
-        let data=foregroundSources.get(relative)??foregroundDependencies.get(relative);
-        if(data&&foregroundDependencies.has(relative))report.foreground.servedSources[relative]=digest(data);
-        if(!data){
-          const object=report.foreground.source.revision+':'+relative;
-          const committedBytes=Number(execFileSync('git',['cat-file','-s',object],{cwd:foregroundRoot,encoding:'utf8'}).trim());
-          if(!Number.isSafeInteger(committedBytes)||committedBytes<0)throw Error('exact committed foreground blob size required');
-          // Node's default maxBuffer silently excludes the actual large
-          // cockpit. Use the observed complete blob size, not an authored cap.
-          const committed=execFileSync('git',['show',object],{cwd:foregroundRoot,stdio:['ignore','pipe','pipe'],maxBuffer:Math.max(1,committedBytes)});
-          data=fs.readFileSync(file);
-          if(digest(data)!==digest(committed))throw Error('foreground served source differs from commit: '+relative);
-          foregroundSources.set(relative,data);report.foreground.servedSources[relative]=digest(data);
-        }
-        const ext=path.extname(file),type={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.png':'image/png','.svg':'image/svg+xml','.jpg':'image/jpeg','.json':'application/json'}[ext]??'application/octet-stream';
-        res.writeHead(200,{'Content-Type':type,'Content-Length':data.length,'Cache-Control':'no-store'}).end(data);return;
-      }catch(error){res.writeHead(503,{'Content-Type':'text/plain','Cache-Control':'no-store'}).end(error.message);return;}
-    }
     if(name==='/'){res.setHeader('content-type','text/html');res.end('<title>SF3D native loader refusal — no inference</title>');return;}
     if(name==='/favicon.ico'){res.writeHead(204).end();return;}
     if(name==='/canonical-weights.bin'&&canonical){canonical.serve(req,res);return;}
@@ -184,7 +162,23 @@ try {
       }catch(error){res.writeHead(500).end(error.message);}});return;
     }
     const bytes=name.startsWith('/fixture/')?fixtures[name.slice(9)]:sources.get(name);
-    if(!bytes){res.writeHead(404).end();return;}
+    if(!bytes){
+      if(foregroundRoot){
+        try{
+          const requestedUrl=req.url;
+          const target=new URL(req.url,'http://localhost');
+          let decoded=target.pathname,previous;
+          do{previous=decoded;decoded=decodeURIComponent(decoded);}while(decoded!==previous);
+          if(decoded.startsWith('/foreground/'))decoded=decoded.slice('/foreground'.length);
+          if(!['GET','HEAD'].includes(req.method)||/\.(bin|glb|gltf|safetensors|npy|npz|pt|gguf)$/i.test(decoded)||
+            /^\/api\/(read|delete|job)/.test(decoded))throw Error('unadmitted model/data/mutation route held by selected consumer');
+          req.url=decoded+target.search;
+          if(!foregroundService)throw Error('owned actual foreground service unavailable');
+          foregroundService.proxy(req,res,{requestedUrl});return;
+        }catch(error){res.writeHead(409,{'Content-Type':'text/plain','Cache-Control':'no-store'}).end(error.message);return;}
+      }
+      res.writeHead(404).end();return;
+    }
     const raw=name.endsWith('.wgsl')&&new URL(req.url,'http://localhost').searchParams.has('raw');
     const servedBytes=raw?Buffer.from('export default '+JSON.stringify(bytes.toString())+';'):bytes;
     res.setHeader('content-type',name.endsWith('.js')||raw?'text/javascript':'application/octet-stream');res.setHeader('content-length',servedBytes.length);res.setHeader('cache-control','no-store');res.end(servedBytes);
@@ -194,8 +188,17 @@ try {
   report.phase='process-guard';
   const script=path.join(root,'tools/process_memory.py');
   report.observer={script,sha256:digest(fs.readFileSync(script)),python:'/usr/bin/python3',periodMs:1000};
-  const stop=memoryStopAction({child:()=>child,report,persist});
+  const stopBrowser=memoryStopAction({child:()=>child,report,persist});
+  const stop=async safety=>{await stopBrowser(safety);if(foregroundChild){report.memorySafety.foregroundServiceStop=await stopOwnedBrowser(foregroundChild);await persist();}};
   monitor=await startProcessMemory({python:report.observer.python,script,runId:report.runId,rawPath:reportPath+'.process.jsonl',maxFootprintBytes:report.requested.processBudgetBytes,onUnsafe:stop});
+  if(foregroundRoot){
+    report.phase='actual-foreground-service';await persist();
+    if(report.memorySafety)throw Error('memory guard prevented actual server launch');
+    foregroundService=await startForegroundService({repoRoot:foregroundRoot,revision:report.foreground.source.revision,
+      outputDir:path.join(path.dirname(reportPath),'foreground-service'),onSpawn:owned=>{foregroundChild=owned;}});
+    report.foreground.service=foregroundService.receipt;
+    foregroundService.onServed=record=>{report.foreground.servedSources[new URL(record.url,'http://localhost').pathname.slice(1)]=record.sha256;};
+  }
   report.phase='browser-launch';await persist();
   profile=await fs.promises.mkdtemp(path.join(os.tmpdir(),'sf3d-loader-browser-'));
   const allowed=['HOME','TMPDIR','PATH','LANG','LC_ALL','LC_CTYPE','__CF_USER_TEXT_ENCODING'];
@@ -223,9 +226,11 @@ try {
     await page.evaluateOnNewDocument(installForegroundAcquisition,{allowance:{cpuBytes:report.requested.cpuBytes,gpuBytes:report.requested.gpuBytes,totalBytes:report.requested.totalBytes},rendererCpuBytes:report.requested.foreground.rendererCpuBytes});
     report.phase='ordinary-foreground-initialization';await persist();
     foregroundPage=page;
-    report.foreground.console=[];report.foreground.pageErrors=[];
+    report.foreground.console=[];report.foreground.pageErrors=[];report.foreground.networkFailures=[];
     page.on('console',message=>report.foreground.console.push({type:message.type(),text:message.text()}));
-    page.on('pageerror',error=>report.foreground.pageErrors.push(error.message));
+    page.on('pageerror',error=>report.foreground.pageErrors.push({message:error.message,stack:error.stack}));
+    page.on('response',response=>{if(response.status()>=400)report.foreground.networkFailures.push({url:response.url(),status:response.status(),type:response.request().resourceType()});});
+    page.on('requestfailed',request=>report.foreground.networkFailures.push({url:request.url(),type:request.resourceType(),error:request.failure()?.errorText}));
     let failStartup,startupError;
     const startupFailure=new Promise((_resolve,reject)=>{failStartup=error=>{startupError=Error('foreground startup exception: '+error.message);reject(startupError);};});
     const failRequiredResponse=response=>{if(response.status()>=400&&response.request().resourceType()==='script')
@@ -356,6 +361,8 @@ finally{
   if(foregroundPage){try{report.foreground.failedCleanup=await foregroundPage.evaluate(async()=>{window.__kaminosVolumePrototype?.dispose();const g=await window.__miniForegroundGuardPromise;return g?.retire();});}catch(error){report.cleanup.foregroundError=error.message;}}
   try{if(monitor)report.processObservation=await monitor.stop();}catch(error){report.cleanup.observerError=error.message;report.status='failed';}
   try{report.cleanup.browser=child?await stopOwnedBrowser(child):{status:'not-started',exitObserved:true};}catch(error){report.cleanup.browser={error:error.message};report.status='failed';}
+  try{if(foregroundChild)report.cleanup.foregroundService=foregroundService?await foregroundService.close():await stopOwnedBrowser(foregroundChild);}
+  catch(error){report.cleanup.foregroundService={error:error.message};report.status='failed';}
   if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';
   closeCanonicalSource(report,canonical);
   try{if(profile && report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});}

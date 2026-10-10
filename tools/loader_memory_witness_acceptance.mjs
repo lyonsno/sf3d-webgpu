@@ -78,6 +78,11 @@ export function acceptStagedTensorWitness(report){
     if(report.requested.foreground){
       const fg=report.foreground;
       need(fg?.source?.revision===report.requested.foreground.revision&&fg.source.trackedClean===true,'exact tracked foreground source');
+      const service=fg?.service;
+      need(service?.route==='owned-actual-kaminos-handler.v0'&&service.loopback===true&&Number.isSafeInteger(service.ownedPid)&&service.ownedPid>0&&
+        /^[a-f0-9]{64}$/.test(service.serveSha256??'')&&service.effective?.source?.repoRoot===report.requested.foreground.repoRoot&&
+        service.effective?.source?.commit===report.requested.foreground.revision,'effective owned actual Kaminos serving route');
+      need(report.cleanup?.foregroundService?.ownedPid===service?.ownedPid&&report.cleanup?.foregroundService?.exitObserved===true,'owned actual server exit observed');
       const dependencyName='node_modules/three-mesh-bvh/build/index.module.js',dependency=fg?.dependencies?.[dependencyName];
       need(dependency?.package==='three-mesh-bvh'&&dependency?.canonicalIntegrityVerified===true&&dependency.installedBytesMatched===true&&
         dependency.byteLength>0&&/^[a-f0-9]{64}$/.test(dependency.sha256??'')&&dependency.sha256===fg?.servedSources?.[dependencyName]&&
