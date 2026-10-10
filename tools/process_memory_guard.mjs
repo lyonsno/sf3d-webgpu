@@ -98,6 +98,9 @@ export async function startProcessMemory({python,script,rootPid=process.pid,rawP
   };
   try{await request();if(failed)throw failed;}catch(e){e.memorySummary=summary;throw e;}
   timer=setInterval(request,periodMs);
-  return{sample:request,async stop(){if(stopped)return summary;await request();stopped=true;clearInterval(timer);if(pending)await pending;
+  // Callers needing a pre-allocation baseline consume this current snapshot,
+  // not a summary file that is only promised at failure/terminal boundaries.
+  // Isolate caller mutations from the running guard's safety state.
+  return{async sample(){await request();return structuredClone(summary);},async stop(){if(stopped)return summary;await request();stopped=true;clearInterval(timer);if(pending)await pending;
     summary.status=failed?(summary.safety?.reason==='process-footprint-budget'?'budget-refused':'failed'):'observed';await persist();return summary;}};
 }

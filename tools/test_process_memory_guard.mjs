@@ -10,7 +10,14 @@ const row=(runId='one')=>({runId,rootPid:42,status:'observed',processes:[{pid:42
   physicalFootprintBytes:100,residentBytes:200,kernelLifetimePeakPhysicalFootprintBytes:120}],sampledAggregatePhysicalFootprintBytes:100});
 try{
   const monitor=await startProcessMemory({rootPid:42,runId:'one',rawPath:path.join(out,'one.jsonl'),periodMs:1000,probe:async()=>row()});
-  await monitor.sample();const s=await monitor.stop();assert.equal(s.status,'observed');assert.ok(s.sampleCount>=2);
+  const baseline=await monitor.sample();
+  assert.equal(baseline?.lastObservation?.runId,'one','sample must return its current in-memory baseline, not require a terminal summary file');
+  assert.equal(baseline.rootPid,42);assert.equal(baseline.status,'running');assert.equal(baseline.coverage,'sampled-owned-process-tree');
+  assert.equal(baseline.lastObservation.sampledAggregatePhysicalFootprintBytes,100);
+  await assert.rejects(fs.access(path.join(out,'one.jsonl.summary.json')),/ENOENT/);
+  baseline.lastObservation.runId='caller-mutated';baseline.processes['42:123'].physicalFootprintBytes=0;
+  const next=await monitor.sample();assert.equal(next.lastObservation.runId,'one');assert.equal(next.processes['42:123'].physicalFootprintBytes,100);
+  const s=await monitor.stop();assert.equal(s.status,'observed');assert.ok(s.sampleCount>=3);
   assert.equal(s.sampledPeakAggregatePhysicalFootprintBytes,100);assert.equal(s.processes['42:123'].kernelLifetimePeakPhysicalFootprintBytes,120);
   assert.equal((await fs.readFile(s.rawPath,'utf8')).trim().split('\n').length,s.sampleCount);
   // Native libproc sample: memory-current-native-r3/report.json,
@@ -31,5 +38,9 @@ try{
   let count=0;const failed=await startProcessMemory({rootPid:42,runId:'one',rawPath:path.join(out,'failed.jsonl'),probe:async()=>{
     if(count++)throw Error('observed sampler failure');return row();}});
   const failure=await failed.stop();assert.equal(failure.status,'failed');assert.match(failure.error,/sampler failure/);
+  let staleCount=0;const stale=await startProcessMemory({rootPid:42,runId:'one',rawPath:path.join(out,'stale-after-start.jsonl'),
+    probe:async()=>row(staleCount++?'old':'one')});
+  const staleSnapshot=await stale.sample();assert.equal(staleSnapshot.status,'failed');assert.match(staleSnapshot.error,/current-owner/);
+  assert.equal((await stale.stop()).status,'failed');
 }finally{await fs.rm(out,{recursive:true,force:true});}
 console.log('Uncapped raw samples and distinct process/lifetime peaks preserve identity; stale, missing and failed sampling cannot masquerade as measured zero.');

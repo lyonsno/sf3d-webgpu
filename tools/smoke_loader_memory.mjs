@@ -144,10 +144,13 @@ try {
   if(canonicalMode){
     report.phase='native-canonical-tensor-unit';await persist();
     if(patchMode){
-      report.phase='native-canonical-patch-phase';await monitor.sample();
-      // sample() updates the durable summary; read that exact raw observer
-      // result for the post-launch/pre-allocation baseline, without stopping it.
-      report.processObservation=JSON.parse(fs.readFileSync(reportPath+'.process.jsonl.summary.json','utf8'));
+      report.phase='native-canonical-patch-phase';
+      report.processObservation=await monitor.sample();
+      const baseline=report.processObservation;
+      if(baseline.status!=='running'||baseline.runId!==report.runId||baseline.rootPid!==process.pid||
+        baseline.lastObservation?.runId!==report.runId||baseline.lastObservation?.rootPid!==process.pid||
+        baseline.lastObservation?.status!=='observed'||baseline.coverage!=='sampled-owned-process-tree'||report.memorySafety)
+        throw Error('current successful owned-process baseline required before learned allocation');
       await persist();
       Object.assign(report,await page.evaluate(async config=>{const {runPatchPhase}=await import('/tools/patch_phase_browser.js');return runPatchPhase(config);},
         {requested:report.requested,source:report.canonicalSource,demand:report.phaseDemand,input:report.inputArtifact}));
