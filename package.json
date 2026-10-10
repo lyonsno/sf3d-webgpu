@@ -59,7 +59,7 @@
     "test:parity-evidence-admission": "node tools/test_parity_evidence_admission_contract.mjs"
   },
   "devDependencies": {
-    "@kaminos/webgpu-inference-kit": "0.1.52",
+    "@kaminos/webgpu-inference-kit": "0.1.53",
     "puppeteer-core": "^25.2.1",
     "vite": "^6.0.0"
   },
