@@ -26,6 +26,8 @@ try{
   assert.equal(head.headers['X-SF3D-Memory-Authority'],'circuit-breaker-only');
   assert.equal(exercise({observation:{...observed,hostTotalBytes:64*1024**3}}).passed,true,'unmatched source host preserves existing route, not positive M2 authority');
   assert.equal(exercise({url:'/demo_chair.png'}).passed,true,'ordinary assets remain unaffected');
+  for(const observation of [{...observed,hostTotalBytes:null},{...observed,source:'replay-fixture'}])
+    assert.equal(exercise({observation}).code,503,'unknown/replayed host must not become an unmatched-host permission');
   const failed=exercise({admit:()=>{throw Error('observer/source unavailable');}});assert.equal(failed.code,503);assert.match(failed.body,/observer\/source unavailable/);
   const lostAuthority=exercise({admit:()=>({...result,effective:{planId:'wrong'}})});assert.equal(lostAuthority.code,503);assert.match(lostAuthority.body,/lost refusal authority/);
 }finally{fs.rmSync(root,{recursive:true,force:true});}

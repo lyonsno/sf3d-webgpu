@@ -20,6 +20,9 @@ export function modelSourceCircuitBreaker({observe=observeMacMemory,admit=runMem
     let observation;
     try{
       observation=observe({volumePath:path.dirname(weightPath)});
+      if(observation?.source!=='live-macos'||typeof observation.platform!=='string'||
+        !Number.isSafeInteger(observation.hostTotalBytes)||observation.hostTotalBytes<1)
+        throw Error('live source-host identity required; unknown/replayed host is not an unmatched-host permission');
       if(!defaultPlanPathForObservation(observation,config.root))return next();
       const memoryAdmission=applyExecutableMemoryCircuitBreaker({memoryAdmission:admit({repoRoot:config.root,weightPath,observe:()=>observation})});
       // This endpoint never turns diagnostic headroom into allocation authority.
