@@ -67,11 +67,18 @@ try{
       if(name==='/canonical-weights.bin'){source.serve(req,res);return;}
       if(name==='/'){res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'}).end('<title>Complete SF3D DINO encoder experiment</title><h1>Complete DINO encoder — guarded experiment</h1><p id="status">No model work started</p><img id="input">');return;}
       if(name==='/favicon.ico'){res.writeHead(204).end();return;}
+      if(name==='/backend'&&req.method==='POST'){
+        const backend=JSON.parse((await readBody(req)).toString());
+        if(report.backend)throw Error('native backend identity already fixed');
+        report.backend=backend;await persist();
+        if(backend.isFallbackAdapter!==false||!/apple/i.test(backend.vendor??''))throw Error('actual nonfallback Apple route required before model allocation');
+        res.writeHead(200).end();return;
+      }
       if(name===report.artifact.entry){report.artifact.servedSha256=digest(artifact);res.writeHead(200,{'Content-Type':'text/javascript','Cache-Control':'no-store'}).end(artifact);return;}
       if(name==='/image.png'){res.writeHead(200,{'Content-Type':'image/png','Cache-Control':'no-store'}).end(image);return;}
       if(name==='/phase'&&req.method==='POST'){
         const phase=JSON.parse((await readBody(req)).toString());
-        if(phase.name!==order[report.phaseObservations.length]||report.memorySafety||report.phaseObservations.some(o=>o.verdict!=='admitted'))throw Error('phase order or safety hold prevents allocation');
+        if(!report.backend||report.backend.isFallbackAdapter!==false||phase.name!==order[report.phaseObservations.length]||report.memorySafety||report.phaseObservations.some(o=>o.verdict!=='admitted'))throw Error('effective backend, phase order or safety hold prevents allocation');
         for(const tensor of phase.tensors??[]){const observed=table.get(tensor.name);
           if(!observed||observed.size!==tensor.size||observed.offset!==tensor.offset||observed.dtype!==tensor.dtype)throw Error('effective tensor source metadata mismatch');}
         const demand=dinoPhaseDemand(phase),processObservation=await monitor.sample();
@@ -123,6 +130,8 @@ try{
     const persistTensor=async(url,bytes)=>{const response=await fetch(url,{method:'POST',body:bytes});if(!response.ok)throw Error('complete tensor persistence failed: '+await response.text());};
     const adapter=await navigator.gpu?.requestAdapter({powerPreference:'high-performance'});if(!adapter)throw Error('WebGPU adapter unavailable');
     const info=adapter.info,backend={vendor:info.vendor,architecture:info.architecture,description:info.description,isFallbackAdapter:info.isFallbackAdapter??adapter.isFallbackAdapter};
+    const backendResponse=await fetch('/backend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(backend)});
+    if(!backendResponse.ok)throw Error('native backend identity refused: '+await backendResponse.text());
     if(backend.isFallbackAdapter!==false||!/apple/i.test(backend.vendor))throw Error('actual nonfallback Apple adapter required');
     const budget=createLoaderMemoryBudget(config.requested),device=await budget.requestOwnedDevice(adapter,{requiredLimits:{maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
     let imageLease,bitmap,staging,failure,failed=false;
