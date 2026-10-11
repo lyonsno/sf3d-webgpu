@@ -98,12 +98,21 @@ export async function startProcessMemory({python,script,rootPid=process.pid,rawP
   };
   try{await request();if(failed)throw failed;}catch(e){e.memorySummary=summary;throw e;}
   timer=setInterval(request,periodMs);
+  const snapshot=includeLifetimeHistory=>{
+    if(includeLifetimeHistory)return structuredClone(summary);
+    // Full lifetime history remains in the uncapped journal and stop summary.
+    // Live admission needs current coverage/safety/freshness plus the exact row,
+    // not a copy of every retired observer child immediately thrown away.
+    const {processes,unavailableProcessObservations,...current}=summary;
+    return structuredClone(current);
+  };
   // Callers needing a pre-allocation baseline consume this current snapshot,
   // not a summary file that is only promised at failure/terminal boundaries.
   // Isolate caller mutations from the running guard's safety state.
-  return{async sample({fresh=false}={}){
+  return{async sample({fresh=false,includeLifetimeHistory=true}={}){
     if(typeof fresh!=='boolean')throw TypeError('fresh process observation mode must be boolean');
-    if(!fresh){await request();return structuredClone(summary);}
+    if(typeof includeLifetimeHistory!=='boolean')throw TypeError('lifetime history selection must be boolean');
+    if(!fresh){await request();return snapshot(includeLifetimeHistory);}
     const requestedAtUnixMs=Date.now();
     // Timer callers may coalesce. A boundary cannot consume an older probe.
     if(pending)await pending;
@@ -114,7 +123,7 @@ export async function startProcessMemory({python,script,rootPid=process.pid,rawP
     const row=summary.lastObservation;
     if(summary.sampleCount<=prior||!Number.isFinite(row?.atUnixMs)||row.atUnixMs<requestedAtUnixMs)
       throw Error('fresh post-request process measurement required');
-    return {...structuredClone(summary),freshness:{route:'new-probe-after-request',requestedAtUnixMs,
+    return {...snapshot(includeLifetimeHistory),freshness:{route:'new-probe-after-request',requestedAtUnixMs,
       probeAtUnixMs:row.atUnixMs,observationIndex:summary.sampleCount}};
   },async stop(){if(stopped)return summary;await request();stopped=true;clearInterval(timer);if(pending)await pending;
     summary.status=failed?(summary.safety?.reason==='process-footprint-budget'?'budget-refused':'failed'):'observed';await persist();return summary;}};

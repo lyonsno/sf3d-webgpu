@@ -15,7 +15,7 @@ import {parseFlatWeightHeader} from '../src/lib/flat_tensor_ranges.js';
 import {observeMacMemory,evaluatePhaseHostHeadroom,startHostPressureGuard,AVAILABLE_MEMORY_DIAGNOSTIC_POLICY} from './memory_admission.mjs';
 import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction,stopOwnedBrowser,ownedBrowserArguments} from './owned_browser_stop.mjs';
-import {writeJsonReportAtomic} from './json_report_atomic.mjs';
+import {writeJsonReportAtomicByPhase} from './json_report_atomic.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
@@ -43,7 +43,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
   evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',twoStreamOutput:reportPath+'.triplane.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
-const persist=()=>writeJsonReportAtomic(reportPath,report);
+const persist=()=>writeJsonReportAtomicByPhase(reportPath,report);
 let source,monitor,hostMonitor,child,browser,server,profile,safetyStop;
 const stopForSafety=safety=>{
   if(!safetyStop)safetyStop=memoryStopAction({child:()=>child,report,persist})(safety);
@@ -189,7 +189,7 @@ try{
           if(!throughPostProcessor)throw Error('requested route does not include postprocessor');
           demand=postWitness.postProcessorPhaseDemand(phase,report.requested.postChannelsPerDuty);
         }else demand=dinoPhaseDemand(phase);
-        const processObservation=await monitor.sample({fresh:true});
+        const processObservation=await monitor.sample({fresh:true,includeLifetimeHistory:!throughPostProcessor});
         const host={...observeMacMemory(),model:execFileSync('sysctl',['-n','hw.model'],{encoding:'utf8'}).trim(),processor:execFileSync('sysctl',['-n','machdep.cpu.brand_string'],{encoding:'utf8'}).trim()};
         const processRow=processObservation.lastObservation;
         const hostHeadroom=evaluatePhaseHostHeadroom({host,requiredBytes:demand.requiredBytes,policy:report.requested.hostHeadroomPolicy,requestedAtUnixMs:phaseRequestedAtUnixMs});
