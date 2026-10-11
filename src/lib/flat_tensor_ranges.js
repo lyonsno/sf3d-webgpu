@@ -32,14 +32,20 @@ export function parseFlatWeightHeader(buffer, totalBytes=Infinity) {
   return {tensors,headerSize};
 }
 
-export async function createFlatTensorRangeSource(url,{memoryBudget,expectedWeightBytes,expectedSourceETag,onProgress}={}) {
+export async function createFlatTensorRangeSource(url,{memoryBudget,expectedWeightBytes,expectedSourceETag,onProgress,onBeforeSourceIntake}={}) {
   if(!Number.isSafeInteger(expectedWeightBytes) || expectedWeightBytes<16)throw TypeError('explicit expectedWeightBytes required');
   if(typeof expectedSourceETag!=='string' || !/^"[^"\r\n]+"$/.test(expectedSourceETag))
     throw TypeError('explicit strong expectedSourceETag required');
+  if(onBeforeSourceIntake!==undefined&&typeof onBeforeSourceIntake!=='function')
+    throw TypeError('source intake admission callback must be a function');
   const report={mode:'tensor-ranges',sourceUrl:String(url),sourceETag:expectedSourceETag,expectedWeightBytes,
     sourceIdentityAuthority:'HTTP strong ETag/If-Match plus exact ranges; not an independently verified whole-artifact digest',
     maximumSourceUnitBytes:0,receivedBytes:0,ranges:[],physicalMemoryMeasured:false};
   const read=async (offset,size,label)=>{
+    if(label==='weight-header-prefix'||label==='weight-header')await onBeforeSourceIntake?.({
+      name:label,tensors:[],storageKind:'cpu-source',sourceOffset:offset,sourceUnitBytes:size,
+      rangeCpuBytes:2*size,workGpuBytes:0,requiredBytes:2*size,
+      authority:'identified destination plus response unit; not network/GC physical-fit authority'});
     memoryBudget.setPhase(label);
     // Own destination and allow an entire requested response unit concurrently.
     // Reserve both BEFORE fetch; overlong server data is rejected, never appended.
