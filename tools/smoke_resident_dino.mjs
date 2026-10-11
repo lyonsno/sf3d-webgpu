@@ -15,7 +15,7 @@ import {parseFlatWeightHeader} from '../src/lib/flat_tensor_ranges.js';
 import {observeMacMemory,evaluatePhaseHostHeadroom,startHostPressureGuard,AVAILABLE_MEMORY_DIAGNOSTIC_POLICY} from './memory_admission.mjs';
 import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction,stopOwnedBrowser,ownedBrowserArguments} from './owned_browser_stop.mjs';
-import {writeJsonReportAtomicByPhase} from './json_report_atomic.mjs';
+import {writeJsonReportAtomic} from './json_report_atomic.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
@@ -43,7 +43,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
   evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',twoStreamOutput:reportPath+'.triplane.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
-const persist=()=>writeJsonReportAtomicByPhase(reportPath,report);
+const persist=()=>writeJsonReportAtomic(reportPath,report);
 let source,monitor,hostMonitor,child,browser,server,profile,safetyStop;
 const stopForSafety=safety=>{
   if(!safetyStop)safetyStop=memoryStopAction({child:()=>child,report,persist})(safety);
@@ -288,7 +288,7 @@ try{
   const page=await browser.newPage();await page.setViewport({width:1280,height:960});await page.goto(report.url,{timeout:0});
   report.phase='native-dino';await persist();
   Object.assign(report,await page.evaluate(async config=>{
-    const {createLoaderMemoryBudget,runResidentDino,runResidentTwoStream,runResidentPostProcessor,TwoStreamBackbone,preprocessImage,
+    const {createLoaderMemoryBudget,runResidentDino,runResidentTwoStream,disposeResidentTwoStream,runResidentPostProcessor,TwoStreamBackbone,preprocessImage,
       preprocessConditionImage,runResidentArtifact,disposeResidentArtifact}=await import('/dist-lib/sf3d-producer.js');
     const observe=async phase=>{const response=await fetch('/phase',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(phase)});
       if(!response.ok)throw Error('fresh phase observation refused: '+await response.text());};
@@ -300,7 +300,7 @@ try{
     if(backend.isFallbackAdapter!==false||!/apple/i.test(backend.vendor))throw Error('actual nonfallback Apple adapter required');
     if(config.requested.throughFullModel)await observe({name:'device-acquisition',tensors:[],workGpuBytes:0,rangeCpuBytes:0,requiredBytes:0});
     const budget=createLoaderMemoryBudget(config.requested),device=await budget.requestOwnedDevice(adapter,{requiredLimits:{maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
-    let imageLease,bitmap,staging,failure,failed=false,twoStream,postProcessor,fullArtifact,artifactHandle,decodedGlbImages;
+    let imageLease,bitmap,staging,failure,failed=false,twoStream,postProcessor,fullArtifact,artifactHandle,decodedGlbImages,upstreamRetirement;
     const sourceGuard=scope=>config.requested.throughFullModel?phase=>observe({...phase,name:scope+'-source-'+phase.name}):undefined;
     device.pushErrorScope('validation');
     try{
@@ -381,6 +381,13 @@ try{
                       }
                       staging.destroy();staging=null;
                       if(config.requested.throughFullModel){
+                        // The complete postprocessor prefix and raw readback
+                        // no longer borrow the backbone input. Retire through
+                        // its existing owner, not the borrowed post/device.
+                        await disposeResidentTwoStream(backbone);
+                        upstreamRetirement={consumer:'complete-postprocessor-and-persisted-readback',
+                          route:'existing-owned-two-stream-disposer',backboneOutputBytes:output.buffer.size,
+                          disposition:'returned',authority:'logical owned retirement only; next fresh kernel sample governs physical margin'};
                         artifactHandle={device};
                         fullArtifact=await runResidentArtifact({device,handle:artifactHandle,memoryBudget:budget,
                           triplanesBuf:result.buffer,conditionRgba:condition.rgba,weightsUrl:'/canonical-weights.bin',
@@ -431,7 +438,7 @@ try{
         'Actual complete canonical model and textured GLB exported; foreground composition not yet witnessed':config.requested.throughPostProcessor?
         'Complete DINO/backbone/postprocessor; mesh/material/GLB not yet run':config.requested.throughBackbone?
         'All24 DINO blocks and complete four-block backbone completed; full mesh/material/GLB not yet run':'All24 DINO blocks completed; full SF3D not yet run';
-      return {backend,dino,twoStream,postProcessor,fullArtifact,decodedGlbImages,inputConsumed,validationError:null,budget:budget.snapshot()};
+      return {backend,dino,twoStream,postProcessor,fullArtifact,decodedGlbImages,upstreamRetirement,inputConsumed,validationError:null,budget:budget.snapshot()};
     }catch(error){failed=true;failure=error;throw error;}
     finally{
       bitmap?.close();
