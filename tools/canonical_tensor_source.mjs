@@ -24,8 +24,9 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
   if(!Array.isArray(tensorNames)||!tensorNames.length||new Set(tensorNames).size!==tensorNames.length)throw Error('explicit unique tensor names required');
   const fd=fs.openSync(weightsPath,'r');
   try{
-    const before=fs.fstatSync(fd),identity=stamp(before);
-    const check=()=>{if(stamp(fs.fstatSync(fd))!==identity)throw Error('canonical source changed during witness');};
+    const before=fs.fstatSync(fd),identity=stamp(before),rangeCleanupFailures=[];
+    let rangeCleanupFailure;
+    const check=()=>{if(rangeCleanupFailure)throw rangeCleanupFailure;if(stamp(fs.fstatSync(fd))!==identity)throw Error('canonical source changed during witness');};
     const prefix=Buffer.alloc(16);if(fs.readSync(fd,prefix,0,16,0)!==16)throw Error('canonical prefix truncated');
     const headerSize=prefix.readUInt32LE(12);
     if(headerSize!==16+160*prefix.readUInt32LE(8)||headerSize>before.size||2*headerSize>cpuBytes)
@@ -56,7 +57,7 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
     const etag='"sha256-'+sha256+'"';
     let closed=false;const idleResponseBuffers=[];
     return {receipt:{path:fs.realpathSync(weightsPath),sha256,byteLength:before.size,headerSha256:digest(header),headerBytes:headerSize,referenceMode,
-      tensorCount:tensors.size,etag,units,totalGpuBytes,cpuBytes,gpuBytes,sourceStat:{dev:before.dev,ino:before.ino,size:before.size,mtimeMs:before.mtimeMs,ctimeMs:before.ctimeMs}},
+      tensorCount:tensors.size,etag,units,totalGpuBytes,cpuBytes,gpuBytes,rangeCleanupFailures,sourceStat:{dev:before.dev,ino:before.ino,size:before.size,mtimeMs:before.mtimeMs,ctimeMs:before.ctimeMs}},
       async serve(req,res){
         let responseFd,buffer,reusable=false;
         try{
@@ -92,7 +93,16 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
           reusable=true;res.end();
         }catch(error){if(res.headersSent||res.destroyed)res.destroy(error);else res.writeHead(409).end(error.message);}
         finally{
-          if(responseFd!==undefined)fs.closeSync(responseFd);
+          if(responseFd!==undefined)try{fs.closeSync(responseFd);}
+          catch(error){
+            // A body can be complete before descriptor retirement fails. Keep
+            // the unresolved exact fd and poison all later/source-close claims;
+            // never leak an async rejection past the native response owner or
+            // retry an indeterminate OS close against a possibly recycled fd.
+            rangeCleanupFailures.push({fd:responseFd,message:String(error.message??error),disposition:'unresolved-close; exact process exit remains owner'});
+            rangeCleanupFailure??=Error('canonical range descriptor cleanup failed: '+error.message,{cause:error});
+            reusable=false;if(!res.destroyed)res.destroy(rangeCleanupFailure);
+          }
           if(reusable)idleResponseBuffers.push(buffer);
         }
       },close(){if(closed)return;closed=true;try{check();}finally{fs.closeSync(fd);}}};
