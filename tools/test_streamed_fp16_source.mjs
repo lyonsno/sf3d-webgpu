@@ -108,7 +108,7 @@ try{
     await close();
   }
   console.log('PASS complete source stream/odd byte boundaries/all65536 half encodings/tail/no full raw destination/one reusable backing/unchanged full allowance');
-  console.log('PASS wrong HTTP identity/route/length, partial/overlong/read/write/fence/destroy failures cannot reach model work; exact unresolved owner/charge/quarantine/recovery');
+  console.log('PASS pre-work wrong HTTP/source/read/write/fence failures stop model work; post-work destroy failure retains exact owner/charge/quarantine/recovery');
 }finally{
   globalThis.Uint8Array=OriginalBytes;globalThis.fetch=originalFetch;
   if(current){fault=null;await source?.dispose();current.device.destroy();current.budget.restore();}

@@ -77,6 +77,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
       dutyGranularity:'attention-tile',linearRowsPerDuty,attentionRowsPerDuty,residentFFN:true,retireIntermediateBuffers:true,
       reuseDeadTriplaneStorage,
       reuseAttentionResidualStorage,
+      reuseAttentionQueryStorage:true,
       reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding,
       foregroundOpportunities,onProgress,onBeforeDuty,onAfterDuty,
       async withGroupWeights(group,work){
@@ -99,12 +100,15 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
       },
     });
     owner.buffers.add(executed.result.buffer);
+    if(executed.report?.adapterTelemetry?.reuseAttentionQueryStorage!==true)
+      throw Error('resident effective attention query reuse mismatch');
     if(executed.result.C!==1024||executed.result.N!==27648||executed.result.planeSize!==96||
       executed.result.buffer.size!==3*1024*96*96*4)throw Error('complete triplane feature shape changed');
     await onBeforeDuty({kind:'output',dutyId:'two-stream-output'},null);
     const value=await withResult(executed.result);
     return {value,cooperative:executed.report,loadingReport:source.loadingReport,weightPhases:source.phases,
       shape:[3,1024,96,96],blocks:4,basicBlocks:12,residentFFN:true,linearRowsPerDuty,attentionRowsPerDuty,reuseDeadTriplaneStorage,
+      reuseAttentionQueryStorage:executed.report.adapterTelemetry.reuseAttentionQueryStorage,
       reuseAttentionResidualStorage,rematerializeTokenizerEmbedding,reuseTokenizerSetupStorage,
       tokenizerEmbeddingRetirement,setupTokenizerEmbeddingRetirement};
   }catch(error){failed=true;failure=error;throw error;}

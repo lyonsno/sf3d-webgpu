@@ -16,7 +16,7 @@ const factory=vm.compileFunction(source+'\nreturn {runResidentTwoStream,disposeR
     'dispatchTokenizerEmbedding','runCooperativeTwoStream','retireTwoStreamWork'],
   {parsingContext:vm.createContext({GPUBufferUsage:globalThis.GPUBufferUsage})});
 
-function fixture({rematerialize=false,holdFinal=false,failFence=false,failDestroy=false,failFinalFence=false,failFinalDestroy=false,refuseReload=false}={}){
+function fixture({rematerialize=false,holdFinal=false,failFence=false,failDestroy=false,failFinalFence=false,failFinalDestroy=false,refuseReload=false,effectiveQueryReuse=true,omitQueryReuse=false}={}){
   const events=[],buffers=[];let blocked=false,releaseFinal,enteredFinal,round=0;
   const entered=new Promise(resolve=>enteredFinal=resolve),completeBytes=3*1024*96*96*4;
   const makeBuffer=(size,label='')=>{
@@ -45,6 +45,7 @@ function fixture({rematerialize=false,holdFinal=false,failFence=false,failDestro
     async dispose(){sourceDisposed++;events.push('source-dispose');}};
   const api=factory(async()=>weightSource,()=>true,captureGpuBufferAllocations,dispatchTokenizerEmbedding,
     async options=>{
+      assert.equal(options.reuseAttentionQueryStorage,true,'actual resident caller selects query output reuse');
       for(const stageId of ['setup','block-0-basic-0','final']){
         await options.withGroupWeights({stageId},async selected=>{
           if(stageId==='setup'){
@@ -68,7 +69,7 @@ function fixture({rematerialize=false,holdFinal=false,failFence=false,failDestro
           }
         });
       }
-      return {result:completeResult,report:{source:'synthetic'}};
+      return {result:completeResult,report:{source:'synthetic',adapterTelemetry:omitQueryReuse?{}:{reuseAttentionQueryStorage:effectiveQueryReuse}}};
     },async()=>{events.push('retire-work');});
   const options={device,backbone,memoryBudget:{assertDeviceAcquiredHere(value){assert.equal(value,device);}},
     weightsUrl:'synthetic',imageTokensBuf:borrowed,N_img:1297,rematerializeTokenizerEmbedding:rematerialize,
@@ -110,6 +111,13 @@ for(const rematerialize of [false,true]){
   }
 }
 console.log('ok actual final model method consumes complete live retained or rebuilt embedding until final prefix');
+
+for(const mode of [{effectiveQueryReuse:false},{omitQueryReuse:true},{effectiveQueryReuse:'true'}]){
+  const x=fixture(mode);
+  await assert.rejects(x.runResidentTwoStream(x.options),/effective attention query reuse/);
+  assert.equal(x.events.includes('consumer'),false,'fallback/missing/retyped effective optimization cannot satisfy resident output');
+  assert.equal(x.backbone._residentAdapterOwner,null);
+}
 
 for(const failure of [{failFence:true},{failDestroy:true},{refuseReload:true},{failFinalFence:true},{failFinalDestroy:true}]){
   const x=fixture({rematerialize:true,...failure});let caught;

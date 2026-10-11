@@ -405,6 +405,9 @@ export class TwoStreamBackbone {
   createAttentionForwardState(imageTokensBuf, N_img, weights, options = {}) {
     const reuse=options.reuseDeadTriplaneStorage??false;
     const residualReuse=options.reuseAttentionResidualStorage??false;
+    const queryReuse=options.reuseAttentionQueryStorage===undefined?false:options.reuseAttentionQueryStorage;
+    if(typeof queryReuse!=='boolean'||(queryReuse&&options.residentFFN!==true))
+      throw TypeError('attention query storage reuse requires explicit resident FFN');
     const setupReuse=options.reuseTokenizerSetupStorage??false;
     if(typeof setupReuse!=='boolean'||(setupReuse&&
       (options.residentFFN!==true||options.rematerializeTokenizerEmbedding!==true)))
@@ -420,6 +423,7 @@ export class TwoStreamBackbone {
     state.attentionRowsPerDuty = options.attentionRowsPerDuty ?? 128;
     state.reuseDeadTriplaneStorage=reuse;
     state.reuseAttentionResidualStorage=residualReuse;
+    state.reuseAttentionQueryStorage=queryReuse;
     state.reuseTokenizerSetupStorage=setupReuse;
     state.rematerializeTokenizerEmbedding=options.rematerializeTokenizerEmbedding??false;
     return state;
@@ -594,6 +598,7 @@ export class TwoStreamBackbone {
         N_x,
         D,
         state.attentionRowsPerDuty,
+        state.reuseAttentionQueryStorage,
       ),
     };
   }
@@ -1019,6 +1024,7 @@ export class TwoStreamBackbone {
         state.N_latent,
         D,
         state.attentionRowsPerDuty,
+        state.reuseAttentionQueryStorage,
       ),
     };
   }
@@ -1057,6 +1063,7 @@ export class TwoStreamBackbone {
       state.N_img,
       operation.D,
       state.attentionRowsPerDuty,
+      state.reuseAttentionQueryStorage,
     );
   }
 
@@ -1315,7 +1322,8 @@ export class TwoStreamBackbone {
     return zOutBuf;
   }
 
-  _createAttentionState(encoder, qInputBuf, kvInputBuf, attnWeights, N_q, N_kv, D, tileQCapacity = 128) {
+  _createAttentionState(encoder, qInputBuf, kvInputBuf, attnWeights, N_q, N_kv, D, tileQCapacity = 128, reuseAttentionQueryStorage = false) {
+    if(typeof reuseAttentionQueryStorage!=='boolean')throw TypeError('attention query storage reuse requires a boolean');
     if(!Number.isSafeInteger(tileQCapacity)||tileQCapacity<=0)throw TypeError('attentionRowsPerDuty must be a positive safe integer');
     const device = this.device;
     const numHeads = CONFIG.numHeads;
@@ -1329,7 +1337,10 @@ export class TwoStreamBackbone {
     const scoreBufSize = numHeads * tileQCapacity * N_kv * 4;
     const scoreBuf = createEmptyBuffer(device, scoreBufSize);
     const tileAttnOutBuf = createEmptyBuffer(device, tileQCapacity * D * 4);
-    const attnOutBuf = createEmptyBuffer(device, N_q * D * 4);
+    // Each tile reads only its query rows in three separate compute passes.
+    // The existing following copy overwrites only those already-consumed rows;
+    // future queries stay untouched. Compute still writes distinct tile scratch.
+    const attnOutBuf = reuseAttentionQueryStorage?qBuf:createEmptyBuffer(device, N_q * D * 4);
 
     return {
       attnWeights,
@@ -1347,6 +1358,7 @@ export class TwoStreamBackbone {
       scoreBuf,
       tileAttnOutBuf,
       attnOutBuf,
+      reuseAttentionQueryStorage,
     };
   }
 

@@ -34,6 +34,7 @@ export function defineTwoStreamManifest(options = {}) {
     residentFFN = false,
     reuseDeadTriplaneStorage = false,
     reuseAttentionResidualStorage = false,
+    reuseAttentionQueryStorage = false,
     reuseTokenizerSetupStorage = false,
   } = options;
   if (!['stage', 'attention-tile'].includes(dutyGranularity)) {
@@ -82,6 +83,7 @@ export function defineTwoStreamManifest(options = {}) {
       residentFFN,
       reuseDeadTriplaneStorage,
       reuseAttentionResidualStorage,
+      reuseAttentionQueryStorage,
       reuseTokenizerSetupStorage,
     },
   });
@@ -298,6 +300,7 @@ export async function runCooperativeTwoStream(options) {
     retireIntermediateBuffers = false,
     reuseDeadTriplaneStorage = false,
     reuseAttentionResidualStorage = false,
+    reuseAttentionQueryStorage = false,
     reuseTokenizerSetupStorage = false,
     rematerializeTokenizerEmbedding = false,
     withGroupWeights = null,
@@ -315,6 +318,8 @@ export async function runCooperativeTwoStream(options) {
     throw TypeError('dead-triplane reuse requires explicit resident FFN and owned work retirement');
   if(typeof reuseAttentionResidualStorage!=='boolean'||(reuseAttentionResidualStorage&&!reuseDeadTriplaneStorage))
     throw TypeError('attention residual reuse requires explicit owned dead-triplane reuse');
+  if(typeof reuseAttentionQueryStorage!=='boolean'||(reuseAttentionQueryStorage&&(!residentFFN||!retireIntermediateBuffers||dutyGranularity!=='attention-tile')))
+    throw TypeError('attention query storage reuse requires owned resident attention duties');
   if(withGroupWeights!==null&&typeof withGroupWeights!=='function')throw TypeError('withGroupWeights must be a function');
   if(typeof reuseTokenizerSetupStorage!=='boolean'||(reuseTokenizerSetupStorage&&
     (!residentFFN||!retireIntermediateBuffers||!withGroupWeights||!rematerializeTokenizerEmbedding||
@@ -347,6 +352,7 @@ export async function runCooperativeTwoStream(options) {
       residentFFN,
       reuseDeadTriplaneStorage,
       reuseAttentionResidualStorage,
+      reuseAttentionQueryStorage,
       reuseTokenizerSetupStorage,
     }),
     invocationId,
@@ -359,13 +365,15 @@ export async function runCooperativeTwoStream(options) {
       imageTokensBuf,
       N_img,
       weights,
-      { linearRowsPerDuty, attentionRowsPerDuty, residentFFN, reuseDeadTriplaneStorage, reuseAttentionResidualStorage,
+      { linearRowsPerDuty, attentionRowsPerDuty, residentFFN, reuseDeadTriplaneStorage, reuseAttentionResidualStorage,reuseAttentionQueryStorage,
         reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding },
     )
     : backbone.createForwardState(imageTokensBuf, N_img, weights);
   let stageTelemetry = [];
   if(attentionPlan&&JSON.stringify(state.finePlan)!==JSON.stringify(attentionPlan))
     throw Error('backbone effective plan differs from declared cooperative plan');
+  if(attentionPlan&&(state.reuseAttentionQueryStorage??false)!==reuseAttentionQueryStorage)
+    throw Error('backbone effective attention query reuse differs from requested configuration');
   const owner=retireIntermediateBuffers?{allocations:[],buffers:new Set()}:null;
   if(owner)backbone._residentWorkOwner=owner;
   let succeeded=false,failure,failed=false;
@@ -446,6 +454,7 @@ export async function runCooperativeTwoStream(options) {
         reuseDeadTriplaneStorage,
         storageReuse:Object.freeze(storageReuse),
         reuseAttentionResidualStorage,
+        reuseAttentionQueryStorage:state.reuseAttentionQueryStorage??false,
         attentionResidualReuse:Object.freeze(attentionResidualReuse),
         reuseTokenizerSetupStorage,
         tokenizerSetupStorageReuse,
