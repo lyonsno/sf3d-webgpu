@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import * as gpu from '../src/lib/gpu.js';
+import {createWeightPhaseSource} from '../src/lib/weights.js';
+import {createLoaderMemoryBudget} from '../src/lib/loader_memory_budget.js';
+import {weightFixture,fakeWeightDevice} from './fixtures/weight_resource_fixture.mjs';
 globalThis.GPUBufferUsage={STORAGE:128,COPY_SRC:4,COPY_DST:8};
 const source=fs.readFileSync(new URL('../src/lib/weights.js',import.meta.url),'utf8');
 const allocations=[],leases=[],buffers=[];
@@ -46,3 +49,37 @@ for(const phase of ['map','initialize','unmap'])for(const failDestroy of [false,
 for(const size of [-1,0,1,NaN])assert.throws(()=>gpu.createMappedStorageBuffer({
   createBuffer(){throw Error('must refuse before allocation');}},size,()=>{}),/aligned/);
 console.log('PASS map/initializer/unmap faults retire exact owned destination or preserve unresolved inventory and both causes; no GPU/native evidence');
+
+const fixture=weightFixture({fp16Names:new Set(['tokenizer.embeddings']),
+  tensorShapes:new Map([['tokenizer.embeddings',[2]]])}),etag='"mapped-fixture"';
+const originalFetch=globalThis.fetch;
+globalThis.fetch=async(url,init)=>{
+  assert.equal(init.headers['If-Match'],etag);
+  const [start,end]=init.headers.Range.slice(6).split('-').map(Number);
+  return new Response(fixture.bytes.slice(start,end+1),{status:206,headers:{
+    ETag:etag,'Content-Range':`bytes ${start}-${end}/${fixture.bytes.length}`,'Content-Length':String(end-start+1)}});
+};
+const phaseDevice=fakeWeightDevice(),create=phaseDevice.createBuffer.bind(phaseDevice);
+let failCleanup=true;
+phaseDevice.createBuffer=desc=>{
+  const b=create(desc),destroy=b.destroy.bind(b);
+  b.unmap=()=>{throw Error('mapped upload unmap failed');};
+  b.destroy=()=>{if(failCleanup)throw Error('mapped destination destroy unresolved');destroy();};
+  return b;
+};
+const budget=createLoaderMemoryBudget({cpuBytes:1048576,gpuBytes:1048576});budget.bindOwnedDevice(phaseDevice);
+let phaseSource;
+try{
+  phaseSource=await createWeightPhaseSource(phaseDevice,'fixture',{memoryBudget:budget,
+    expectedWeightBytes:fixture.bytes.length,expectedSourceETag:etag});
+  let computed=false;
+  await assert.rejects(phaseSource.withWeights(phaseSource.template.tokenizer,()=>{computed=true;}),/cleanup.*unresolved/);
+  assert.equal(computed,false);assert.equal(phaseSource.phases.at(-1).status,'cleanup-unresolved');
+  assert.equal(budget.snapshot().gpu.liveBytes,8,'unresolved exact destination stays charged');
+  await assert.rejects(phaseSource.withWeights(phaseSource.template.tokenizer,()=>{}),/quarantined/);
+  assert.equal(phaseDevice.buffers.length,1,'quarantine creates no replacement destination');
+  failCleanup=false;await phaseSource.dispose();
+  assert.equal(budget.snapshot().gpu.liveBytes,0);assert.equal(budget.snapshot().cpu.liveBytes,0);
+  assert.equal(phaseDevice.buffers[0].destroyed,1);
+}finally{failCleanup=false;await phaseSource?.dispose();phaseDevice.destroy();budget.restore();globalThis.fetch=originalFetch;}
+console.log('PASS actual authenticated range owner quarantines failed mapped destination, preserves exact budget and recovers before another phase; synthetic source only');
