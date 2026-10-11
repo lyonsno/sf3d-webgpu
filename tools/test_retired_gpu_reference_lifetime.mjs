@@ -34,15 +34,18 @@ const allocate=(x,kind)=>kind==='buffer'?x.device.createBuffer({size:16}):
 for(const kind of ['buffer','texture']){
   let x=make(),resource=allocate(x,kind);
   assert.equal(x.inventory.size,1);assert.equal(x.budget.snapshot().gpu.liveBytes,16);
+  const retiredHook=resource.destroy;
   assert.equal(resource.destroy(),'native-return');
   assert.equal(x.inventory.size,0,'successful retirement must release the budget strong resource reference');
-  assert.equal(resource.destroy,x.resources[0].original,'original retirement hook restored before forgetting');
+  assert.equal(resource.destroy,retiredHook,'successful retirement does not mutate the callable hook');
   resource.destroy();assert.equal(x.budget.snapshot().gpu.liveBytes,0,'repeat native destruction has no second charge');
   for(let i=0;i<32;i++){const next=allocate(x,kind);assert.equal(x.inventory.size,1);next.destroy();assert.equal(x.inventory.size,0);}
   assert.equal(x.budget.events.filter(e=>e.kind==='reserved').length,33);
   assert.equal(x.budget.events.filter(e=>e.kind==='retirement-requested').length,33,'full event evidence is retained');
   assert.equal(x.budget.snapshot().gpu.physicalMemoryMeasured,false);
   x.budget.restore();assert.equal(x.device.createBuffer,x.originalCreate);
+  assert.equal(resource.destroy,retiredHook,'forgotten retired wrapper stays inert after allocator restoration');
+  const eventCount=x.budget.events.length;resource.destroy();assert.equal(x.budget.events.length,eventCount);
 
   x=make();resource=allocate(x,kind);x.setFaults(true,true,false);
   assert.throws(()=>resource.destroy(),/native retirement unresolved/);
@@ -55,15 +58,15 @@ for(const kind of ['buffer','texture']){
   x.setFaults(false,false,false);resource.destroy();assert.equal(x.inventory.size,0);x.budget.restore();
 
   x=make();resource=allocate(x,kind);x.blockHook(resource);x.setFaults(false,false,true);
-  assert.throws(()=>resource.destroy(),/retired hook restoration unresolved/);
-  assert.equal(x.inventory.size,1,'failed hook cleanup retains exact recovery inventory');
-  assert.equal(x.budget.snapshot().gpu.liveBytes,16,'hook uncertainty cannot manufacture retirement credit');
-  x.setFaults(false,false,false);resource.destroy();assert.equal(x.inventory.size,0);
-  assert.equal(resource.destroy,x.resources[0].original);assert.equal(x.budget.snapshot().gpu.liveBytes,0);x.budget.restore();
+  const blockedHook=resource.destroy;
+  assert.equal(resource.destroy(),'native-return','native success needs no subsequent property write');
+  assert.equal(x.inventory.size,0);assert.equal(resource.destroy,blockedHook);
+  assert.equal(x.budget.snapshot().gpu.liveBytes,0);
+  x.budget.restore();assert.equal(resource.destroy,blockedHook);
 
   x=make();resource=allocate(x,kind);x.setFaults(true,false,false);
   assert.throws(()=>resource.destroy(),/native retirement unresolved/);x.device.destroy();
   assert.equal(x.budget.snapshot().gpu.liveBytes,0);x.budget.restore();assert.equal(x.inventory.size,0);
   assert.equal(resource.destroy,x.resources[0].original,'whole-device recovery retains original hook restoration');
 }
-console.log('PASS actual buffer/texture inventory drops only successfully retired wrappers, restores original hooks, preserves full events and exact failed retirement/hook/device charges and recovery; no physical credit');
+console.log('PASS actual buffer/texture inventory forgets only native success without retired-hook mutation; inert repeated calls, full events, exact failed native/device charges and live-hook recovery preserved; no physical credit');

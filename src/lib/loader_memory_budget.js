@@ -144,8 +144,8 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
           const wrapped = function(...args) {
             const result = Reflect.apply(destroy, this, args), row = buffers.get(this);
             if (row) {
-              this.destroy = row.destroy;
-              if (this.destroy !== row.destroy) throw new Error('retired GPUBuffer hook restoration failed');
+              // Already-destroyed objects keep an inert idempotent hook; only
+              // live/unresolved hooks need whole-budget restoration.
               row.lease.release(); buffers.delete(this);
             }
             return result;
@@ -177,8 +177,6 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
           const wrapped=function(...args){
             const result=Reflect.apply(destroy,this,args),row=buffers.get(this);
             if(row){
-              this.destroy=row.destroy;
-              if(this.destroy!==row.destroy)throw Error('retired GPUTexture hook restoration failed');
               row.lease.release();buffers.delete(this);
             }
             return result;
