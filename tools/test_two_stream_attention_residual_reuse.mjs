@@ -121,5 +121,3 @@ for(const failPrefix of [false,true]){
   assert.equal(input.destroyed,0,'borrowed input remains untouched');assert.equal(x.device.destroyed,0);
 }
 console.log('PASS actual kit prefix marking/recovery and full four-block reuse telemetry; synthetic allocation route, not native math');
-
-
