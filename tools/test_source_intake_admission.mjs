@@ -18,10 +18,13 @@ try{
   assert.deepEqual(duties.map(d=>[d.name,d.rangeCpuBytes,d.reads,d.live]),
     [['weight-header-prefix',32,0,0],['weight-header',2*header,1,0]],
     'each source intake has a fresh new-backing gate before destination/response fetch allocation');
-  const before=reads.length,peak=budget.snapshot().cpu.peakBytes;
+  const before=reads.length,peak=budget.snapshot().cpu.peakLiveBytes,eventCount=budget.events.length;
+  assert.ok(Number.isSafeInteger(peak),'refusal witness must read an actual authoritative peak counter');
   await assert.rejects(createFlatTensorRangeSource('synthetic.bin',{...options,
     onBeforeSourceIntake:async()=>{throw 0;}}),e=>e===0);
-  assert.equal(reads.length,before);assert.equal(budget.snapshot().cpu.peakBytes,peak);
+  assert.equal(reads.length,before);assert.equal(budget.snapshot().cpu.peakLiveBytes,peak);
+  assert.deepEqual(budget.events.slice(eventCount),[],
+    'refused source range cannot reserve then release backing beneath an already higher historical peak');
   await assert.rejects(createFlatTensorRangeSource('synthetic.bin',{...options,
     onBeforeSourceIntake:async d=>{if(d.name==='weight-header')throw Error('header refused');}}),/header refused/);
   assert.equal(reads.length,before+1);assert.equal(budget.snapshot().cpu.liveBytes,0);
