@@ -4,6 +4,23 @@ import {captureGpuBufferAllocations} from './gpu.js';
 import {dispatchTokenizerEmbedding} from './tokenizer_embedding.js';
 import {runCooperativeTwoStream,retireTwoStreamWork} from './cooperative_two_stream.js';
 
+async function retireConsumedTokenizerEmbedding(device,owner){
+  // The complete setup group has consumed the rearranged embedding. This
+  // separate prefix must also resolve before any exact captured backing dies.
+  await device.queue.onSubmittedWorkDone();
+  const errors=[];let logicalBytes=0,bufferCount=0;
+  for(const allocation of [...owner.allocations]){
+    try{
+      allocation.buffer.destroy();
+      owner.allocations.splice(owner.allocations.indexOf(allocation),1);
+      logicalBytes+=allocation.size;bufferCount++;
+    }catch(error){errors.push(error);}
+  }
+  if(errors.length)throw new AggregateError(errors,'consumed tokenizer embedding retirement failed');
+  return {status:'retired',afterGroup:'setup',logicalBytes,bufferCount,
+    authority:'logical owned retirement after completed prefix; not physical reclamation credit'};
+}
+
 export function selectTwoStreamPhase(template,stageId){
   const t=template.backbone;
   if(stageId==='setup')return Object.fromEntries(['latentInit','normTriplane','projTriplane','normImage',
@@ -39,7 +56,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
     owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake});
     const source=owner.source,template=source.template;
     await onBeforePhase({name:'two-stream-embedding-weights',tensors:source.describe(template.tokenizer),workGpuBytes:0});
-    let embedding;
+    let embedding,tokenizerEmbeddingRetirement;
     await source.withWeights(template.tokenizer,async selected=>{
       // Conversion custody has ended, not necessarily physical backing.
       // A fresh post-upload observation includes anything still resident.
@@ -58,7 +75,13 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
       async withGroupWeights(group,work){
         const selection=selectTwoStreamPhase(template,group.stageId);
         await onBeforePhase({name:'two-stream-'+group.stageId,tensors:source.describe(selection)});
-        return source.withWeights(selection,weights=>work({...weights,tokenizer_embeddings_buf:embedding}));
+        const value=await source.withWeights(selection,weights=>work(group.stageId==='setup'
+          ?{...weights,tokenizer_embeddings_buf:embedding}:weights));
+        if(group.stageId==='setup'){
+          tokenizerEmbeddingRetirement=await retireConsumedTokenizerEmbedding(device,owner);
+          embedding=null;
+        }
+        return value;
       },
     });
     owner.buffers.add(executed.result.buffer);
@@ -68,7 +91,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
     const value=await withResult(executed.result);
     return {value,cooperative:executed.report,loadingReport:source.loadingReport,weightPhases:source.phases,
       shape:[3,1024,96,96],blocks:4,basicBlocks:12,residentFFN:true,linearRowsPerDuty,attentionRowsPerDuty,reuseDeadTriplaneStorage,
-      reuseAttentionResidualStorage};
+      reuseAttentionResidualStorage,tokenizerEmbeddingRetirement};
   }catch(error){failed=true;failure=error;throw error;}
   finally{
     try{await disposeResidentTwoStream(backbone);}
