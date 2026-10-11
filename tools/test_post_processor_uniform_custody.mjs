@@ -31,4 +31,3 @@ assert.throws(()=>captureGpuBufferAllocations(()=>dispatchConv2dChannelRange(fai
 assert.equal(failedOwned.length,1,'allocation remains in exact inventory when initialization rejects');
 assert.equal(failedOwned[0].buffer.destroyed,0,'caller drain owns failure cleanup');
 console.log('PASS selected postprocessor shader uniform custody and nonresurrection');
-

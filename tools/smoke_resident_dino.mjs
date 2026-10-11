@@ -19,18 +19,20 @@ import {writeJsonReportAtomic} from './json_report_atomic.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
-let groups=null;
+const throughPostProcessor=process.argv.includes('--through-postprocessor');
+let groups=null,postWitness=null;
 const arg=name=>{const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root=arg('--repo-root')?path.resolve(arg('--repo-root')):null;
 const requestedReportPath=path.resolve(arg('--report')??path.join(os.tmpdir(),'sf3d-dino-'+randomUUID()+'.json'));
-const occupied=fs.existsSync(requestedReportPath)||fs.existsSync(requestedReportPath+'.input.f32')||fs.existsSync(requestedReportPath+'.output.f32')||fs.existsSync(requestedReportPath+'.triplane.f32');
+const occupied=fs.existsSync(requestedReportPath)||fs.existsSync(requestedReportPath+'.input.f32')||fs.existsSync(requestedReportPath+'.output.f32')||fs.existsSync(requestedReportPath+'.triplane.f32')||fs.existsSync(requestedReportPath+'.postprocessor.f32');
 const reportPath=occupied?requestedReportPath+'.refused-'+randomUUID()+'.json':requestedReportPath;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
-const report={schema:throughBackbone?'sf3d.native-resident-backbone.v0':'sf3d.native-resident-dino.v0',status:'running',phase:'arguments',runId:randomUUID(),rootPid:process.pid,
-  receiver:'mini-wake-and-bake-pit-boss',claim:throughBackbone?'complete native DINO plus existing two-stream backbone; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim':'complete native DINO only; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim',
+const report={schema:throughPostProcessor?'sf3d.native-resident-postprocessor.v0':throughBackbone?'sf3d.native-resident-backbone.v0':'sf3d.native-resident-dino.v0',status:'running',phase:'arguments',runId:randomUUID(),rootPid:process.pid,
+  receiver:'mini-wake-and-bake-pit-boss',claim:throughPostProcessor?'complete native DINO/backbone/postprocessor; no mesh/material/GLB, reference parity, physical fit or rendering-composition claim':throughBackbone?'complete native DINO plus existing two-stream backbone; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim':'complete native DINO only; no full SF3D/GLB, reference parity, physical fit or rendering-composition claim',
   requested:{report:requestedReportPath,repoRoot:root,revision:arg('--expected-revision'),weightsPath:arg('--weights'),weightsSha256:arg('--expected-weights-sha256'),
     input:arg('--input'),inputSha256:arg('--expected-input-sha256'),chrome:arg('--chrome'),processBudgetBytes:Number(arg('--process-budget-bytes')),
     throughBackbone,attentionRowsPerDuty:Number(arg('--attention-rows-per-duty')??128),
+    throughPostProcessor,postChannelsPerDuty:Number(arg('--post-channels-per-duty')??16),
     reuseDeadTriplaneStorage:process.argv.includes('--reuse-dead-triplane-storage'),
     hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
     cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
@@ -47,6 +49,12 @@ const stopForSafety=safety=>{
 try{
   await persist();
   if(occupied)throw Error('requested evidence paths already exist; retained previous evidence without reuse or overwrite');
+  if(throughPostProcessor){
+    if(!throughBackbone)throw Error('postprocessor requires complete backbone invocation');
+    postWitness=await import('./resident_post_processor_acceptance.mjs');
+    postWitness.postProcessorExpectedPhases(report.requested.postChannelsPerDuty);
+    report.evidencePaths.postProcessorOutput=reportPath+'.postprocessor.f32';
+  }
   if(report.requested.reuseDeadTriplaneStorage&&!throughBackbone)throw Error('dead-triplane reuse requires complete backbone invocation');
   if(!['raw-free-pages-v0',AVAILABLE_MEMORY_DIAGNOSTIC_POLICY].includes(report.requested.hostHeadroomPolicy))throw Error('unknown explicit host headroom policy; no fallback');
   if(report.requested.hostHeadroomPolicy===AVAILABLE_MEMORY_DIAGNOSTIC_POLICY){
@@ -96,6 +104,7 @@ try{
     if(order.join(',')!==residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty).join(','))throw Error('effective source graph differs from approved complete backbone cliffs');
   }
   report.expectedPhaseOrder=order;
+  if(throughPostProcessor)order.push(...postWitness.postProcessorExpectedPhases(report.requested.postChannelsPerDuty));
   const readBody=async req=>{const chunks=[];for await(const chunk of req)chunks.push(chunk);return Buffer.concat(chunks);};
   server=http.createServer(async(req,res)=>{
     try{
@@ -138,12 +147,19 @@ try{
             }
             demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,normX,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage});
           }else demand=twoStreamPhaseDemand(phase);
+        }else if(phase.name.startsWith('post-processor-')){
+          if(!throughPostProcessor)throw Error('requested route does not include postprocessor');
+          demand=postWitness.postProcessorPhaseDemand(phase,report.requested.postChannelsPerDuty);
         }else demand=dinoPhaseDemand(phase);
         const processObservation=await monitor.sample({fresh:true});
         const host={...observeMacMemory(),model:execFileSync('sysctl',['-n','hw.model'],{encoding:'utf8'}).trim(),processor:execFileSync('sysctl',['-n','machdep.cpu.brand_string'],{encoding:'utf8'}).trim()};
         const processRow=processObservation.lastObservation;
         const hostHeadroom=evaluatePhaseHostHeadroom({host,requiredBytes:demand.requiredBytes,policy:report.requested.hostHeadroomPolicy,requestedAtUnixMs:phaseRequestedAtUnixMs});
-        const observation={phase:phase.name,phaseRequestedAtUnixMs,descriptor:phase,demand,host,hostHeadroom,process:processObservation,
+        // Full raw process journal and terminal lifetime summary retain all
+        // data. Per-phase evidence needs the exact fresh row, not another copy
+        // of every historical observer process accumulated by the monitor.
+        const observation={phase:phase.name,phaseRequestedAtUnixMs,descriptor:phase,demand,host,hostHeadroom,
+          process:throughPostProcessor?postWitness.projectFreshProcessEvidence(processObservation):processObservation,
           authority:'reversible encoder phase with observed baseline and diagnostic process stop; not production physical fit',
           verdict:host.hostname===report.source.hostname&&host.model==='Mac14,9'&&host.processor==='Apple M2 Pro'&&!host.observerErrors.length&&
             hostHeadroom.verdict==='admitted'&&processObservation.coverage==='sampled-owned-process-tree'&&processRow?.status==='observed'&&
@@ -157,15 +173,19 @@ try{
         report.phaseObservations.push(observation);report.phase='phase-'+phase.name;await persist();
         res.writeHead(observation.verdict==='admitted'?200:409,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(observation));return;
       }
-      if(name==='/triplane.f32'&&req.method==='POST'){
-        if(!throughBackbone)throw Error('backbone output not requested');
-        const offset=Number(req.headers['x-byte-offset']),bytes=await readBody(req),expected=3*1024*96*96*4;
-        if(offset!==(report.twoStreamReadbackBytes??0)||offset%4||!bytes.length||bytes.length%4||
+      if(['/triplane.f32','/postprocessor.f32'].includes(name)&&req.method==='POST'){
+        const post=name==='/postprocessor.f32';
+        if(post?!throughPostProcessor:!throughBackbone)throw Error('complete output not requested');
+        const countKey=post?'postProcessorReadbackBytes':'twoStreamReadbackBytes';
+        const outputPath=post?report.evidencePaths.postProcessorOutput:report.evidencePaths.twoStreamOutput;
+        const offset=Number(req.headers['x-byte-offset']),bytes=await readBody(req),expected=post?70778880:3*1024*96*96*4;
+        if(throughPostProcessor)postWitness.validateCompleteReadbackChunk({offset,bytes:bytes.length,receivedBytes:report[countKey]??0,totalBytes:expected});
+        else if(offset!==(report[countKey]??0)||offset%4||!bytes.length||bytes.length%4||
           bytes.length>128*1024*4||offset+bytes.length>expected)throw Error('partial, skipped, duplicate or oversized readback chunk');
         // Append all bytes in order; no result cap, cached file or overwrite.
-        if(offset===0)fs.writeFileSync(report.evidencePaths.twoStreamOutput,bytes,{flag:'wx'});
-        else fs.appendFileSync(report.evidencePaths.twoStreamOutput,bytes);
-        report.twoStreamReadbackBytes=offset+bytes.length;
+        if(offset===0)fs.writeFileSync(outputPath,bytes,{flag:'wx'});
+        else fs.appendFileSync(outputPath,bytes);
+        report[countKey]=offset+bytes.length;
         await persist();res.writeHead(200).end();return;
       }
       if(req.method==='POST'&&['/input.f32','/output.f32'].includes(name)){
@@ -210,7 +230,7 @@ try{
   const page=await browser.newPage();await page.setViewport({width:1280,height:960});await page.goto(report.url,{timeout:0});
   report.phase='native-dino';await persist();
   Object.assign(report,await page.evaluate(async config=>{
-    const {createLoaderMemoryBudget,runResidentDino,runResidentTwoStream,TwoStreamBackbone,preprocessImage}=await import('/dist-lib/sf3d-producer.js');
+    const {createLoaderMemoryBudget,runResidentDino,runResidentTwoStream,runResidentPostProcessor,TwoStreamBackbone,preprocessImage}=await import('/dist-lib/sf3d-producer.js');
     const observe=async phase=>{const response=await fetch('/phase',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(phase)});
       if(!response.ok)throw Error('fresh phase observation refused: '+await response.text());};
     const persistTensor=async(url,bytes)=>{const response=await fetch(url,{method:'POST',body:bytes});if(!response.ok)throw Error('complete tensor persistence failed: '+await response.text());};
@@ -220,7 +240,7 @@ try{
     if(!backendResponse.ok)throw Error('native backend identity refused: '+await backendResponse.text());
     if(backend.isFallbackAdapter!==false||!/apple/i.test(backend.vendor))throw Error('actual nonfallback Apple adapter required');
     const budget=createLoaderMemoryBudget(config.requested),device=await budget.requestOwnedDevice(adapter,{requiredLimits:{maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
-    let imageLease,bitmap,staging,failure,failed=false,twoStream;
+    let imageLease,bitmap,staging,failure,failed=false,twoStream,postProcessor;
     device.pushErrorScope('validation');
     try{
       await observe({name:'preprocess',tensors:[],width:config.input.width,height:config.input.height});
@@ -271,15 +291,41 @@ try{
                   staging.unmap();
                 }
                 staging.destroy();staging=null;
+                if(config.requested.throughPostProcessor){
+                  postProcessor=await runResidentPostProcessor({
+                    device,postProcessor:{device},memoryBudget:budget,
+                    weightsUrl:'/canonical-weights.bin',expectedWeightBytes:config.source.byteLength,
+                    expectedSourceETag:config.source.etag,triplanesBuf:output.buffer,
+                    channelsPerDuty:config.requested.postChannelsPerDuty,onBeforePhase:observe,
+                    onBeforeDuty:duty=>observe({name:duty.kind==='output-allocation'?
+                      'post-processor-output-allocation':'post-processor-duty-'+duty.dutyIndex,duty,tensors:[]}),
+                    onProgress:p=>{document.querySelector('#status').textContent='Complete postprocessor '+(p.completedItems??0)+' duties';},
+                    async withResult(result){
+                      await observe({name:'post-processor-output',tensors:[]});
+                      const chunkBytes=128*1024*4;
+                      staging=device.createBuffer({size:chunkBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ,label:'complete-postprocessor-stream-readback'});
+                      for(let offset=0;offset<result.buffer.size;offset+=chunkBytes){
+                        const bytes=Math.min(chunkBytes,result.buffer.size-offset),encoder=device.createCommandEncoder();
+                        encoder.copyBufferToBuffer(result.buffer,offset,staging,0,bytes);device.queue.submit([encoder.finish()]);
+                        await staging.mapAsync(GPUMapMode.READ);
+                        const response=await fetch('/postprocessor.f32',{method:'POST',headers:{'X-Byte-Offset':String(offset)},body:new Uint8Array(staging.getMappedRange(),0,bytes)});
+                        if(!response.ok)throw Error('complete postprocessor persistence failed: '+await response.text());
+                        staging.unmap();
+                      }
+                      staging.destroy();staging=null;
+                    },
+                  });
+                }
               },
             });
           }
         }});
       imageLease.release();imageLease=null;const validation=await device.popErrorScope();
       if(validation)throw Error('native validation: '+validation.message);
-      document.querySelector('#status').textContent=config.requested.throughBackbone?
+      document.querySelector('#status').textContent=config.requested.throughPostProcessor?
+        'Complete DINO/backbone/postprocessor; mesh/material/GLB not yet run':config.requested.throughBackbone?
         'All24 DINO blocks and complete four-block backbone completed; full mesh/material/GLB not yet run':'All24 DINO blocks completed; full SF3D not yet run';
-      return {backend,dino,twoStream,inputConsumed,validationError:null,budget:budget.snapshot()};
+      return {backend,dino,twoStream,postProcessor,inputConsumed,validationError:null,budget:budget.snapshot()};
     }catch(error){failed=true;failure=error;throw error;}
     finally{
       bitmap?.close();
@@ -289,6 +335,7 @@ try{
   },{requested:report.requested,source:report.canonicalSource,input:report.inputArtifact,
     allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
   if(throughBackbone)report.twoStreamOutput=inspectTwoStreamOutput(report.evidencePaths.twoStreamOutput);
+  if(throughPostProcessor)report.postProcessorOutput=postWitness.inspectPostProcessorOutput(report.evidencePaths.postProcessorOutput);
   report.output=inspectDinoOutput(report.evidencePaths.output);report.phase='complete';report.status='passed';
 }catch(error){report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};}
 finally{
@@ -300,7 +347,7 @@ finally{
   try{if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';}catch(error){report.cleanup.serverError=error.message;report.status='failed';}
   closeCanonicalSource(report,source);
   try{if(profile&&report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});}catch(error){report.cleanup.profileError=error.message;report.status='failed';}
-  report.verdict=throughBackbone?acceptResidentTwoStream(report):acceptResidentDino(report);if(!report.verdict.ok)report.status='failed';report.terminalAt=new Date().toISOString();await persist();
+  report.verdict=throughPostProcessor?(postWitness?postWitness.acceptNativeResidentPostProcessor(report):{ok:false,errors:['postprocessor witness unavailable before arguments completed']}):throughBackbone?acceptResidentTwoStream(report):acceptResidentDino(report);if(!report.verdict.ok)report.status='failed';report.terminalAt=new Date().toISOString();await persist();
   console.log(JSON.stringify({status:report.status,phase:report.phase,report:reportPath,errors:report.verdict.errors}));
   if(report.status!=='passed')process.exitCode=1;
 }

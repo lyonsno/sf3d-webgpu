@@ -75,4 +75,3 @@ try{
   globalThis.fetch=prior;input.destroy();budget.restore();
 }
 console.log('PASS complete postprocessor adapter: 12 real-schema phases, all702 duties, awaited output and exact recovery custody');
-

@@ -65,4 +65,3 @@ assert.equal(describePostProcessorDutyDemand({kind:'conv-range',rangeIndex:0,tot
 assert.equal(describePostProcessorDutyDemand({kind:'conv-range',rangeIndex:1,totalChannels:1024}).workGpuBytes,64);
 assert.equal(describePostProcessorDutyDemand({kind:'pixel-shuffle-copy'}).workGpuBytes,23592984);
 console.log('PASS real complete postprocessor driver with private tiny metadata-only allocation fixture');
-

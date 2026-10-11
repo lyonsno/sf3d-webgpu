@@ -59,4 +59,3 @@ await assert.rejects(drivePostProcessorChannelBoundary(denied.cooperative,{
 }),/fresh refusal/);
 assert.equal(denied.trace.length,0);
 console.log('PASS complete postprocessor observation/group/prefix contract');
-
