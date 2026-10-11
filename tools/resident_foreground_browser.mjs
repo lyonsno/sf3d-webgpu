@@ -27,11 +27,20 @@ export async function acquireSharedGpuDevice(adapter,descriptor){
   return device;
 }
 
-export function mountComposition({prototype,sharedGpu,host}){
+export async function mountComposition({prototype,sharedGpu,host}){
   const a=acquisition;
   if(a?.status!=='acquired'||sharedGpu?.device!==a.device||sharedGpu?.queue!==a.device.queue||host?.device!==a.device)
     throw Error('guarded resident host device/queue mismatch');
   a.budget.assertDeviceAcquiredHere(a.device);
+  // Kaminos constructs the prototype before its asynchronous activation.
+  // The host owns that activation; wait for it, without starting a second
+  // initialization or accepting a merely constructed/uninitialized volume.
+  while(!prototype?.foregroundGpuContext?.().active){
+    const state=prototype?.debugState?.();
+    if(state?.error)throw Error('resident ordinary volume activation failed: '+state.error);
+    if(!state)throw Error('resident composition requires actual ordinary volume and Three host');
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }
   const context=prototype?.foregroundGpuContext?.();
   if(context?.device!==a.device||context?.queue!==a.device.queue||context.renderer!=='ordinary-volume'||context.productFrameOwner!=='prototype')
     throw Error('resident composition requires actual ordinary volume and Three host');

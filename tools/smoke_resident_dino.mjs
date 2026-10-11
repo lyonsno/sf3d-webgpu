@@ -368,11 +368,11 @@ try{
     page.on('pageerror',error=>report.foreground.pageErrors.push({message:error.message,stack:error.stack}));
     let rejectStartup;const startupFailure=new Promise((_resolve,reject)=>{rejectStartup=reject;});
     const failStartup=error=>rejectStartup(Error('actual foreground startup failed: '+error.message));
-    const failConsole=message=>{if(message.type()==='error'&&/^(Volume cockpit initialization failed:|Volume route initialization failed:|initScene failed:)/.test(message.text()))failStartup(Error(message.text()));};
+    const failConsole=message=>{if(message.type()==='error'&&/^(Volume cockpit initialization failed:|Volume route initialization failed:|initScene failed:|composition module failed:)/.test(message.text()))failStartup(Error(message.text()));};
     page.on('pageerror',failStartup);page.on('console',failConsole);
     report.phase='actual-foreground-navigation';await persist();
     try{
-      const response=await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'networkidle0',timeout:0}),startupFailure]);
+      const response=await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'domcontentloaded',timeout:0}),startupFailure]);
       if(!response?.ok())throw Error('actual foreground navigation refused: '+response?.status());
       await Promise.race([page.waitForFunction(()=>window.__kaminosCompositionSetup?.status==='mounted'||window.__kaminosCompositionSetup?.status==='failed'||window.__kaminosVolumePrototype?.debugState().error,{timeout:0,polling:100}),startupFailure]);
       const mounted=await page.evaluate(()=>({setup:window.__kaminosCompositionSetup,state:window.__kaminosVolumePrototype?.debugState()}));
