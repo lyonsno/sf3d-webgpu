@@ -519,23 +519,7 @@ async function _runVisualTransformer(device, embeddings, weights, pipelines, wei
   xBuf = _dispatchLN(encoder, device, xBuf, N, D, weightBuffers.lnPre, pipelines);
 
   for (let b = 0; b < NUM_BLOCKS; b++) {
-    const blk = weightBuffers.blocks[b];
-
-    // LN1 → fused QKV → attention → out proj → residual
-    const ln1 = _dispatchLN(encoder, device, xBuf, N, D, blk.ln1, pipelines);
-    // in_proj_weight is NOT transposed (PyTorch native [outDim, inDim])
-    const qkv = _dispatchLinear(encoder, device, ln1, N, D, 3*D, blk.qkv, false, pipelines);
-    const attn = _dispatchFusedAttn(encoder, device, qkv, N);
-    const proj = _dispatchLinear(encoder, device, attn, N, D, D, blk.outProj, true, pipelines);
-    xBuf = _dispatchAdd(encoder, device, xBuf, proj, N * D);
-
-    // LN2 → MLP (fc → GELU → proj) → residual
-    const ln2 = _dispatchLN(encoder, device, xBuf, N, D, blk.ln2, pipelines);
-    const fc = _dispatchLinear(encoder, device, ln2, N, D, MLP_DIM, blk.fc, true, pipelines);
-    const gelu = _dispatchGelu(encoder, device, fc, N * MLP_DIM);
-    const mlp = _dispatchLinear(encoder, device, gelu, N, MLP_DIM, D, blk.proj, true, pipelines);
-    xBuf = _dispatchAdd(encoder, device, xBuf, mlp, N * D);
-
+    xBuf = encodeClipVisualPhase(encoder, device, xBuf, weightBuffers.blocks[b], pipelines, 'block');
   }
 
   // Post-LN
@@ -551,6 +535,36 @@ async function _runVisualTransformer(device, embeddings, weights, pipelines, wei
   // visual.proj: PyTorch [768, 512], converter transposed to [512, 768]
   // output[d] = sum_k cls[k] * proj_transposed[d * 768 + k]
   const projW = weights._rawGetCPU('image_estimator.model.visual.proj');
+  return projectClipFeatures(allTokens, projW);
+}
+
+/** Same complete GPU block used by ordinary and computation-bound consumers. */
+export function encodeClipVisualPhase(encoder,device,input,weights,pipelines,phase){
+  const N=NUM_TOKENS,D=HIDDEN_DIM;
+  if(phase==='pre'||phase==='post')return _dispatchLN(encoder,device,input,N,D,weights,pipelines);
+  if(phase!=='block')throw TypeError('canonical visual phase required');
+  const ln1=_dispatchLN(encoder,device,input,N,D,weights.ln1,pipelines);
+  const qkv=_dispatchLinear(encoder,device,ln1,N,D,3*D,weights.qkv,false,pipelines);
+  const attn=_dispatchFusedAttn(encoder,device,qkv,N);
+  const proj=_dispatchLinear(encoder,device,attn,N,D,D,weights.outProj,true,pipelines);
+  const residual=_dispatchAdd(encoder,device,input,proj,N*D);
+  const ln2=_dispatchLN(encoder,device,residual,N,D,weights.ln2,pipelines);
+  const fc=_dispatchLinear(encoder,device,ln2,N,D,MLP_DIM,weights.fc,true,pipelines);
+  const gelu=_dispatchGelu(encoder,device,fc,N*MLP_DIM);
+  const mlp=_dispatchLinear(encoder,device,gelu,N,MLP_DIM,D,weights.proj,true,pipelines);
+  return _dispatchAdd(encoder,device,residual,mlp,N*D);
+}
+
+export async function createClipResidentPipelines(device,owner){
+  if(!Array.isArray(owner?.allocations))throw TypeError('reachable resident CLIP inventory required');
+  return {...await _ensurePipelines(device),residentOwner:owner};
+}
+
+export function projectClipFeatures(allTokens,projW){
+  const D=HIDDEN_DIM;
+  if(!(allTokens instanceof Float32Array)||allTokens.length!==NUM_TOKENS*D||
+    !(projW instanceof Float32Array)||projW.length!==PROJ_DIM*D)throw TypeError('complete canonical CLIP projection shape required');
+  const cls=allTokens.subarray(0,D);
   const features = new Float32Array(PROJ_DIM);
   for (let d = 0; d < PROJ_DIM; d++) {
     let sum = 0;
@@ -560,12 +574,15 @@ async function _runVisualTransformer(device, embeddings, weights, pipelines, wei
   return features;
 }
 
+export const runClipMaterialHead=_runHead;
+
 // --- GPU dispatch helpers ---
 
 function _dispatchLinear(encoder, device, input, rows, inDim, outDim, w, transposed, pipelines) {
   const totalWG = ceilDiv(rows * outDim, WG_SIZE);
   const [wgX, wgY] = splitWG(totalWG);
   const params = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  pipelines.residentOwner?.allocations.push({buffer:params,size:32});
   device.queue.writeBuffer(params, 0, new Uint32Array([rows, inDim, outDim, wgX, transposed ? 1 : 0]));
   const output = createEmptyBuffer(device, rows * outDim * 4);
   const bg = device.createBindGroup({
@@ -593,6 +610,7 @@ function _dispatchLN(encoder, device, input, N, D, norm, pipelines) {
   v.setUint32(4, D, true);
   v.setFloat32(8, 1e-5, true);
   const params = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  pipelines.residentOwner?.allocations.push({buffer:params,size:16});
   device.queue.writeBuffer(params, 0, new Uint8Array(paramsData));
   const output = createEmptyBuffer(device, N * D * 4);
   const bg = device.createBindGroup({

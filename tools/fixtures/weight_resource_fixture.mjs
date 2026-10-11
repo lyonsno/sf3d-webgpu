@@ -1,5 +1,5 @@
 /** Tiny synthetic tensors for exercising the real loader, not model numerics. */
-export function weightFixture({ normX = true, seed = 0, fullClipPrep = false, fullDecoder = false, tensorShapes = new Map(), fp16Names = new Set() } = {}) {
+export function weightFixture({ normX = true, seed = 0, fullClipPrep = false, fullDecoder = false, fullMaterialNames = false, tensorShapes = new Map(), fp16Names = new Set() } = {}) {
   const names = new Set();
   const add = (...values) => values.forEach(value => names.add(value));
   const pair = prefix => add(`${prefix}.weight`, `${prefix}.bias`);
@@ -45,6 +45,11 @@ export function weightFixture({ normX = true, seed = 0, fullClipPrep = false, fu
   }
   add('image_estimator.model.visual.conv1.weight', 'image_estimator.model.visual.class_embedding',
     'image_estimator.model.visual.positional_embedding');
+  if(fullMaterialNames){
+    add('image_estimator.model.visual.proj');
+    for(const head of ['roughness','metallic'])for(const l of ['0.0','0.2','0.4','1.0','1.2','2.0','2.2'])
+      pair(`image_estimator.heads.${head}.${l}`);
+  }
   const clipPrepShapes = fullClipPrep ? new Map([
     ['image_estimator.model.visual.conv1.weight', [768, 3072]],
     ['image_estimator.model.visual.class_embedding', [768]],

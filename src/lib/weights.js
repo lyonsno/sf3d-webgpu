@@ -644,24 +644,25 @@ export async function createWeightPhaseSource(device,url,options={}){
     if(!entries.length)throw TypeError('authenticated weight phase selection required');
     return Object.fromEntries(entries.map(([key,v])=>[key,select(v,names,buffers)]));
   };
-  return Object.freeze({template,loadingReport:source.report,phases,
-    describe(selection){
-      assertActive();const names=new Set();select(selection,names);
-      if(!names.size)throw TypeError('nonempty weight phase selection required');
-      return Object.freeze([...names].map(name=>Object.freeze({name,...source.tensors.get(name)})));
-    },
-    async withWeights(selection,work){
+  const withPhase=async(selection,work,storageKind)=>{
       assertActive();if(typeof work!=='function')throw TypeError('weight phase computation required');
       const names=new Set();
       if(selection&&typeof selection==='object'&&!Object.keys(selection).length)throw TypeError('nonempty weight phase selection required');
       const pinned=select(selection,names);if(!names.size)throw TypeError('nonempty weight phase selection required');
       active=true;
       const owner=rangeLoadContext(device,options.memoryBudget),buffers=new Map();
-      const phase={tensorNames:[...names],status:'loading',retirementAuthority:'API destruction after queue drain; not physical reclamation'};
+      const phase={tensorNames:[...names],storageKind,status:'loading',retirementAuthority:
+        storageKind==='cpu-fp32'?'owned CPU lease release; not physical reclamation':'API destruction after queue drain; not physical reclamation'};
       phases.push(phase);
       let value,error,failed=false;
       try{
-        for(const name of names)buffers.set(name,(await uploadRangeTensor(device,source,name,owner)).buffer);
+        for(const name of names){
+          if(storageKind==='cpu-fp32'){
+            const unit=await source.readTensor(name);
+            try{buffers.set(name,extractTensorCPU(unit.bytes.buffer,{...source.tensors.get(name),offset:0},owner.context));}
+            finally{unit.release();unit.bytes=null;}
+          }else buffers.set(name,(await uploadRangeTensor(device,source,name,owner)).buffer);
+        }
         phase.status='computing';value=await work(select(pinned,new Set(),buffers));
       }catch(failure){failed=true;error=failure;phase.error=String(failure?.message??failure);}
       try{
@@ -672,7 +673,19 @@ export async function createWeightPhaseSource(device,url,options={}){
         error=failed?new AggregateError([error,failure],'weight phase failed and cleanup is unresolved',{cause:error}):failure;failed=true;
       }finally{active=false;}
       if(failed)throw error;return value;
+    };
+  return Object.freeze({template,loadingReport:source.report,phases,
+    reference(name){
+      assertActive();if(typeof name!=='string'||!source.tensors.has(name))throw Error('Missing weight: '+name);
+      const ref=Object.freeze({});references.set(ref,name);return ref;
     },
+    describe(selection){
+      assertActive();const names=new Set();select(selection,names);
+      if(!names.size)throw TypeError('nonempty weight phase selection required');
+      return Object.freeze([...names].map(name=>Object.freeze({name,...source.tensors.get(name)})));
+    },
+    withWeights(selection,work){return withPhase(selection,work,'gpu-buffer');},
+    withCpuWeights(selection,work){return withPhase(selection,work,'cpu-fp32');},
     async dispose(){
       if(active)throw Error('cannot dispose an active weight phase');
       if(disposed&&!unresolvedOwner)return;
