@@ -41,7 +41,7 @@ export async function createFlatTensorRangeSource(url,{memoryBudget,expectedWeig
   const report={mode:'tensor-ranges',sourceUrl:String(url),sourceETag:expectedSourceETag,expectedWeightBytes,
     sourceIdentityAuthority:'HTTP strong ETag/If-Match plus exact ranges; not an independently verified whole-artifact digest',
     maximumSourceUnitBytes:0,receivedBytes:0,ranges:[],physicalMemoryMeasured:false};
-  const read=async (offset,size,label)=>{
+  const read=async (offset,size,label,consume=null)=>{
     if(label==='weight-header-prefix'||label==='weight-header')await onBeforeSourceIntake?.({
       name:label,tensors:[],storageKind:'cpu-source',sourceOffset:offset,sourceUnitBytes:size,
       rangeCpuBytes:2*size,workGpuBytes:0,requiredBytes:2*size,
@@ -53,7 +53,7 @@ export async function createFlatTensorRangeSource(url,{memoryBudget,expectedWeig
     try{
       lease=memoryBudget.reserveCpu(size,label+':destination');
       receiveLease=memoryBudget.reserveCpu(size,label+':response');
-      const bytes=new Uint8Array(size),end=offset+size-1;
+      const bytes=consume?null:new Uint8Array(size),end=offset+size-1;
       const response=await fetch(url,{headers:{Range:`bytes=${offset}-${end}`,'If-Match':expectedSourceETag},cache:'no-store'});
       reader=response.body?.getReader();
       if(response.status!==206 || response.headers.get('etag')!==expectedSourceETag ||
@@ -64,7 +64,9 @@ export async function createFlatTensorRangeSource(url,{memoryBudget,expectedWeig
       while(true){
         const {done,value}=await reader.read();if(done)break;
         if(!(value instanceof Uint8Array) || value.length>size-received)throw Error('weight range bytes exceed requested unit');
-        bytes.set(value,received);received+=value.length;
+        if(consume)await consume(value,received);
+        else bytes.set(value,received);
+        received+=value.length;
       }
       if(received!==size)throw Error('weight range bytes truncated');
       report.maximumSourceUnitBytes=Math.max(report.maximumSourceUnitBytes,size);
@@ -92,7 +94,12 @@ export async function createFlatTensorRangeSource(url,{memoryBudget,expectedWeig
   finally{header.release();header.bytes=null;}
   report.headerBytes=headerSize;report.tensorCount=tensors.size;
   report.incompleteShapeNames=[...tensors].filter(([,info])=>!info.shapeComplete).map(([name])=>name);
-  return {tensors,report,readTensor:async name=>{
+  return {tensors,report,consumeTensor:async(name,consume)=>{
+    if(typeof consume!=='function')throw TypeError('complete tensor stream consumer required');
+    const info=tensors.get(name);if(!info)throw Error('Missing weight: '+name);
+    const unit=await read(info.offset,info.size,'weight-tensor:'+name,consume);
+    unit.release();
+  },readTensor:async name=>{
     const info=tensors.get(name);if(!info)throw Error('Missing weight: '+name);
     return read(info.offset,info.size,'weight-tensor:'+name);
   }};

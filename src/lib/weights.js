@@ -586,7 +586,48 @@ async function uploadRangeFp16(device,bytes,owner){
   return buffer;
 }
 
+// Consume the entire authenticated range without a complete raw CPU copy.
+// Packed halves and expanded values share one working backing; expand backward
+// so unread halves survive. Keep all old full-range/conversion declarations.
+async function uploadRangeFp16Source(device,source,name,owner){
+  const info=source.tensors.get(name),expandedBytes=info.size*2;
+  const conversion=owner.context.budget.reserveCpu(expandedBytes,'fp16-conversion');
+  let working;
+  const lease={release(){conversion.release();working=null;}};
+  owner.ownedCpu.add(lease);
+  working=new Float32Array(Math.min(info.size/2,262144));
+  const packed=new Uint8Array(working.buffer,0,working.length*2),half=new Uint16Array(working.buffer,0,working.length);
+  const buffer=createEmptyBuffer(device,expandedBytes,0,'complete-phase-fp16-upload');
+  owner.ownedBuffers.add(buffer);
+  let used=0,uploaded=0;
+  const flush=async()=>{
+    if(used%2)throw Error('complete FP16 prefix has an incomplete element');
+    const count=used/2;
+    for(let i=count-1;i>=0;i--)working[i]=fp16ToFp32(half[i]);
+    device.queue.writeBuffer(buffer,uploaded,working,0,count);
+    await device.queue.onSubmittedWorkDone();
+    uploaded+=count*4;used=0;
+  };
+  await source.consumeTensor(name,async value=>{
+    for(let offset=0;offset<value.length;){
+      const count=Math.min(packed.length-used,value.length-offset);
+      packed.set(value.subarray(offset,offset+count),used);used+=count;offset+=count;
+      if(used===packed.length)await flush();
+    }
+  });
+  if(used)await flush();
+  if(uploaded!==expandedBytes)throw Error('complete FP16 source upload coverage mismatch');
+  lease.release();owner.ownedCpu.delete(lease);
+  return buffer;
+}
+
 async function uploadRangeTensor(device,source,name,owner,{retain=false,streamFp16Uploads=false}={}){
+  const info=source.tensors.get(name);
+  if(streamFp16Uploads&&info.dtype===1&&!retain){
+    const buffer=await uploadRangeFp16Source(device,source,name,owner);
+    await device.queue.onSubmittedWorkDone();
+    return {buffer};
+  }
   let unit=await source.readTensor(name);
   try{
     const info=source.tensors.get(name);
@@ -655,7 +696,7 @@ export async function createWeightPhaseSource(device,url,options={}){
   if(!isLoaderMemoryBudget(options.memoryBudget))throw TypeError('authenticated loader budget required');
   options.memoryBudget.assertDevice(device);
   const source=await createFlatTensorRangeSource(url,options),references=new WeakMap();
-  source.report.gpuFp16UploadMode=streamFp16Uploads?'queue-write-complete-prefix-v1':'direct-mapped-v1';
+  source.report.gpuFp16UploadMode=streamFp16Uploads?'queue-write-complete-source-prefix-v1':'direct-mapped-v1';
   const template=buildWeightSet(device,null,source.tensors,new Set(),null,{references(name){
     const ref=Object.freeze({});references.set(ref,name);return ref;
   }});

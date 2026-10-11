@@ -53,7 +53,7 @@ try{
       if(Number.isNaN(expected))assert(Number.isNaN(values[i]));else assert(Object.is(values[i],expected),'complete converted value differs at '+i);
     }
   });
-  assert.equal(source.loadingReport.gpuFp16UploadMode,'queue-write-complete-prefix-v1');
+  assert.equal(source.loadingReport.gpuFp16UploadMode,'queue-write-complete-source-prefix-v1');
   assert.equal(current.budget.snapshot().cpu.peakLiveBytes>=count*4,true,'full conversion allowance remains charged');
   assert.equal(current.budget.snapshot().gpu.liveBytes,0);assert.equal(current.budget.snapshot().cpu.liveBytes,0);
   await source.dispose();current.device.destroy();current.budget.restore();current=null;
