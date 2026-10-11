@@ -56,10 +56,13 @@ export function twoStreamPhaseDemand(phase){
     const rows=phase.attentionRowsPerDuty??128,normX=phase.normX??true;
     const reuse=phase.reuseDeadTriplaneStorage??false;
     const residualReuse=phase.reuseAttentionResidualStorage??false;
+    const setupReuse=phase.reuseTokenizerSetupStorage??false;
+    if(typeof setupReuse!=='boolean'||(setupReuse&&phase.rematerializeTokenizerEmbedding!==true))
+      throw Error('exact tokenizer setup reuse with canonical rematerialization required');
     if(!Number.isSafeInteger(rows)||rows<=0||typeof normX!=='boolean'||typeof reuse!=='boolean'||
       typeof residualReuse!=='boolean'||(residualReuse&&!reuse))throw Error('exact attention row, optional normalization and storage-reuse configuration required');
     switch(d?.kind){
-      case 'setup':work=3*tri+2*I*D*4+2*1792*D*4+latent+256+128*1024;break;
+      case 'setup':work=(setupReuse?1:3)*tri+2*I*D*4+2*1792*D*4+latent+256+128*1024;break;
       case 'fuse-prepare':{
         if(!['in','out'].includes(d.direction))throw Error('exact resident fuse direction required');
         const q=d.direction==='in'?L:N,kv=d.direction==='in'?N:L;
@@ -134,6 +137,24 @@ export function acceptResidentTwoStream(report){
     }
   }
   const reuse=report.requested?.reuseDeadTriplaneStorage??false;
+  const setupReuse=report.requested?.reuseTokenizerSetupStorage??false;
+  require(typeof setupReuse==='boolean'&&(!setupReuse||rematerialize)&&
+    (b?.reuseTokenizerSetupStorage??false)===setupReuse&&
+    (c?.adapterTelemetry?.reuseTokenizerSetupStorage??false)===setupReuse,
+    'effective tokenizer setup storage reuse differs from requested configuration');
+  if(setupReuse){
+    const r=c?.adapterTelemetry?.tokenizerSetupStorageReuse;
+    require(r?.status==='completed-prefix'&&r.afterDutyIndex===0&&r.bytesPerBuffer===tri&&
+      r.reusedTriplaneBuffers===2&&r.newTriplaneBuffers===1&&
+      r.source==='owned-tokenizer-after-groupnorm-read; owned-groupnorm-after-transpose-read',
+      'complete owned setup reuse prefix missing');
+    const o=report.phaseObservations?.find(o=>o.phase==='two-stream-duty-0');
+    const expected=twoStreamPhaseDemand({name:'two-stream-duty',duty:{kind:'setup'},
+      reuseTokenizerSetupStorage:true,rematerializeTokenizerEmbedding:true});
+    require(o?.descriptor?.reuseTokenizerSetupStorage===true&&o?.descriptor?.rematerializeTokenizerEmbedding===true&&
+      ['weightGpuBytes','rangeCpuBytes','workGpuBytes','requiredBytes'].every(k=>o.demand?.[k]===expected[k]),
+      'actual reduced setup demand missing or underdeclared');
+  }
   const residualReuse=report.requested?.reuseAttentionResidualStorage??false;
   require(typeof residualReuse==='boolean'&&(!residualReuse||reuse)&&
     (b?.reuseAttentionResidualStorage??false)===residualReuse&&

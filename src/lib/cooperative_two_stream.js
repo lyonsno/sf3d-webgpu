@@ -34,6 +34,7 @@ export function defineTwoStreamManifest(options = {}) {
     residentFFN = false,
     reuseDeadTriplaneStorage = false,
     reuseAttentionResidualStorage = false,
+    reuseTokenizerSetupStorage = false,
   } = options;
   if (!['stage', 'attention-tile'].includes(dutyGranularity)) {
     throw new RangeError(`unknown two-stream duty granularity ${dutyGranularity}`);
@@ -81,6 +82,7 @@ export function defineTwoStreamManifest(options = {}) {
       residentFFN,
       reuseDeadTriplaneStorage,
       reuseAttentionResidualStorage,
+      reuseTokenizerSetupStorage,
     },
   });
 }
@@ -296,6 +298,8 @@ export async function runCooperativeTwoStream(options) {
     retireIntermediateBuffers = false,
     reuseDeadTriplaneStorage = false,
     reuseAttentionResidualStorage = false,
+    reuseTokenizerSetupStorage = false,
+    rematerializeTokenizerEmbedding = false,
     withGroupWeights = null,
     onProgress,
     signal,
@@ -312,6 +316,10 @@ export async function runCooperativeTwoStream(options) {
   if(typeof reuseAttentionResidualStorage!=='boolean'||(reuseAttentionResidualStorage&&!reuseDeadTriplaneStorage))
     throw TypeError('attention residual reuse requires explicit owned dead-triplane reuse');
   if(withGroupWeights!==null&&typeof withGroupWeights!=='function')throw TypeError('withGroupWeights must be a function');
+  if(typeof reuseTokenizerSetupStorage!=='boolean'||(reuseTokenizerSetupStorage&&
+    (!residentFFN||!retireIntermediateBuffers||!withGroupWeights||!rematerializeTokenizerEmbedding||
+      dutyGranularity!=='attention-tile')))
+    throw TypeError('tokenizer setup reuse requires owned resident work and canonical rematerialization');
   if(backbone._residentWorkOwner||backbone._failedUniforms?.size)throw Error('two-stream work cleanup is quarantined');
   const attentionPlan = dutyGranularity === 'attention-tile'
     ? createTwoStreamAttentionDutyPlan(N_img, { linearRowsPerDuty, attentionRowsPerDuty, residentFFN })
@@ -339,6 +347,7 @@ export async function runCooperativeTwoStream(options) {
       residentFFN,
       reuseDeadTriplaneStorage,
       reuseAttentionResidualStorage,
+      reuseTokenizerSetupStorage,
     }),
     invocationId,
     schedulingMode,
@@ -350,7 +359,8 @@ export async function runCooperativeTwoStream(options) {
       imageTokensBuf,
       N_img,
       weights,
-      { linearRowsPerDuty, attentionRowsPerDuty, residentFFN, reuseDeadTriplaneStorage, reuseAttentionResidualStorage },
+      { linearRowsPerDuty, attentionRowsPerDuty, residentFFN, reuseDeadTriplaneStorage, reuseAttentionResidualStorage,
+        reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding },
     )
     : backbone.createForwardState(imageTokensBuf, N_img, weights);
   let stageTelemetry = [];
@@ -361,6 +371,7 @@ export async function runCooperativeTwoStream(options) {
   let succeeded=false,failure,failed=false;
   const storageReuse=[];
   const attentionResidualReuse=[];
+  let tokenizerSetupStorageReuse=null;
   const record=fn=>owner?captureGpuBufferAllocations(fn,{ownedAllocations:owner.allocations}).value:fn();
 
   try{
@@ -377,6 +388,8 @@ export async function runCooperativeTwoStream(options) {
           if(owner){
             for(const allocation of owner.allocations)owner.buffers.add(allocation.buffer);
             owner.allocations.length=0;
+            if(reuseTokenizerSetupStorage&&duty.kind==='setup')
+              tokenizerSetupStorageReuse={...state.tokenizerSetupStorageReuse,status:'completed-prefix',afterDutyIndex:duty.dutyIndex};
             if(reuseAttentionResidualStorage&&duty.kind==='fuse-attention-linear-range'&&duty.rangeIndex===duty.rangeCount-1)
               attentionResidualReuse.push(backbone._markFineAttentionResidualReusable(state,duty));
             if(reuseDeadTriplaneStorage&&duty.kind==='fuse-residual-norm')
@@ -434,6 +447,8 @@ export async function runCooperativeTwoStream(options) {
         storageReuse:Object.freeze(storageReuse),
         reuseAttentionResidualStorage,
         attentionResidualReuse:Object.freeze(attentionResidualReuse),
+        reuseTokenizerSetupStorage,
+        tokenizerSetupStorageReuse,
         linearRowsPerDuty:attentionPlan?linearRowsPerDuty:null,
         attentionRowsPerDuty:attentionPlan?attentionRowsPerDuty:null,
         declaredDutyCount: attentionPlan?.length ?? TWO_STREAM_DUTY_COUNT,

@@ -132,6 +132,31 @@ try{
   rematerialized.requested.processBudgetBytes=2147483648;
   for(const o of rematerialized.phaseObservations)o.host.hostFreeBytes=2147483648;
   assert.equal(acceptResidentTwoStream(rematerialized).ok,true);
+  const setupReuse=structuredClone(rematerialized);setupReuse.requested.reuseTokenizerSetupStorage=true;
+  assert.equal(acceptResidentTwoStream(setupReuse).ok,false,'requested setup reuse cannot certify default allocating route');
+  setupReuse.twoStream.reuseTokenizerSetupStorage=true;
+  const setupTelemetry=setupReuse.twoStream.cooperative.adapterTelemetry;
+  setupTelemetry.reuseTokenizerSetupStorage=true;
+  setupTelemetry.tokenizerSetupStorageReuse={status:'completed-prefix',afterDutyIndex:0,bytesPerBuffer:113246208,
+    reusedTriplaneBuffers:2,newTriplaneBuffers:1,
+    source:'owned-tokenizer-after-groupnorm-read; owned-groupnorm-after-transpose-read'};
+  const setupObservation=setupReuse.phaseObservations.find(o=>o.phase==='two-stream-duty-0');
+  setupObservation.descriptor={name:'two-stream-duty',duty:{kind:'setup'},
+    reuseTokenizerSetupStorage:true,rematerializeTokenizerEmbedding:true};
+  setupObservation.demand=twoStreamPhaseDemand(setupObservation.descriptor);
+  assert.equal(acceptResidentTwoStream(setupReuse).ok,true);
+  for(const mutate of [r=>delete r.twoStream.reuseTokenizerSetupStorage,
+    r=>r.twoStream.cooperative.adapterTelemetry.reuseTokenizerSetupStorage=false,
+    r=>r.twoStream.cooperative.adapterTelemetry.tokenizerSetupStorageReuse.status='encoded',
+    r=>r.twoStream.cooperative.adapterTelemetry.tokenizerSetupStorageReuse.afterDutyIndex=1,
+    r=>r.twoStream.cooperative.adapterTelemetry.tokenizerSetupStorageReuse.bytesPerBuffer--,
+    r=>r.twoStream.cooperative.adapterTelemetry.tokenizerSetupStorageReuse.newTriplaneBuffers=0,
+    r=>r.phaseObservations.find(o=>o.phase==='two-stream-duty-0').descriptor.reuseTokenizerSetupStorage=false,
+    r=>r.phaseObservations.find(o=>o.phase==='two-stream-duty-0').descriptor.rematerializeTokenizerEmbedding=false,
+    r=>r.phaseObservations.find(o=>o.phase==='two-stream-duty-0').demand.requiredBytes=0,
+    r=>r.phaseObservations.find(o=>o.phase==='two-stream-duty-0').demand.workGpuBytes=0]){
+    const drift=structuredClone(setupReuse);mutate(drift);assert.equal(acceptResidentTwoStream(drift).ok,false);
+  }
   for(const mutate of [r=>delete r.twoStream.rematerializeTokenizerEmbedding,
     r=>r.twoStream.rematerializeTokenizerEmbedding=false,
     r=>delete r.twoStream.tokenizerEmbeddingRetirement,

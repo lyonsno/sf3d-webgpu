@@ -39,7 +39,9 @@ export function selectTwoStreamPhase(template,stageId){
 export async function runResidentTwoStream({device,backbone,memoryBudget,weightsUrl,expectedWeightBytes,
   expectedSourceETag,imageTokensBuf,N_img,onBeforePhase,onBeforeDuty,onAfterDuty,onProgress,withResult,
   foregroundOpportunities=null,linearRowsPerDuty=128,attentionRowsPerDuty=128,reuseDeadTriplaneStorage=false,
-  reuseAttentionResidualStorage=false,rematerializeTokenizerEmbedding=false,onBeforeSourceIntake}){
+  reuseAttentionResidualStorage=false,rematerializeTokenizerEmbedding=false,reuseTokenizerSetupStorage=false,onBeforeSourceIntake}){
+  if(typeof reuseTokenizerSetupStorage!=='boolean'||(reuseTokenizerSetupStorage&&!rematerializeTokenizerEmbedding))
+    throw TypeError('tokenizer setup reuse requires explicit canonical rematerialization');
   if(typeof rematerializeTokenizerEmbedding!=='boolean')throw TypeError('explicit boolean tokenizer rematerialization required');
   if(typeof reuseDeadTriplaneStorage!=='boolean')throw TypeError('explicit boolean dead-triplane reuse required');
   if(typeof reuseAttentionResidualStorage!=='boolean'||(reuseAttentionResidualStorage&&!reuseDeadTriplaneStorage))
@@ -75,6 +77,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
       dutyGranularity:'attention-tile',linearRowsPerDuty,attentionRowsPerDuty,residentFFN:true,retireIntermediateBuffers:true,
       reuseDeadTriplaneStorage,
       reuseAttentionResidualStorage,
+      reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding,
       foregroundOpportunities,onProgress,onBeforeDuty,onAfterDuty,
       async withGroupWeights(group,work){
         if(group.stageId==='final'&&rematerializeTokenizerEmbedding)
@@ -102,7 +105,8 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
     const value=await withResult(executed.result);
     return {value,cooperative:executed.report,loadingReport:source.loadingReport,weightPhases:source.phases,
       shape:[3,1024,96,96],blocks:4,basicBlocks:12,residentFFN:true,linearRowsPerDuty,attentionRowsPerDuty,reuseDeadTriplaneStorage,
-      reuseAttentionResidualStorage,rematerializeTokenizerEmbedding,tokenizerEmbeddingRetirement,setupTokenizerEmbeddingRetirement};
+      reuseAttentionResidualStorage,rematerializeTokenizerEmbedding,reuseTokenizerSetupStorage,
+      tokenizerEmbeddingRetirement,setupTokenizerEmbeddingRetirement};
   }catch(error){failed=true;failure=error;throw error;}
   finally{
     try{await disposeResidentTwoStream(backbone);}

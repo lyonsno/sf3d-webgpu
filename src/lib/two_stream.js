@@ -405,6 +405,10 @@ export class TwoStreamBackbone {
   createAttentionForwardState(imageTokensBuf, N_img, weights, options = {}) {
     const reuse=options.reuseDeadTriplaneStorage??false;
     const residualReuse=options.reuseAttentionResidualStorage??false;
+    const setupReuse=options.reuseTokenizerSetupStorage??false;
+    if(typeof setupReuse!=='boolean'||(setupReuse&&
+      (options.residentFFN!==true||options.rematerializeTokenizerEmbedding!==true)))
+      throw TypeError('tokenizer setup reuse requires explicit resident FFN and canonical rematerialization');
     if(typeof reuse!=='boolean'||(reuse&&options.residentFFN!==true))
       throw TypeError('dead-triplane reuse requires explicit resident FFN');
     if(typeof residualReuse!=='boolean'||(residualReuse&&(!reuse||options.residentFFN!==true)))
@@ -416,6 +420,8 @@ export class TwoStreamBackbone {
     state.attentionRowsPerDuty = options.attentionRowsPerDuty ?? 128;
     state.reuseDeadTriplaneStorage=reuse;
     state.reuseAttentionResidualStorage=residualReuse;
+    state.reuseTokenizerSetupStorage=setupReuse;
+    state.rematerializeTokenizerEmbedding=options.rematerializeTokenizerEmbedding??false;
     return state;
   }
 
@@ -1104,11 +1110,24 @@ export class TwoStreamBackbone {
     const N_latent_init = CONFIG.numLatents;
     const { imageTokensBuf, N_img, weights } = state;
 
+    const reuse=state.reuseTokenizerSetupStorage??false,triBytes=N_tri*D*4;
+    if(typeof reuse!=='boolean')throw TypeError('explicit boolean tokenizer setup reuse required');
+    if(reuse&&(!state.residentFFN||state.rematerializeTokenizerEmbedding!==true||
+      state.nextFineDutyIndex!==0||!Array.isArray(this._residentWorkOwner?.allocations)||
+      !this._residentAdapterOwner?.allocations?.some(a=>a.buffer===weights.tokenizer_embeddings_buf&&a.size===triBytes)||
+      weights.tokenizer_embeddings_buf?.size!==triBytes||
+      !(weights.tokenizer_embeddings_buf.usage&GPUBufferUsage.STORAGE)||
+      weights.tokenizer_embeddings_buf===imageTokensBuf||weights.tokenizer_embeddings_buf===weights.latentInit))
+      throw Error('owned initial tokenizer setup storage and canonical rematerialization required');
     const gnOutBuf = this._dispatchGroupNorm(encoder, weights.tokenizer_embeddings_buf,
       weights.normTriplane, D, N_tri, 32);
-    const triPermBuf = createEmptyBuffer(device, N_tri * D * 4);
+    // Separate ordered compute passes finish reading each original value before
+    // its backing is overwritten. No pass aliases its own input and output.
+    // The adapter retires its overwritten embedding after this setup prefix,
+    // then loads a fresh immutable canonical embedding for the final consumer.
+    const triPermBuf = reuse?weights.tokenizer_embeddings_buf:createEmptyBuffer(device, triBytes);
     this._dispatchTranspose(encoder, gnOutBuf, triPermBuf, D, N_tri);
-    const triProjBuf = createEmptyBuffer(device, N_tri * D * 4);
+    const triProjBuf = reuse?gnOutBuf:createEmptyBuffer(device, triBytes);
     this._dispatchLinear(encoder, triPermBuf, triProjBuf,
       weights.projTriplane.weight, weights.projTriplane.bias, N_tri, D, D);
 
@@ -1132,9 +1151,14 @@ export class TwoStreamBackbone {
 
     state.currentLatent = latentBuf;
     state.currentTriplane = triProjBuf;
+    if(!reuse)Object.assign(this._diagnosticBuffers,{gnOutBuf,triPermBuf});
+    if(reuse){
+      delete this._diagnosticBuffers.gnOutBuf;delete this._diagnosticBuffers.triPermBuf;
+      state.tokenizerSetupStorageReuse={status:'encoded',bytesPerBuffer:triBytes,
+        reusedTriplaneBuffers:2,newTriplaneBuffers:1,
+        source:'owned-tokenizer-after-groupnorm-read; owned-groupnorm-after-transpose-read'};
+    }
     Object.assign(this._diagnosticBuffers, {
-      gnOutBuf,
-      triPermBuf,
       triProjBuf,
       imgProjBuf,
       latentProjBuf,

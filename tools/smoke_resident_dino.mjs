@@ -42,6 +42,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     reuseDeadTriplaneStorage:process.argv.includes('--reuse-dead-triplane-storage'),
     reuseAttentionResidualStorage:process.argv.includes('--reuse-attention-residual-storage'),
     rematerializeTokenizerEmbedding:process.argv.includes('--rematerialize-tokenizer-embedding'),
+    reuseTokenizerSetupStorage:process.argv.includes('--reuse-tokenizer-setup-storage'),
     appendPhaseJournal:process.argv.includes('--append-phase-journal'),
     hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
     foreground:foregroundRoot?{repoRoot:foregroundRoot,revision:arg('--foreground-revision'),grid:Number(arg('--foreground-grid')),
@@ -78,6 +79,8 @@ try{
   }
   if(report.requested.reuseDeadTriplaneStorage&&!throughBackbone)throw Error('dead-triplane reuse requires complete backbone invocation');
   if(report.requested.rematerializeTokenizerEmbedding&&!throughBackbone)throw Error('tokenizer rematerialization requires complete backbone invocation');
+  if(report.requested.reuseTokenizerSetupStorage&&(!throughBackbone||!report.requested.rematerializeTokenizerEmbedding))
+    throw Error('tokenizer setup reuse requires complete resident backbone and canonical rematerialization');
   if(report.requested.reuseAttentionResidualStorage&&(!throughBackbone||!report.requested.reuseDeadTriplaneStorage))
     throw Error('attention residual reuse requires explicit owned dead-triplane backbone route');
   if(!['raw-free-pages-v0',AVAILABLE_MEMORY_DIAGNOSTIC_POLICY].includes(report.requested.hostHeadroomPolicy))throw Error('unknown explicit host headroom policy; no fallback');
@@ -139,7 +142,7 @@ try{
       if(group.stageId==='final'&&report.requested.rematerializeTokenizerEmbedding)
         order.push('two-stream-embedding-rematerialize-weights','two-stream-embedding-rematerialize-rearrange');
       order.push('two-stream-'+group.stageId);
-      for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage}).requiredBytes>0)
+      for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage,reuseTokenizerSetupStorage:report.requested.reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding:report.requested.rematerializeTokenizerEmbedding}).requiredBytes>0)
         order.push('two-stream-duty-'+duty.dutyIndex);
     }
     order.push('two-stream-output');
@@ -232,6 +235,9 @@ try{
             if(phase.attentionRowsPerDuty!==report.requested.attentionRowsPerDuty)throw Error('effective attention allocation granule mismatch');
             if(phase.reuseDeadTriplaneStorage!==report.requested.reuseDeadTriplaneStorage)throw Error('effective owned-storage reuse differs from requested demand');
             if(phase.reuseAttentionResidualStorage!==report.requested.reuseAttentionResidualStorage)throw Error('effective attention residual reuse differs from requested demand');
+            if(phase.reuseTokenizerSetupStorage!==report.requested.reuseTokenizerSetupStorage||
+              phase.rematerializeTokenizerEmbedding!==report.requested.rematerializeTokenizerEmbedding)
+              throw Error('effective tokenizer setup reuse or rematerialization differs from requested demand');
             let normX=true;
             if(expected.kind==='fuse-prepare'){
               const prefix='backbone.main_blocks.'+expected.block+'.fuse_block_'+expected.direction+'.norm_x';
@@ -239,7 +245,7 @@ try{
               if(weight!==bias||phase.normX!==weight)throw Error('actual optional normalization differs from canonical complete source metadata');
               normX=weight;
             }
-            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,normX,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage});
+            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,normX,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage,reuseTokenizerSetupStorage:report.requested.reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding:report.requested.rematerializeTokenizerEmbedding});
           }else demand=twoStreamPhaseDemand(phase);
         }else if(phase.name.startsWith('post-processor-')){
           if(!throughPostProcessor)throw Error('requested route does not include postprocessor');
@@ -450,6 +456,7 @@ try{
               reuseDeadTriplaneStorage:config.requested.reuseDeadTriplaneStorage,
               reuseAttentionResidualStorage:config.requested.reuseAttentionResidualStorage,
               rematerializeTokenizerEmbedding:config.requested.rematerializeTokenizerEmbedding,
+              reuseTokenizerSetupStorage:config.requested.reuseTokenizerSetupStorage,
               async onBeforeDuty(duty,state){
                 if(duty.kind==='output')return observe({name:'two-stream-output',tensors:[]});
                 // Fresh observation at every new work-storage cliff; uniform
@@ -459,6 +466,8 @@ try{
                   await observe({name:'two-stream-duty-'+duty.dutyIndex,duty,tensors:[],attentionRowsPerDuty:state.attentionRowsPerDuty,
                     reuseDeadTriplaneStorage:state.reuseDeadTriplaneStorage,
                     reuseAttentionResidualStorage:state.reuseAttentionResidualStorage,
+                    reuseTokenizerSetupStorage:state.reuseTokenizerSetupStorage,
+                    rematerializeTokenizerEmbedding:state.rematerializeTokenizerEmbedding,
                     ...(duty.kind==='fuse-prepare'?{normX:!!state.weights.mainBlocks[duty.block][duty.direction==='in'?'fuseBlockIn':'fuseBlockOut'].normX}:{})});
               },
               onProgress:p=>{document.querySelector('#status').textContent='Actual complete two-stream backbone '+(p.completedItems??0)+' duties';},
@@ -574,7 +583,7 @@ try{
       catch(error){throw failed?new AggregateError([failure,error],'native DINO failed and cleanup failed',{cause:failure}):error;}
     }
   },{runId:report.runId,requested:report.requested,source:report.canonicalSource,input:report.inputArtifact,
-    allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
+    allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage,reuseTokenizerSetupStorage:report.requested.reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding:report.requested.rematerializeTokenizerEmbedding}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
   if(throughBackbone)report.twoStreamOutput=inspectTwoStreamOutput(report.evidencePaths.twoStreamOutput);
   if(throughPostProcessor)report.postProcessorOutput=postWitness.inspectPostProcessorOutput(report.evidencePaths.postProcessorOutput);
   if(throughFullModel)Object.assign(report.glbOutput,inspectCompleteGlb(report.evidencePaths.glb));
