@@ -313,6 +313,7 @@ export async function runResidentMarchingTetrahedra({handle,memoryBudget,gridVer
   try{
     await onBeforePhase({name:'marching-counted-scratch',rangeCpuBytes:scratchBytes,workGpuBytes:0,
       requiredBytes:scratchBytes,validTets:validCount,edgeCapacity,hashSlots,numTriangles,gridPoints:nv});
+    if(handle._residentMarchingOwner!==owner)throw Error('marching owner disposed during guard');
     owner.scratchLease=memoryBudget.reserveCpu(scratchBytes,'marching-counted-scratch');
     const s=owner.scratch={};
     s.positions=vertexOffsets?new Float32Array(gridVertices.length):gridVertices;
@@ -353,6 +354,7 @@ export async function runResidentMarchingTetrahedra({handle,memoryBudget,gridVer
     const outputBytes=vertexCount*12+numTriangles*12;
     await onBeforePhase({name:'marching-complete-mesh',rangeCpuBytes:outputBytes,workGpuBytes:0,
       requiredBytes:outputBytes,numVertices:vertexCount,numFaces:numTriangles,gridPoints:nv});
+    if(handle._residentMarchingOwner!==owner)throw Error('marching owner disposed during guard');
     owner.outputLease=memoryBudget.reserveCpu(outputBytes,'marching-complete-mesh');
     const output=owner.value={vertices:new Float32Array(vertexCount*3),faces:new Uint32Array(numTriangles*3),
       numVertices:vertexCount,numFaces:numTriangles};
@@ -373,7 +375,7 @@ export async function runResidentMarchingTetrahedra({handle,memoryBudget,gridVer
     if(f!==output.faces.length)throw Error('marching complete face count drift');
     owner.scratch=null;owner.scratchLease.release();owner.scratchLease=null;
     return output;
-  }catch(error){disposeResidentMarchingTetrahedra(handle);throw error;}
+  }catch(error){if(handle._residentMarchingOwner===owner)disposeResidentMarchingTetrahedra(handle);throw error;}
 }
 
 export function disposeResidentMarchingTetrahedra(handle){
