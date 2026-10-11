@@ -41,6 +41,9 @@ export { createLoaderMemoryBudget } from './loader_memory_budget.js';
 export { runResidentDino,selectDinoPhase } from './resident_dino.js';
 export {runResidentTwoStream,disposeResidentTwoStream} from './resident_two_stream.js';
 export {runResidentPostProcessor,disposeResidentPostProcessor,selectPostProcessorPhase} from './resident_post_processor.js';
+export {runResidentDecoder,runResidentDecoderQueries,disposeResidentDecoder,
+  disposeResidentDecoderQueries,selectDecoderHeads,describeResidentDecoderDemand} from './resident_decoder.js';
+export {TriplaneDecoder} from './triplane_decoder.js';
 export {TwoStreamBackbone} from './two_stream.js';
 export { preprocessImage } from './inference.js';
 import { initPipelines } from './inference.js';

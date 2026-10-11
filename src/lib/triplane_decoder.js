@@ -17,7 +17,7 @@
  *     vertex_offset:  Linear(120→64)+SiLU, Linear(64→64)+SiLU, Linear(64→3)
  */
 
-import { createStorageBuffer, createEmptyBuffer, readBuffer } from './gpu.js';
+import { createStorageBuffer, createEmptyBuffer, readBuffer, createUniformBuffer } from './gpu.js';
 
 import linearWGSL from '../shaders/linear.wgsl?raw';
 import gridSampleWGSL from '../shaders/grid_sample.wgsl?raw';
@@ -170,13 +170,21 @@ export class TriplaneDecoder {
     for (let i = 0; i < bytes.length; i++) h = (h * 31 + bytes[i]) | 0;
     const key = `td_${bytes.length}_${h}`;
     if (this._uniformCache.has(key)) return this._uniformCache.get(key);
-    const buf = this.device.createBuffer({
-      size: Math.max(bytes.byteLength, 16),
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true,
-    });
-    new Uint8Array(buf.getMappedRange()).set(bytes);
-    buf.unmap();
+    // Resident queries own the entire cache until the awaited consumer ends.
+    // Default cooperative bake captures and retires range scratch, not its
+    // persistent cached uniforms; preserve that lifetime contract.
+    let buf;
+    if (this._residentQueryWorkOwner) {
+      buf = createUniformBuffer(this.device, bytes, key);
+    } else {
+      buf = this.device.createBuffer({
+        size: Math.max(bytes.byteLength, 16),
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true,
+      });
+      new Uint8Array(buf.getMappedRange()).set(bytes);
+      buf.unmap();
+    }
     this._uniformCache.set(key, buf);
     return buf;
   }

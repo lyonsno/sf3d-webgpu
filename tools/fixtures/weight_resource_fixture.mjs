@@ -1,5 +1,5 @@
 /** Tiny synthetic tensors for exercising the real loader, not model numerics. */
-export function weightFixture({ normX = true, seed = 0, fullClipPrep = false, tensorShapes = new Map(), fp16Names = new Set() } = {}) {
+export function weightFixture({ normX = true, seed = 0, fullClipPrep = false, fullDecoder = false, tensorShapes = new Map(), fp16Names = new Set() } = {}) {
   const names = new Set();
   const add = (...values) => values.forEach(value => names.add(value));
   const pair = prefix => add(`${prefix}.weight`, `${prefix}.bias`);
@@ -34,6 +34,8 @@ export function weightFixture({ normX = true, seed = 0, fullClipPrep = false, te
   }
   for (const i of [0, 2, 4, 6]) pair(`post_processor.upsample.${i}`);
   for (const head of ['density', 'features', 'perturb_normal', 'vertex_offset']) pair(`decoder.heads.${head}.0`);
+  if(fullDecoder)for(const head of ['density','features','perturb_normal','vertex_offset'])
+    for(let i=1;i<(head==='density'||head==='vertex_offset'?3:4);i++)pair(`decoder.heads.${head}.${i*2}`);
   pair('image_estimator.model.visual.ln_pre');
   pair('image_estimator.model.visual.ln_post');
   for (let i = 0; i < 12; i++) {
