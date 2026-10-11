@@ -12,6 +12,7 @@ import {
   defineWebGpuCooperativeBoundaryManifest,
 } from '@kaminos/webgpu-inference-kit';
 import { createSf3dCooperativeRuntime, SF3D_ROUTE_ID } from './cooperative_dino.js';
+import {captureGpuBufferAllocations} from './gpu.js';
 import {
   createPostProcessorOutput,
   createPostProcessorPlaneState,
@@ -339,10 +340,16 @@ export async function drivePostProcessorChannelBoundary(cooperative, options) {
     now = () => globalThis.performance?.now?.() ?? Date.now(),
   } = options;
   const plan = requireExactPostProcessorChannelDutyPlan(suppliedPlan);
+  for (const name of ['beforeDuty', 'afterDuty', 'withDutyGroup']) {
+    if (options[name] != null && typeof options[name] !== 'function') {
+      throw new TypeError(name + ' must be a function');
+    }
+  }
   const gpu = cooperative.startBoundary(POST_PROCESSOR_CHANNEL_BOUNDARY_ID);
   const telemetry = [];
 
-  for (const duty of plan.duties) {
+  const runDuty = async duty => {
+    await options.beforeDuty?.(duty);
     const range = gpu.nextRange();
     if (!range) {
       throw new Error(
@@ -382,6 +389,30 @@ export async function drivePostProcessorChannelBoundary(cooperative, options) {
     timing.dutyCompletedAtMs = now();
     timing.dutyMs = timing.dutyCompletedAtMs - timing.dutyStartedAtMs;
     telemetry.push(Object.freeze(timing));
+    await options.afterDuty?.(duty);
+  };
+  for (let first = 0; first < plan.duties.length;) {
+    const head = plan.duties[first];
+    let end = first + 1;
+    while (end < plan.duties.length
+        && plan.duties[end].plane === head.plane
+        && plan.duties[end].stageIndex === head.stageIndex) end++;
+    const group = Object.freeze({
+      plane: head.plane, stageIndex: head.stageIndex, stageId: head.stageId,
+      kind: head.kind, layerIndex: head.layerIndex ?? null,
+      duties: Object.freeze(plan.duties.slice(first, end)),
+    });
+    let entered = false, completed = false;
+    const work = async () => {
+      if (entered) throw new Error('postprocessor duty group may execute exactly once');
+      entered = true;
+      for (const duty of group.duties) await runDuty(duty);
+      completed = true;
+    };
+    if (options.withDutyGroup) await options.withDutyGroup(group, work);
+    else await work();
+    if (!completed) throw new Error('postprocessor duty group did not execute completely');
+    first = end;
   }
   if (gpu.nextRange() != null) {
     throw new Error('cooperative postprocessor left channel ranges unconsumed');
@@ -414,6 +445,23 @@ export async function runCooperativePostProcessor(options) {
     completionPolicy = 'strict-prefix',
     maxInFlightGpuDuties = null,
   } = options;
+  const residentWork = options.residentWork ?? null;
+  const withGroupWeights = options.withGroupWeights ?? null;
+  if (residentWork || withGroupWeights || options.onBeforeDuty || options.onAfterDuty) {
+    if (dutyGranularity !== 'channel-range' || schedulingMode !== 'cooperative'
+        || completionPolicy !== 'strict-prefix') {
+      throw new Error('resident postprocessor hooks require cooperative strict-prefix channel-range execution');
+    }
+    for (const name of ['onBeforeDuty', 'onAfterDuty', 'withGroupWeights']) {
+      if (options[name] != null && typeof options[name] !== 'function') throw new TypeError(name + ' must be a function');
+    }
+  }
+  if (residentWork && (residentWork.device !== device || residentWork._postProcessorWorkOwner)) {
+    throw new Error('postprocessor work device mismatch or cleanup is quarantined');
+  }
+  if (residentWork && typeof options.onBeforeDuty !== 'function') {
+    throw new TypeError('resident postprocessor requires a fresh pre-allocation observer');
+  }
   if (!['plane', 'layer', 'channel-range'].includes(dutyGranularity)) {
     throw new RangeError(`unsupported postprocessor duty granularity: ${dutyGranularity}`);
   }
@@ -467,34 +515,68 @@ export async function runCooperativePostProcessor(options) {
     completionPolicy,
     ...(completionPolicy === 'bounded-prefix' ? { maxInFlightGpuDuties } : {}),
   });
-  const output = createPostProcessorOutput(device);
+  const owner = residentWork ? {
+    allocations: [], buffers: new Set(), resourceContext: {device, pipelines: new Map()},
+  } : null;
+  if (owner) residentWork._postProcessorWorkOwner = owner;
+  const record = fn => owner
+    ? captureGpuBufferAllocations(fn, {ownedAllocations:owner.allocations}).value : fn();
+  let output, succeeded = false, failed = false, failure;
   let dutyTelemetry = [];
-
+  try {
+  if (options.onBeforeDuty) await options.onBeforeDuty({
+    kind:'output-allocation', workGpuBytes:70778880, plane:null, dutyIndex:null,
+  }, null);
+  output = record(() => createPostProcessorOutput(device));
   await execution.run(async (cooperative) => {
     if (dutyGranularity === 'channel-range') {
       const planeStates = Array(output.numPlanes).fill(null);
+      const stateFor = plane => {
+        if (!planeStates[plane]) {
+          planeStates[plane] = createPostProcessorPlaneState(
+            device, triplanesBuf, weights, output, plane);
+          if (owner) planeStates[plane].resourceContext = owner.resourceContext;
+        }
+        return planeStates[plane];
+      };
       const driven = await drivePostProcessorChannelBoundary(cooperative, {
         plan: channelPlan,
-        encodeDuty(duty) {
-          if (!planeStates[duty.plane]) {
-            planeStates[duty.plane] = createPostProcessorPlaneState(
-              device,
-              triplanesBuf,
-              weights,
-              output,
-              duty.plane,
-            );
+        beforeDuty: options.onBeforeDuty
+          ? duty => options.onBeforeDuty({...duty,
+            ...describePostProcessorDutyDemand(duty)}, stateFor(duty.plane)) : null,
+        withDutyGroup: withGroupWeights ? async (group, work) => withGroupWeights(group, async selected => {
+          const state = stateFor(group.plane);
+          state.weights = selected;
+          try { return await work(); }
+          finally { state.weights = {convLayers:[null,null,null,null]}; }
+        }) : null,
+        async afterDuty(duty) {
+          const state = stateFor(duty.plane);
+          if (owner) {
+            const keep = new Set([output.buffer]);
+            if (!state.complete) {
+              if (state.current?.buffer) keep.add(state.current.buffer);
+              if (state.channelStage) {
+                keep.add(state.channelStage.input.buffer);
+                keep.add(state.channelStage.outputBuffer);
+              }
+            }
+            await retirePostProcessorWork(residentWork, keep);
           }
+          await options.onAfterDuty?.(duty, state);
+        },
+        encodeDuty(duty) {
+          const state = stateFor(duty.plane);
           const encoder = device.createCommandEncoder({
             label: `post-processor-plane-${duty.plane}-${duty.stageId}`
               + (duty.kind === 'conv-range' ? `-${duty.rangeIndex}` : ''),
           });
-          dispatchPostProcessorChannelDuty(
+          record(() => dispatchPostProcessorChannelDuty(
             device,
             encoder,
-            planeStates[duty.plane],
+            state,
             duty,
-          );
+          ));
           return encoder.finish();
         },
       });
@@ -550,12 +632,14 @@ export async function runCooperativePostProcessor(options) {
   });
 
   const report = execution.finish();
+  succeeded = true;
   return {
     result: output,
     report: Object.freeze({
       ...report,
       adapterTelemetry: Object.freeze({
         dutyGranularity,
+        residentWork: Boolean(owner),
         channelsPerDuty: dutyGranularity === 'channel-range' ? channelsPerDuty : null,
         stageDuties: Object.freeze(dutyTelemetry),
         queueFences: Object.freeze(queueFences),
@@ -563,4 +647,42 @@ export async function runCooperativePostProcessor(options) {
       }),
     }),
   };
+  } catch (error) { failed = true; failure = error; throw error; }
+  finally {
+    if (owner) {
+      try {
+        await retirePostProcessorWork(residentWork, succeeded ? new Set([output.buffer]) : new Set());
+        // Transfer only the complete output after every other owned store retired.
+        if (succeeded) owner.buffers.delete(output.buffer);
+        residentWork._postProcessorWorkOwner = null;
+      } catch (error) {
+        throw failed ? new AggregateError([failure,error], 'postprocessor failed and cleanup is unresolved', {cause:failure}) : error;
+      }
+    }
+  }
+}
+
+/** Fresh new-allocation demand, never destruction credit or physical fit. */
+export function describePostProcessorDutyDemand(duty) {
+  if (duty.kind === 'gather') return {workGpuBytes:1024*96*96*4+20};
+  if (duty.kind === 'pixel-shuffle-copy') return {workGpuBytes:40*384*384*4+24};
+  if (duty.kind === 'conv-range') return {
+    workGpuBytes:(duty.rangeIndex === 0 ? duty.totalChannels*96*96*4 : 0)+64,
+  };
+  throw new Error('exact postprocessor duty required');
+}
+
+/** Preserve unresolved inventories on the caller's stage handle for recovery. */
+export async function retirePostProcessorWork(handle, keep = new Set()) {
+  const owner = handle._postProcessorWorkOwner;
+  if (!owner) return;
+  for (const allocation of owner.allocations) owner.buffers.add(allocation.buffer);
+  owner.allocations.length = 0;
+  await handle.device.queue.onSubmittedWorkDone();
+  const errors = [];
+  for (const buffer of owner.buffers) if (!keep.has(buffer)) {
+    try { buffer.destroy(); owner.buffers.delete(buffer); }
+    catch (error) { errors.push(error); }
+  }
+  if (errors.length) throw new AggregateError(errors, 'postprocessor work retirement failed');
 }

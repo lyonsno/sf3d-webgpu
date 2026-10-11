@@ -11,7 +11,7 @@
  *   Output: [3, 40, 384, 384] triplane feature planes
  */
 
-import { createEmptyBuffer } from './gpu.js';
+import { createEmptyBuffer, createUniformBuffer } from './gpu.js';
 import {
   dispatchActivation,
   dispatchConv2d,
@@ -244,6 +244,7 @@ export function dispatchPostProcessorChannelDuty(device, encoder, state, duty) {
       strideH: 1,
       strideW: 1,
       applyRelu: !isLast,
+      resourceContext: state.resourceContext,
     },
     {
       channelStart: duty.channelStart,
@@ -323,6 +324,7 @@ export function dispatchPostProcessorPlaneStage(device, encoder, state, stageInd
       planeSize * planeSize * 3,
       state.plane * planePixels,
       planePixels,
+      state.resourceContext,
     );
     state.current = {
       buffer: planeBuf,
@@ -382,6 +384,7 @@ export function dispatchPostProcessorPlaneStage(device, encoder, state, stageInd
       inH: planeSize,
       inW: planeSize,
       scaleFactor,
+      resourceContext: state.resourceContext,
     });
     const outPlaneElements = state.output.C * state.output.H * state.output.W;
     const outOffset = state.plane * outPlaneElements * 4;
@@ -420,11 +423,14 @@ export function dispatchPostProcessor(device, encoder, triplanesBuf, weights) {
 
 let _gatherPipeline = null;
 
-function _dispatchGatherPlane(device, encoder, srcBuf, dstBuf, numChannels, totalSpatial, spatialOffset, spatialSize) {
+function _dispatchGatherPlane(device, encoder, srcBuf, dstBuf, numChannels, totalSpatial, spatialOffset, spatialSize, resourceContext = null) {
+  if (resourceContext && (resourceContext.device !== device
+      || !(resourceContext.pipelines instanceof Map))) throw new Error('gather resource context belongs to another device');
+  let pipeline = resourceContext ? resourceContext.pipelines.get('gather') : _gatherPipeline;
   // Gather: for each channel c and spatial index s in [0, spatialSize):
   //   dst[c * spatialSize + s] = src[c * totalSpatial + spatialOffset + s]
-  if (!_gatherPipeline) {
-    _gatherPipeline = device.createComputePipeline({
+  if (!pipeline) {
+    pipeline = device.createComputePipeline({
       layout: 'auto',
       compute: {
         module: device.createShaderModule({
@@ -447,6 +453,8 @@ function _dispatchGatherPlane(device, encoder, srcBuf, dstBuf, numChannels, tota
         entryPoint: 'main',
       },
     });
+    if (resourceContext) resourceContext.pipelines.set('gather', pipeline);
+    else _gatherPipeline = pipeline;
   }
 
   const total = numChannels * spatialSize;
@@ -454,16 +462,12 @@ function _dispatchGatherPlane(device, encoder, srcBuf, dstBuf, numChannels, tota
   const wgX = Math.min(totalWG, 65535);
   const wgY = Math.ceil(totalWG / 65535);
 
-  const params = device.createBuffer({
-    size: 20,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    mappedAtCreation: true,
-  });
-  new Uint32Array(params.getMappedRange()).set([numChannels, totalSpatial, spatialOffset, spatialSize, wgX]);
-  params.unmap();
+  const params = createUniformBuffer(device,
+    new Uint32Array([numChannels, totalSpatial, spatialOffset, spatialSize, wgX]),
+    'post-processor-gather-uniform');
 
   const bg = device.createBindGroup({
-    layout: _gatherPipeline.getBindGroupLayout(0),
+    layout: pipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: params } },
       { binding: 1, resource: { buffer: srcBuf } },
@@ -472,7 +476,7 @@ function _dispatchGatherPlane(device, encoder, srcBuf, dstBuf, numChannels, tota
   });
 
   const pass = encoder.beginComputePass();
-  pass.setPipeline(_gatherPipeline);
+  pass.setPipeline(pipeline);
   pass.setBindGroup(0, bg);
   pass.dispatchWorkgroups(wgX, wgY);
   pass.end();

@@ -14,7 +14,7 @@ import groupnormWGSL from '../shaders/groupnorm.wgsl?raw';
 import pixelshuffleWGSL from '../shaders/pixelshuffle.wgsl?raw';
 import upsampleWGSL from '../shaders/upsample.wgsl?raw';
 
-import { createStorageBuffer, createEmptyBuffer } from './gpu.js';
+import { createStorageBuffer, createEmptyBuffer, createUniformBuffer } from './gpu.js';
 
 const pipelineCache = new Map();
 const uniformCache = new Map();
@@ -57,15 +57,26 @@ function splitWorkgroups(totalWG) {
   return [wgX, wgY];
 }
 
-function getOrCreatePipeline(device, key, code, entryPoint) {
-  if (pipelineCache.has(key)) return pipelineCache.get(key);
+function getOrCreatePipeline(device, key, code, entryPoint, resourceContext = null) {
+  if (resourceContext && (resourceContext.device !== device
+      || !(resourceContext.pipelines instanceof Map))) {
+    throw new Error('shader resource context belongs to another device');
+  }
+  const cache = resourceContext?.pipelines ?? pipelineCache;
+  if (cache.has(key)) return cache.get(key);
   const module = device.createShaderModule({ code });
   const pipeline = device.createComputePipeline({
     layout: 'auto',
     compute: { module, entryPoint },
   });
-  pipelineCache.set(key, pipeline);
+  cache.set(key, pipeline);
   return pipeline;
+}
+
+function dutyUniform(device, data, resourceContext) {
+  return resourceContext
+    ? createUniformBuffer(device, data, 'post-processor-duty-uniform')
+    : cachedUniform(device, data);
 }
 
 function ceil(a, b) { return Math.ceil(a / b); }
@@ -149,6 +160,7 @@ export function dispatchConv2dChannelRange(
     'conv2d-channel-range',
     conv2dChannelRangeWGSL,
     'conv2d_channel_range_main',
+    params.resourceContext,
   );
   const uniformData = new Uint32Array([
     inC,
@@ -168,8 +180,9 @@ export function dispatchConv2dChannelRange(
     channelCount,
     params.applyRelu === true ? 1 : 0,
   ]);
-  const uniformBuf = cachedUniform(device, uniformData);
-  const dummyBias = biasBuf || getDummyBias(device);
+  const uniformBuf = dutyUniform(device, uniformData, params.resourceContext);
+  const dummyBias = biasBuf || (params.resourceContext
+    ? createStorageBuffer(device, new Float32Array([0])) : getDummyBias(device));
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [
@@ -358,12 +371,12 @@ export function dispatchPixelShuffle(device, encoder, inputBuf, params) {
   const outH = inH * scaleFactor;
   const outW = inW * scaleFactor;
 
-  const pipeline = getOrCreatePipeline(device, 'pixelshuffle', pixelshuffleWGSL, 'pixelshuffle_main');
+  const pipeline = getOrCreatePipeline(device, 'pixelshuffle', pixelshuffleWGSL, 'pixelshuffle_main', params.resourceContext);
 
   const totalWG = ceil(outC * outH * outW, 256);
   const [wgX, wgY] = splitWorkgroups(totalWG);
   const uniformData = new Uint32Array([inC, inH, inW, outC, scaleFactor, wgX]);
-  const uniformBuf = cachedUniform(device, uniformData);
+  const uniformBuf = dutyUniform(device, uniformData, params.resourceContext);
 
   const outputBuf = createEmptyBuffer(device, outC * outH * outW * 4);
 

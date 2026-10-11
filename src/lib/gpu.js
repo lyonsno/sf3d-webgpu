@@ -62,6 +62,28 @@ export function captureGpuBufferAllocations(fn, { ownedAllocations = null } = {}
   }
 }
 
+/** A duty-local uniform enters capture before mapping can fail. */
+export function createUniformBuffer(device, data, label = '') {
+  const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  const size = Math.max(16, Math.ceil(bytes.byteLength / 4) * 4);
+  const buffer = device.createBuffer({
+    size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    mappedAtCreation: true, label,
+  });
+  recordBufferAllocation(buffer, size, label);
+  try {
+    new Uint8Array(buffer.getMappedRange()).set(bytes);
+    buffer.unmap();
+    return buffer;
+  } catch (error) {
+    if (!activeBufferAllocationSink) {
+      try { buffer.destroy(); }
+      catch (cleanup) { throw new AggregateError([error, cleanup], 'uniform initialization and cleanup failed', {cause:error}); }
+    }
+    throw error;
+  }
+}
+
 /**
  * Acquire the GPU for SF3D.
  *
