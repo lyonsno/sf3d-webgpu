@@ -48,7 +48,8 @@ export function twoStreamPhaseDemand(phase){
   else if(phase.name==='two-stream-duty'){
     const d=phase.duty;
     const rows=phase.attentionRowsPerDuty??128,normX=phase.normX??true;
-    if(!Number.isSafeInteger(rows)||rows<=0||typeof normX!=='boolean')throw Error('exact attention row and optional normalization configuration required');
+    const reuse=phase.reuseDeadTriplaneStorage??false;
+    if(!Number.isSafeInteger(rows)||rows<=0||typeof normX!=='boolean'||typeof reuse!=='boolean')throw Error('exact attention row, optional normalization and storage-reuse configuration required');
     switch(d?.kind){
       case 'setup':work=3*tri+2*I*D*4+2*1792*D*4+latent+256+128*1024;break;
       case 'fuse-prepare':{
@@ -62,8 +63,8 @@ export function twoStreamPhaseDemand(phase){
       case 'basic-finish':work=5*latent+scratch(128)+4096;break;
       case 'fuse-attention-linear-range':work=d.rangeIndex===0?tri+4096:0;break;
       case 'fuse-residual-norm':work=2*tri+4096;break;
-      case 'fuse-resident-ffn-range':work=d.rangeIndex===0?tri+scratch(128)+4096:0;break;
-      case 'fuse-final-residual':work=tri+4096;break;
+      case 'fuse-resident-ffn-range':work=d.rangeIndex===0?(reuse?0:tri)+scratch(128)+4096:0;break;
+      case 'fuse-final-residual':work=(reuse?0:tri)+4096;break;
       case 'final':work=2*tri+4096;break;
       case 'attention-tile':break;
       default:throw Error('unknown or nonresident backbone duty');
@@ -106,6 +107,18 @@ export function acceptResidentTwoStream(report){
   const errors=[...base.errors],require=(test,message)=>{if(!test)errors.push(message);};
   const b=report.twoStream,c=b?.cooperative,boundary=c?.boundaries?.[0];
   const rows=report.requested?.attentionRowsPerDuty;
+  const reuse=report.requested?.reuseDeadTriplaneStorage??false;
+  require(typeof reuse==='boolean'&&(b?.reuseDeadTriplaneStorage??false)===reuse&&
+    (c?.adapterTelemetry?.reuseDeadTriplaneStorage??false)===reuse,'effective owned-storage reuse differs from requested configuration');
+  if(reuse){
+    const records=c?.adapterTelemetry?.storageReuse;
+    const blockDuties=446+7*Math.ceil(L/rows)+Math.ceil(N/rows);
+    require(records?.length===4&&records.every((r,block)=>r.block===block&&r.bytes===tri&&
+      r.afterDutyIndex===1+block*blockDuties+11+7*Math.ceil(L/rows)+217+Math.ceil(N/rows)&&
+      r.source==='owned-work-inventory-after-gpu-prefix'),'all four actual owned-buffer prefix transfers missing');
+    require(report.phaseObservations?.filter(o=>o.phase.startsWith('two-stream-duty-')).every(o=>
+      o.descriptor?.reuseDeadTriplaneStorage===true),'fresh duty demand lacks effective storage-reuse identity');
+  }
   const configured=Number.isSafeInteger(rows)&&rows>0;
   const duties=configured?2+4*(446+7*Math.ceil(L/rows)+Math.ceil(N/rows)):null;
   require(b?.residentFFN===true&&b.linearRowsPerDuty===128&&b.blocks===4&&b.basicBlocks===12&&

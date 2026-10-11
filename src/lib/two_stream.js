@@ -403,11 +403,15 @@ export class TwoStreamBackbone {
   }
 
   createAttentionForwardState(imageTokensBuf, N_img, weights, options = {}) {
+    const reuse=options.reuseDeadTriplaneStorage??false;
+    if(typeof reuse!=='boolean'||(reuse&&options.residentFFN!==true))
+      throw TypeError('dead-triplane reuse requires explicit resident FFN');
     const state = this.createForwardState(imageTokensBuf, N_img, weights);
     state.finePlan = createTwoStreamAttentionDutyPlan(N_img, options);
     state.residentFFN = options.residentFFN ?? false;
     state.ffnRowsPerTile = options.linearRowsPerDuty ?? 128;
     state.attentionRowsPerDuty = options.attentionRowsPerDuty ?? 128;
+    state.reuseDeadTriplaneStorage=reuse;
     return state;
   }
 
@@ -863,8 +867,17 @@ export class TwoStreamBackbone {
       throw new Error(`FFN projection is incomplete for ${operation.ownerId}`);
     }
     const byteLength = operation.N_z * operation.D * 4;
-    const zOutBuf = createEmptyBuffer(this.device, byteLength);
-    encoder.copyBufferToBuffer(operation.z1Buf, 0, zOutBuf, 0, byteLength);
+    let zOutBuf;
+    if(state.reuseDeadTriplaneStorage){
+      this._requireReusableFineFuseStorage(operation);
+      if(phase.output!==operation.zBuf)throw Error('owned reuse FFN output identity changed');
+      // The exact same z1 + FFN addition/order; z1 is already initialized.
+      // Never copy z1 over the FFN output we have just computed.
+      zOutBuf=operation.z1Buf;
+    }else{
+      zOutBuf=createEmptyBuffer(this.device,byteLength);
+      encoder.copyBufferToBuffer(operation.z1Buf,0,zOutBuf,0,byteLength);
+    }
     this._dispatchAdd(
       encoder,
       zOutBuf,
@@ -875,6 +888,35 @@ export class TwoStreamBackbone {
     this._diagnosticBuffers[`block${duty.block}_latent`] = state.currentLatent;
     this._diagnosticBuffers[`block${duty.block}_triplane`] = state.currentTriplane;
     state.activeOperation = null;
+  }
+
+  // Called by the cooperative owner only after this duty's real prefix fence.
+  // The old triplane's last reads were residual copy/add/norm. It remains in
+  // the private work inventory and can now be overwritten by every FFN row.
+  _markFineFuseStorageReusable(state,duty){
+    const operation=this._requireFineFuseOut(state,duty);
+    if(!state.reuseDeadTriplaneStorage||!state.residentFFN||duty.kind!=='fuse-residual-norm'||
+      state.nextFineDutyIndex!==duty.dutyIndex+1||operation.zBuf!==state.currentTriplane||
+      operation.attention!==null||operation.attentionProjection!==null||operation.ffnProjection)
+      throw Error('owned dead-triplane reuse requires completed residual/norm prefix');
+    const bytes=operation.N_z*operation.D*4,owned=this._residentWorkOwner?.buffers;
+    if(!owned?.has(operation.zBuf)||!owned.has(operation.z1Buf)||!owned.has(operation.z2NormBuf)||
+      operation.zBuf.size!==bytes||operation.z1Buf.size!==bytes||operation.z2NormBuf.size!==bytes||
+      new Set([operation.zBuf,operation.z1Buf,operation.z2NormBuf]).size!==3)
+      throw Error('owned distinct complete buffers required for dead-triplane reuse');
+    operation.reusableTriplaneStorage={buffer:operation.zBuf,afterDutyIndex:duty.dutyIndex};
+    return {block:duty.block,afterDutyIndex:duty.dutyIndex,bytes,
+      source:'owned-work-inventory-after-gpu-prefix'};
+  }
+
+  _requireReusableFineFuseStorage(operation){
+    const token=operation.reusableTriplaneStorage,owned=this._residentWorkOwner?.buffers;
+    if(!token||token.buffer!==operation.zBuf||!Number.isSafeInteger(token.afterDutyIndex)||
+      !owned?.has(operation.zBuf)||!owned.has(operation.z1Buf)||!owned.has(operation.z2NormBuf)||
+      operation.zBuf.size!==operation.N_z*operation.D*4||
+      new Set([operation.zBuf,operation.z1Buf,operation.z2NormBuf]).size!==3)
+      throw Error('owned dead-triplane reuse prefix/storage identity required');
+    return token.buffer;
   }
 
   _dispatchFineFuseResidentFFNRange(encoder,state,duty){
@@ -889,9 +931,15 @@ export class TwoStreamBackbone {
       duty.totalRows!==operation.N_z||duty.rangeCount!==Math.ceil(operation.N_z/state.ffnRowsPerTile)||
       duty.rowCount!==Math.min(state.ffnRowsPerTile,operation.N_z-duty.rowStart))
       throw Error('resident FFN duty is not the complete contiguous row plan');
+    let reuseOutput;
+    if(!phase&&state.reuseDeadTriplaneStorage){
+      reuseOutput=this._requireReusableFineFuseStorage(operation);
+      if(operation.reusableTriplaneStorage.afterDutyIndex!==duty.dutyIndex-1)
+        throw Error('owned reuse requires the immediately completed residual/norm prefix');
+    }
     if(!phase)phase=operation.ffnProjection={
       ownerId:duty.ownerId,nextRangeIndex:0,nextRowStart:0,rangeCount:duty.rangeCount,
-      output:createEmptyBuffer(this.device,operation.N_z*operation.D*4),
+      output:reuseOutput??createEmptyBuffer(this.device,operation.N_z*operation.D*4),
       scratch:this._createFFNScratch(Math.min(state.ffnRowsPerTile,operation.N_z),operation.D),
     };
     this._dispatchFFNRow(encoder,operation.z2NormBuf,phase.output,phase.scratch,

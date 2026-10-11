@@ -43,6 +43,22 @@ try{
   const absent=structuredClone(valid);absent.phaseObservations=absent.phaseObservations.slice(0,27);absent.expectedPhaseOrder=names.slice(0,27);
   assert.equal(acceptResidentTwoStream(absent).ok,false,'zero backbone observations cannot pass via a self-reported shortened expected graph');
   assert.equal(acceptResidentTwoStream(valid).ok,true,'synthetic acceptance-policy fixture only');
+  const reuse=structuredClone(valid);reuse.requested.reuseDeadTriplaneStorage=true;
+  assert.equal(acceptResidentTwoStream(reuse).ok,false,'requested reuse cannot conceal an allocating effective route');
+  reuse.twoStream.reuseDeadTriplaneStorage=true;reuse.twoStream.cooperative.adapterTelemetry.reuseDeadTriplaneStorage=true;
+  const reusePlan=createTwoStreamAttentionDutyPlan(1297,{residentFFN:true});
+  reuse.twoStream.cooperative.adapterTelemetry.storageReuse=reusePlan.filter(d=>d.kind==='fuse-residual-norm').map(d=>
+    ({block:d.block,afterDutyIndex:d.dutyIndex,bytes:27648*1024*4,source:'owned-work-inventory-after-gpu-prefix'}));
+  for(const o of reuse.phaseObservations)if(o.phase.startsWith('two-stream-duty-'))o.descriptor={reuseDeadTriplaneStorage:true};
+  assert.equal(acceptResidentTwoStream(reuse).ok,true,'effective per-block prefix transfers plus complete source work are required');
+  for(const mutate of [r=>delete r.twoStream.reuseDeadTriplaneStorage,
+    r=>r.twoStream.cooperative.adapterTelemetry.reuseDeadTriplaneStorage=false,
+    r=>r.twoStream.cooperative.adapterTelemetry.storageReuse.pop(),
+    r=>r.twoStream.cooperative.adapterTelemetry.storageReuse[0].afterDutyIndex--,
+    r=>r.twoStream.cooperative.adapterTelemetry.storageReuse[0].source='requested-only',
+    r=>r.phaseObservations.find(o=>o.phase.startsWith('two-stream-duty-')).descriptor.reuseDeadTriplaneStorage=false]){
+    const drift=structuredClone(reuse);mutate(drift);assert.equal(acceptResidentTwoStream(drift).ok,false);
+  }
   const diagnostic=structuredClone(valid);diagnostic.requested.hostHeadroomPolicy='darwin-available-memory-estimate-v1';
   diagnostic.hostPressureGuard={status:'observed',policy:'darwin-available-memory-estimate-v1',pressureStopFreePercent:24};
   for(const o of diagnostic.phaseObservations){Object.assign(o.host,{platform:'darwin',hostTotalBytes:1000,hostFreeBytes:0,
