@@ -44,7 +44,8 @@ export function acceptResidentForeground(report){
   const errors=[],require=(ok,msg)=>{if(!ok)errors.push(msg);},f=report.foreground,run=report.foregroundRun;
   try{validateResidentForegroundRequest(report.requested);}catch(error){errors.push(error.message);}
   require(f?.source?.revision===report.requested?.foreground?.revision&&f.source.trackedClean,'exact actual foreground source missing');
-  require(f?.service?.route==='owned-actual-kaminos-handler.v0'&&f.service.effective?.repoRoot===f.source?.repoRoot,'actual foreground handler identity missing');
+  require(f?.service?.route==='owned-actual-kaminos-handler.v0'&&f.service.effective?.source?.repoRoot===f.source?.repoRoot&&
+    f.service.effective.source.commit===f.source?.revision&&f.service.effective.source.dirty===false,'actual foreground handler identity missing');
   const admission=f?.admission,p=admission?.process;
   require(admission?.verdict==='admitted'&&admission.demand.requiredBytes===report.requested?.totalBytes&&phaseHostHeadroomIsAdmitted(report,admission)&&
     admission.host?.hostname===report.source?.hostname&&admission.host.model==='Mac14,9'&&admission.host.processor==='Apple M2 Pro'&&

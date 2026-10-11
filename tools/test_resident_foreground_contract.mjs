@@ -42,7 +42,7 @@ const report={requested,runId:'fixture-run',rootPid:1,ownedBrowserPid:123,source
   hostPressureGuard:{status:'observed',policy:requested.hostHeadroomPolicy,pressureStopFreePercent:24},
   foregroundRun:{status:'finished',runId:'fixture-run',sameDevice:true,sameQueue:true,frames,serviceReport},
   foreground:{source:{repoRoot:requested.foreground.repoRoot,revision:requested.foreground.revision,trackedClean:true},
-    service:{route:'owned-actual-kaminos-handler.v0',ownedPid:124,effective:{repoRoot:requested.foreground.repoRoot}},admission,
+    service:{route:'owned-actual-kaminos-handler.v0',ownedPid:124,effective:{source:{repoRoot:requested.foreground.repoRoot,commit:requested.foreground.revision,dirty:false}}},admission,
     compositionModule:{sha256:'3'.repeat(64),servedSha256:'3'.repeat(64),sourceRevision:'2'.repeat(40)},
     before:snapshot,after:snapshot,warmup:{completedFrameCount:200},pageErrors:[],
     captures:{before:{bytes:10,sha256:'before'},after:{bytes:10,sha256:'after'}},deviceRetirement:{route:'exact-owned-browser-exit',ownedPid:123}},
