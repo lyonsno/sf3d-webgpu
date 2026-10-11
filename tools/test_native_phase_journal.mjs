@@ -96,4 +96,3 @@ try{
   assert.equal(fs.existsSync(ordinaryPath+'.phases.jsonl'),false);
   console.log('Actual native append-only phase persistence/full terminal failure contracts passed');
 }finally{fs.rmSync(fixture,{recursive:true,force:true});}
-

@@ -60,4 +60,3 @@ export function createNativePhaseEvidenceWriter({reportPath,report,writeReport=w
     if(fault)throw fault;
   };
 }
-

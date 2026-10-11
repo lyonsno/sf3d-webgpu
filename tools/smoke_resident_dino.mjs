@@ -265,7 +265,13 @@ try{
         res.writeHead(200).end();return;
       }
       res.writeHead(404).end();
-    }catch(error){const message=String(error?.message??error);report.lastServerError={message,phase:report.phase};await persist();res.writeHead(409).end(message);}
+    }catch(error){
+      const message=String(error?.message??error);report.lastServerError={message,phase:report.phase};
+      // A sticky evidence fault must still reach the awaited browser caller,
+      // whose failure owns the exact browser and observer cleanup.
+      try{await persist();}catch(reportError){report.lastServerError.reportError=String(reportError?.message??reportError);}
+      res.writeHead(409).end(message);
+    }
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   report.url='http://127.0.0.1:'+server.address().port+'/';
