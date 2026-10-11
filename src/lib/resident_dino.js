@@ -31,7 +31,8 @@ export async function runResidentDino({device,memoryBudget,weightsUrl,expectedWe
   let source,tokenizer,imageBuf,cameraInputBuf,cameraEmbedBuf,result,cameraLease,failure,failed=false;
   const phaseDescriptions=[];
   try{
-    source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake});
+    source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake,
+      streamFp16Uploads:true});
     const before=async(name,selection,details={})=>{
       const descriptor={name,tensors:source.describe(selection),...details};
       phaseDescriptions.push(descriptor);await onBeforePhase(descriptor);

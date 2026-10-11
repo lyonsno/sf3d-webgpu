@@ -13,7 +13,7 @@
  *   Weight data: packed tensors
  */
 
-import { createStorageBuffer,createMappedStorageBuffer } from './gpu.js';
+import { createStorageBuffer,createMappedStorageBuffer,createEmptyBuffer } from './gpu.js';
 import { isLoaderMemoryBudget } from './loader_memory_budget.js';
 import { createFlatTensorRangeSource } from './flat_tensor_ranges.js';
 
@@ -564,11 +564,35 @@ function rangeLoadContext(device,memoryBudget){
   return {ownedBuffers,ownedCpu,context,cleanup};
 }
 
-async function uploadRangeTensor(device,source,name,owner,{retain=false}={}){
+// Complete conversion into one full GPU operand. The reusable working store
+// changes pacing, not coverage. Keep the existing full expansion allowance;
+// an unresolved queue prefix retains that allowance and exact GPU owner until
+// the actual phase disposer obtains a new successful drain.
+async function uploadRangeFp16(device,bytes,owner){
+  const half=new Uint16Array(bytes.buffer,bytes.byteOffset,bytes.byteLength/2);
+  const expandedBytes=half.length*4;
+  const lease=owner.context.budget.reserveCpu(expandedBytes,'fp16-conversion');
+  owner.ownedCpu.add(lease);
+  const working=new Float32Array(Math.min(half.length,262144));
+  const buffer=createEmptyBuffer(device,expandedBytes,0,'complete-phase-fp16-upload');
+  owner.ownedBuffers.add(buffer);
+  for(let start=0;start<half.length;start+=working.length){
+    const count=Math.min(working.length,half.length-start);
+    for(let i=0;i<count;i++)working[i]=fp16ToFp32(half[start+i]);
+    device.queue.writeBuffer(buffer,start*4,working,0,count);
+    await device.queue.onSubmittedWorkDone();
+  }
+  lease.release();owner.ownedCpu.delete(lease);
+  return buffer;
+}
+
+async function uploadRangeTensor(device,source,name,owner,{retain=false,streamFp16Uploads=false}={}){
   let unit=await source.readTensor(name);
   try{
     const info=source.tensors.get(name);
-    const buffer=extractTensor(device,unit.bytes.buffer,{...info,offset:0},owner.context);
+    const buffer=streamFp16Uploads&&info.dtype===1?
+      await uploadRangeFp16(device,unit.bytes,owner):
+      extractTensor(device,unit.bytes.buffer,{...info,offset:0},owner.context);
     owner.ownedBuffers.add(buffer);
     // Backpressure before another source unit; queue completion is not GC or
     // proven physical reclamation. The parent process observer remains needed.
@@ -626,9 +650,12 @@ async function loadRangeWeights(device,url,onProgress,options){
  * This is explicit lifetime accounting, never host-fit or physical reclaim authority.
  */
 export async function createWeightPhaseSource(device,url,options={}){
+  const streamFp16Uploads=options.streamFp16Uploads===undefined?false:options.streamFp16Uploads;
+  if(typeof streamFp16Uploads!=='boolean')throw TypeError('explicit boolean phase FP16 upload mode required');
   if(!isLoaderMemoryBudget(options.memoryBudget))throw TypeError('authenticated loader budget required');
   options.memoryBudget.assertDevice(device);
   const source=await createFlatTensorRangeSource(url,options),references=new WeakMap();
+  source.report.gpuFp16UploadMode=streamFp16Uploads?'queue-write-complete-prefix-v1':'direct-mapped-v1';
   const template=buildWeightSet(device,null,source.tensors,new Set(),null,{references(name){
     const ref=Object.freeze({});references.set(ref,name);return ref;
   }});
@@ -667,7 +694,7 @@ export async function createWeightPhaseSource(device,url,options={}){
             const unit=await source.readTensor(name);
             try{buffers.set(name,extractTensorCPU(unit.bytes.buffer,{...source.tensors.get(name),offset:0},owner.context));}
             finally{unit.release();unit.bytes=null;}
-          }else buffers.set(name,(await uploadRangeTensor(device,source,name,owner)).buffer);
+          }else buffers.set(name,(await uploadRangeTensor(device,source,name,owner,{streamFp16Uploads})).buffer);
         }
         phase.status='computing';value=await work(select(pinned,new Set(),buffers));
       }catch(failure){failed=true;error=failure;phase.error=String(failure?.message??failure);}
