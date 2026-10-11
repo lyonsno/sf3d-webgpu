@@ -54,7 +54,8 @@ export async function runResidentMaterials({device,handle,memoryBudget,weightsUr
   const lease=(size,label)=>{const l=memoryBudget.reserveCpu(size,label);owner.leases.push(l);return l;};
   let failed=false,failure;
   try{
-    owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag});
+    owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,
+      onBeforeSourceIntake:onBeforePhase});
     const source=owner.source,duties=[];
     const describe=async(name,selection,storageKind,rangeCpuBytes=0)=>{
       await onBeforePhase({name,tensors:source.describe(selection),storageKind,workGpuBytes:0,rangeCpuBytes});

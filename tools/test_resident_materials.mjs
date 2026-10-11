@@ -73,17 +73,20 @@ try{
   assert.equal(result.duties.length,14);assert.deepEqual(result.duties.map(d=>d.name),
     ['clip-pre',...Array.from({length:12},(_,i)=>'clip-block-'+i),'clip-post']);
   assert.equal(result.weightPhases.length,18,'prep,pre,12blocks,post,projection,two actual heads');
+  assert.deepEqual(phases.slice(0,2).map(p=>[p.name,p.rangeCpuBytes]),
+    [['weight-header-prefix',32],['weight-header',2*headerBytes]],'actual CLIP source callback is forwarded before both source ranges');
   assert.ok(result.weightPhases.every(p=>p.status==='completed-retired'));
   assert.equal(result.roughness,0.5);assert.equal(result.metallic,0.5,'real beta-mode heads on zero fixture, not defaults');
   assert.equal(phases.filter(p=>p.storageKind==='cpu-fp32').length,4);
   assert.equal(duties.at(-1).name,'clip-complete-token-readback');
   assert.equal(handle._residentClipOwner,null);assert.equal(budget.snapshot().cpu.liveBytes,0);assert.equal(budget.snapshot().gpu.liveBytes,0);
   assert.ok(device.buffers.every(b=>b.destroyed===1),'exact work and weights retire once');
-  const count=device.buffers.length;
+  const count=device.buffers.length,readCount=reads.length;
   await assert.rejects(()=>subject.runResidentMaterials({device,handle,memoryBudget:budget,
     weightsUrl:'synthetic.bin',expectedWeightBytes:total,expectedSourceETag:etag,rgba:new Uint8Array(512*512*4),
     onBeforePhase:async()=>{throw Error('fresh admission refused');},onBeforeDuty:async()=>{}}),/admission refused/);
   assert.equal(device.buffers.length,count,'fresh refusal before any CLIP payload/backing');
+  assert.equal(reads.length,readCount,'first fresh refusal precedes every source fetch including prefix/header');
   const run=extra=>subject.runResidentMaterials({device,handle,memoryBudget:budget,
     weightsUrl:'synthetic.bin',expectedWeightBytes:total,expectedSourceETag:etag,rgba:new Uint8Array(512*512*4),
     onBeforePhase:async()=>{},onBeforeDuty:async()=>{},...extra});
