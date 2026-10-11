@@ -699,8 +699,15 @@ export async function createWeightPhaseSource(device,url,options={}){
         phase.status='computing';value=await work(select(pinned,new Set(),buffers));
       }catch(failure){failed=true;error=failure;phase.error=String(failure?.message??failure);}
       try{
-        if(owner.ownedBuffers.size)await device.queue.onSubmittedWorkDone();
-        owner.cleanup();buffers.clear();phase.status=failed?'failed-retired':'completed-retired';
+        const hadGpuResources=owner.ownedBuffers.size>0;
+        if(hadGpuResources)await device.queue.onSubmittedWorkDone();
+        owner.cleanup();
+        if(hadGpuResources){
+          phase.retirementQueueBoundary='pending-after-api-destroy';
+          await device.queue.onSubmittedWorkDone();
+          phase.retirementQueueBoundary='observed-after-api-destroy';
+        }
+        buffers.clear();phase.status=failed?'failed-retired':'completed-retired';
       }catch(failure){
         quarantined=true;unresolvedOwner=owner;phase.status='cleanup-unresolved';phase.cleanupError=String(failure?.message??failure);
         error=failed?new AggregateError([error,failure],'weight phase failed and cleanup is unresolved',{cause:error}):failure;failed=true;
