@@ -120,20 +120,24 @@ export function createArtifactPhaseContract({table,headerBytes}) {
     const bytes=28+pad(context.jsonBytes)+108*context.numFaces+pad(context.albedoBytes)+pad(context.normalBytes);
     context.glbBytes=bytes;return bytes;});
   work('artifact-glb-image-conformance',()=>2*Math.max(context.albedoBytes,context.normalBytes));
-  work('artifact-glb-persist',()=>2*context.glbBytes);
+  // HTTP response/concatenation plus raw pre-UV geometry loaded for the
+  // complete exporter join, and both streaming geometry scan buffers.
+  work('artifact-glb-persist',()=>2*context.glbBytes+12*(context.numVertices+context.numFaces)+2*65536);
   return {context,received,get complete(){return steps.length===0;},accept(p){const step=steps[0];
     exact(step&&p.name===step.name,'effective complete artifact phase order mismatch: '+p.name+' expected '+step?.name);
     const demand=step.check(p);received.push({name:step.name,descriptor:p,demand});steps.shift();return demand;}};
 }
 
 /** Actual exporter contract, atop existing full GLB wire validator. */
-export function inspectCompleteGlb(input) {
+export function inspectCompleteGlb(input,rawGeometry) {
   const bytes=typeof input==='string'?fs.readFileSync(input):input;
   const wire=validateGlbPayload(bytes);exact(wire.chunkCount===2,'complete GLB BIN missing');
   const jsonBytes=bytes.readUInt32LE(12),json=JSON.parse(bytes.subarray(20,20+jsonBytes).toString()),binStart=28+jsonBytes,binBytes=bytes.readUInt32LE(20+jsonBytes);
   exact(json.meshes?.length===1&&json.images?.length===2&&json.materials?.length===1&&json.buffers?.[0]?.byteLength===binBytes,'complete mesh/two learned textures/material missing');
   const primitive=json.meshes[0].primitives[0],material=json.materials[0];
+  exact(json.scene===0&&json.scenes?.[0]?.nodes?.includes(0)&&json.nodes?.[0]?.mesh===0,'complete scene/node mesh connection missing');
   exact(primitive.material===0&&material.normalTexture?.index===1&&material.pbrMetallicRoughness?.baseColorTexture?.index===0,'complete actual textured material mapping missing');
+  exact(json.textures?.[0]?.source===0&&json.textures?.[1]?.source===1,'actual material texture/image mapping missing or swapped');
   for(const key of ['roughnessFactor','metallicFactor'])exact(Number.isFinite(material.pbrMetallicRoughness[key])&&material.pbrMetallicRoughness[key]>=0&&material.pbrMetallicRoughness[key]<=1,'invalid actual material scalar');
   const get=(index,kind,width,componentType)=>{
     const a=json.accessors[index],v=json.bufferViews[a?.bufferView];
@@ -146,13 +150,46 @@ export function inspectCompleteGlb(input) {
   const positions=get(primitive.attributes.POSITION,'VEC3',3,5126),normals=get(primitive.attributes.NORMAL,'VEC3',3,5126),uv=get(primitive.attributes.TEXCOORD_0,'VEC2',2,5126),indices=get(primitive.indices,'SCALAR',1,5125);
   exact(normals.count===positions.count&&uv.count===positions.count&&indices.count%3===0,'complete UV topology inconsistent');
   for(let i=0;i<indices.payload.length;i+=4)exact(indices.payload.readUInt32LE(i)<positions.count,'GLB face index outside actual complete mesh');
+  const point=index=>[0,1,2].map(axis=>positions.payload.readFloatLE((3*index+axis)*4));
+  let visibleTriangle=false;
+  for(let i=0;i<indices.count;i+=3){
+    const a=point(indices.payload.readUInt32LE(i*4)),b=point(indices.payload.readUInt32LE((i+1)*4)),c=point(indices.payload.readUInt32LE((i+2)*4));
+    const u=b.map((x,j)=>x-a[j]),v=c.map((x,j)=>x-a[j]);
+    if(u[1]*v[2]-u[2]*v[1]!==0||u[2]*v[0]-u[0]*v[2]!==0||u[0]*v[1]-u[1]*v[0]!==0)visibleTriangle=true;
+  }
+  exact(visibleTriangle,'blank/collapsed complete exported geometry');
+  let geometryJoin;
+  if(rawGeometry){
+    const {meshInput,facesInput,numVertices,numFaces}=rawGeometry;
+    inspectCompleteGeometry(meshInput,facesInput,numVertices,numFaces);
+    const rawMesh=typeof meshInput==='string'?fs.readFileSync(meshInput):meshInput;
+    const rawFaces=typeof facesInput==='string'?fs.readFileSync(facesInput):facesInput;
+    exact(indices.count===3*numFaces&&positions.count===3*numFaces,'complete UV face duplication topology changed');
+    for(let f=0;f<numFaces;f++)for(let corner=0;corner<3;corner++){
+      const rawIndex=rawFaces.readUInt32LE((3*f+[0,2,1][corner])*4),p=point(indices.payload.readUInt32LE((3*f+corner)*4));
+      const expected=[-rawMesh.readFloatLE((3*rawIndex+1)*4),rawMesh.readFloatLE((3*rawIndex+2)*4),-rawMesh.readFloatLE(3*rawIndex*4)];
+      exact(p.every((x,axis)=>x===expected[axis]),'exported geometry detached from retained complete mesh transform/winding');
+    }
+    geometryJoin={source:'whole-retained-mesh/actual-export-transform-and-UV-duplication',facesMatched:numFaces,pointsMatched:3*numFaces};
+  }
   const images=json.images.map(image=>{const v=json.bufferViews[image.bufferView];
     exact(image.mimeType==='image/jpeg'&&v?.buffer===0&&integer(v.byteLength)&&v.byteLength>0&&integer(v.byteOffset)&&v.byteOffset+v.byteLength<=binBytes,'complete embedded JPEG range missing');
     const payload=bytes.subarray(binStart+v.byteOffset,binStart+v.byteOffset+v.byteLength);
     exact(payload[0]===255&&payload[1]===216&&payload.at(-2)===255&&payload.at(-1)===217,'encoded texture is not a complete observed JPEG');
     return {bytes:payload.length,sha256:createHash('sha256').update(payload).digest('hex')};});
   return {bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),uvNumVertices:positions.count,uvNumFaces:indices.count/3,
-    jsonBytes:Buffer.byteLength(JSON.stringify(json)),roughness:material.pbrMetallicRoughness.roughnessFactor,metallic:material.pbrMetallicRoughness.metallicFactor,images};
+    jsonBytes:Buffer.byteLength(JSON.stringify(json)),roughness:material.pbrMetallicRoughness.roughnessFactor,metallic:material.pbrMetallicRoughness.metallicFactor,images,geometryJoin};
+}
+
+/** Retain the actual attempted primary payload before judgment. Failed bytes
+ * stay replayable at the same caller-owned path and never gain passed status. */
+export async function persistArtifactDelivery({filename,bytes,report,key,persist,inspect}){
+  fs.writeFileSync(filename,bytes,{flag:'wx'});
+  const delivery={bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),validation:'unverified'};
+  report[key]=delivery;await persist();
+  try{Object.assign(delivery,await inspect(bytes),{validation:'passed'});}
+  catch(error){delivery.validation='failed';delivery.error=String(error?.message??error);await persist();throw error;}
+  await persist();return delivery;
 }
 
 /** Whole retained geometry, streaming file inputs rather than trusting report
@@ -224,7 +261,7 @@ export function acceptNativeArtifact(report,table) {
     }
     require(contract.complete,'actual artifact phase graph incomplete');
     require(report.expectedPhaseOrder?.join(',')===report.phaseObservations?.map(o=>o.phase).join(','),'terminal complete effective phase identity missing');
-    const actual=inspectCompleteGlb(report.evidencePaths?.glb);
+    const actual=inspectCompleteGlb(report.evidencePaths?.glb,{meshInput:report.evidencePaths?.mesh,facesInput:report.evidencePaths?.faces,numVertices:metadata?.numVertices,numFaces:metadata?.numFaces});
     const geometry=inspectCompleteGeometry(report.evidencePaths?.mesh,report.evidencePaths?.faces,metadata?.numVertices,metadata?.numFaces);
     require(['mesh','faces'].every((key,i)=>{const observed=i?report.faceOutput:report.meshOutput;
       return observed?.bytes===geometry[key].bytes&&observed.sha256===geometry[key].sha256;}),'raw complete geometry identity missing/mismatch');
@@ -236,6 +273,7 @@ export function acceptNativeArtifact(report,table) {
       actual.roughness===m?.roughness&&actual.metallic===m?.metallic,'actual complete GLB differs from computed mesh/material');
     require(actual.sha256===report.glbOutput?.sha256&&actual.bytes===contract.context.glbBytes&&actual.jsonBytes===contract.context.jsonBytes&&
       actual.images[0].bytes===contract.context.albedoBytes&&actual.images[1].bytes===contract.context.normalBytes,'raw GLB/export allocation identity mismatch');
+    require([report.glbOutput,report.meshOutput,report.faceOutput].every(output=>output?.validation==='passed'),'delivered artifact validation not completed');
     require(report.decodedGlbImages?.length===2&&report.decodedGlbImages.every((image,i)=>image.source==='live-browser-decoded-embedded-JPEG'&&image.width===C.textureResolution&&image.height===C.textureResolution&&image.sha256===actual.images[i].sha256),'actual browser JPEG dimension/content conformance missing');
   } catch(error){errors.push(error.message);}
   return {ok:!errors.length,errors,authority:'complete source-bound native canonical textured GLB under identified guards; no reference parity, opaque physical fit or living-foreground claim'};

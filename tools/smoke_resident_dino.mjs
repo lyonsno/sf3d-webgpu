@@ -22,7 +22,7 @@ const throughBackbone=process.argv.includes('--through-backbone');
 const throughPostProcessor=process.argv.includes('--through-postprocessor');
 const throughFullModel=process.argv.includes('--through-full-model');
 let groups=null,postWitness=null,tensorTable,artifactContract;
-let createArtifactPhaseContract,sourceIntakePhaseDemand,inspectCompleteGlb,acceptNativeArtifact,RESIDENT_ARTIFACT_CONFIG;
+let createArtifactPhaseContract,sourceIntakePhaseDemand,inspectCompleteGlb,acceptNativeArtifact,persistArtifactDelivery,RESIDENT_ARTIFACT_CONFIG;
 const arg=name=>{const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root=arg('--repo-root')?path.resolve(arg('--repo-root')):null;
 const requestedReportPath=path.resolve(arg('--report')??path.join(os.tmpdir(),'sf3d-dino-'+randomUUID()+'.json'));
@@ -56,7 +56,7 @@ try{
     Object.assign(report.evidencePaths,{glb:reportPath+'.model.glb',mesh:reportPath+'.mesh.f32',faces:reportPath+'.faces.u32'});
     if(!throughBackbone||!throughPostProcessor)throw Error('full model requires complete backbone and postprocessor');
     report.phase='full-consumer-graph-import';await persist();
-    ({createArtifactPhaseContract,sourceIntakePhaseDemand,inspectCompleteGlb,acceptNativeArtifact}=await import('./resident_artifact_acceptance.mjs'));
+    ({createArtifactPhaseContract,sourceIntakePhaseDemand,inspectCompleteGlb,acceptNativeArtifact,persistArtifactDelivery}=await import('./resident_artifact_acceptance.mjs'));
     ({RESIDENT_ARTIFACT_CONFIG}=await import('../src/lib/resident_artifact.js'));
   }
   if(throughPostProcessor){
@@ -212,15 +212,18 @@ try{
       if(throughFullModel&&req.method==='POST'&&['/model.glb','/mesh.f32','/faces.u32'].includes(name)){
         const c=artifactContract.context,bytes=await readBody(req);
         if(name==='/model.glb'){
-          if(!artifactContract.complete||bytes.length!==c.glbBytes)throw Error('full GLB persistence before complete admitted consumer graph');
-          report.glbOutput=inspectCompleteGlb(bytes);fs.writeFileSync(report.evidencePaths.glb,bytes,{flag:'wx'});
+          await persistArtifactDelivery({filename:report.evidencePaths.glb,bytes,report,key:'glbOutput',persist,inspect:input=>{
+            if(!artifactContract.complete||input.length!==c.glbBytes)throw Error('full GLB persistence before complete admitted consumer graph');
+            return inspectCompleteGlb(input,{meshInput:report.evidencePaths.mesh,facesInput:report.evidencePaths.faces,numVertices:c.numVertices,numFaces:c.numFaces});
+          }});
         }else{
-          if(report.phaseObservations.at(-1)?.phase!=='artifact-geometry-persist')throw Error('actual geometry persistence lacks its fresh new-backing gate');
           const isMesh=name==='/mesh.f32',expected=12*(isMesh?c.numVertices:c.numFaces);
-          if(bytes.length!==expected)throw Error('partial complete geometry persistence');
-          for(let i=0;i<bytes.length;i+=4)if(isMesh?!Number.isFinite(bytes.readFloatLE(i)):bytes.readUInt32LE(i)>=c.numVertices)throw Error('invalid actual complete mesh');
-          const key=isMesh?'meshOutput':'faceOutput';report[key]={bytes:bytes.length,sha256:digest(bytes)};
-          fs.writeFileSync(isMesh?report.evidencePaths.mesh:report.evidencePaths.faces,bytes,{flag:'wx'});
+          await persistArtifactDelivery({filename:isMesh?report.evidencePaths.mesh:report.evidencePaths.faces,bytes,report,key:isMesh?'meshOutput':'faceOutput',persist,inspect:input=>{
+            if(report.phaseObservations.at(-1)?.phase!=='artifact-geometry-persist')throw Error('actual geometry persistence lacks its fresh new-backing gate');
+            if(input.length!==expected)throw Error('partial complete geometry persistence');
+            for(let i=0;i<input.length;i+=4)if(isMesh?!Number.isFinite(input.readFloatLE(i)):input.readUInt32LE(i)>=c.numVertices)throw Error('invalid actual complete mesh');
+            return {};
+          }});
         }
         await persist();res.writeHead(200).end();return;
       }
@@ -386,7 +389,7 @@ try{
                               await persistTensor('/faces.u32',new Uint8Array(mesh.faces.buffer,mesh.faces.byteOffset,mesh.faces.byteLength));
                             }finally{lease.release();}
                           },
-                          async withResult({glb}){
+                          async withResult({glb,mesh}){
                             const view=new DataView(glb),jsonLength=view.getUint32(12,true),binStart=28+jsonLength;
                             const json=JSON.parse(new TextDecoder().decode(new Uint8Array(glb,20,jsonLength)));
                             const imageViews=json.images.map(image=>json.bufferViews[image.bufferView]);
@@ -403,8 +406,9 @@ try{
                                 }finally{decoded.close();}
                               }
                             }finally{imageConformanceLease.release();}
-                            await observe({name:'artifact-glb-persist',tensors:[],rangeCpuBytes:2*glb.byteLength,workGpuBytes:0,requiredBytes:2*glb.byteLength});
-                            const lease=budget.reserveCpu(2*glb.byteLength,'actual-complete-GLB-persistence');
+                            const persistenceBytes=2*glb.byteLength+mesh.vertices.byteLength+mesh.faces.byteLength+2*65536;
+                            await observe({name:'artifact-glb-persist',tensors:[],rangeCpuBytes:persistenceBytes,workGpuBytes:0,requiredBytes:persistenceBytes});
+                            const lease=budget.reserveCpu(persistenceBytes,'actual-complete-GLB-persistence-and-raw-geometry-join');
                             try{await persistTensor('/model.glb',new Uint8Array(glb));}finally{lease.release();}
                           }});
                       }
@@ -432,7 +436,7 @@ try{
     allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
   if(throughBackbone)report.twoStreamOutput=inspectTwoStreamOutput(report.evidencePaths.twoStreamOutput);
   if(throughPostProcessor)report.postProcessorOutput=postWitness.inspectPostProcessorOutput(report.evidencePaths.postProcessorOutput);
-  if(throughFullModel)report.glbOutput=inspectCompleteGlb(report.evidencePaths.glb);
+  if(throughFullModel)Object.assign(report.glbOutput,inspectCompleteGlb(report.evidencePaths.glb));
   report.output=inspectDinoOutput(report.evidencePaths.output);report.phase='complete';report.status='passed';
 }catch(error){report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};}
 finally{

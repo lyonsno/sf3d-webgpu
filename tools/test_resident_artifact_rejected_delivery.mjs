@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {createHash} from 'node:crypto';
+import * as subject from './resident_artifact_acceptance.mjs';
+assert.equal(typeof subject.persistArtifactDelivery,'function','actual delivered rejected primary bytes require replayable custody before validation');
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sf3d-rejected-artifact-')),report={},bytes=Buffer.from('partial actual delivered GLB'),filename=path.join(dir,'model.glb');
+let published=0;
+const persist=async()=>{published++;assert.deepEqual(fs.readFileSync(filename),bytes,'raw delivery must be preserved before its validation/report');};
+await assert.rejects(()=>subject.persistArtifactDelivery({filename,bytes,report,key:'glbOutput',persist,inspect:subject.inspectCompleteGlb}));
+assert.deepEqual(fs.readFileSync(filename),bytes);
+assert.equal(report.glbOutput.validation,'failed');assert.equal(report.glbOutput.bytes,bytes.length);
+assert.equal(report.glbOutput.sha256,createHash('sha256').update(bytes).digest('hex'));assert.ok(published>=2);
+const accepted=path.join(dir,'mesh.f32'),valid=Buffer.from(new Float32Array([0,0,0,1,0,0,0,1,0]).buffer);
+await subject.persistArtifactDelivery({filename:accepted,bytes:valid,report,key:'meshOutput',persist:async()=>{},inspect:input=>{
+  assert.deepEqual(fs.readFileSync(accepted),input);return {bytes:input.length,validatedFields:['finite-complete-mesh']};}});
+assert.equal(report.meshOutput.validation,'passed');assert.equal(report.meshOutput.bytes,36);
+const invalidMesh=Buffer.from(valid);invalidMesh.writeFloatLE(NaN,0);const invalidPath=path.join(dir,'invalid-mesh.f32');
+await assert.rejects(()=>subject.persistArtifactDelivery({filename:invalidPath,bytes:invalidMesh,report,key:'invalidMeshOutput',persist:async()=>{},inspect:input=>subject.inspectCompleteGeometry(input,Buffer.from(new Uint32Array([0,1,2]).buffer),3,1)}),/nonfinite/);
+assert.deepEqual(fs.readFileSync(invalidPath),invalidMesh);assert.equal(report.invalidMeshOutput.validation,'failed');
+await assert.rejects(()=>subject.persistArtifactDelivery({filename:accepted,bytes:Buffer.from('replacement'),report,key:'meshOutput',persist:async()=>{},inspect:()=>({})}),/EEXIST/);
+assert.deepEqual(fs.readFileSync(accepted),valid,'existing actual evidence never overwritten');
+console.log('PASS actual rejected raw primary preserved before validation with hash/failure metadata, and positive delivery retains same input; local policy at '+dir);

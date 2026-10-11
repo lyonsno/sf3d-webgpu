@@ -54,7 +54,7 @@ intake('bake-source');query('bake',['features','perturb_normal'],8193);
 work('artifact-complete-textures-and-dilation',16*1024*1024,0,{textureResolution:1024,numOccupied:8193});
 work('glb-transforms',84);work('glb-albedo-image-data',4*1024*1024);work('glb-albedo-encoded',4);
 work('glb-normal-image-data',4*1024*1024);work('glb-normal-encoded',4);work('glb-json',100);
-work('glb-complete-buffer',28+100+108+8);work('artifact-glb-image-conformance',8);work('artifact-glb-persist',2*(28+100+108+8));
+work('glb-complete-buffer',28+100+108+8);work('artifact-glb-image-conformance',8);work('artifact-glb-persist',2*(28+100+108+8)+48+2*65536);
 const replay=list=>{const c=subject.createArtifactPhaseContract({table:tensorTable,headerBytes});for(const p of list)c.accept(p);return c;};
 const complete=replay(phases);assert.equal(complete.complete,true);
 assert.equal(complete.received.filter(p=>p.name==='geometry-decoder-point-range').length,131);
@@ -77,6 +77,22 @@ try{glb=Buffer.from(await exportGLB(new Float32Array([0,0,0,1,0,0,0,1,0]),new Fl
 finally{globalThis.document=oldDocument;}
 const inspected=subject.inspectCompleteGlb(glb);assert.equal(inspected.uvNumFaces,1);assert.equal(inspected.images.length,2);assert.equal(inspected.roughness,.7);
 const jsonLength=glb.readUInt32LE(12),binStart=28+jsonLength,json=JSON.parse(glb.subarray(20,20+jsonLength).toString());
+const rewriteJson=(change)=>{const copy=structuredClone(json);change(copy);const text=Buffer.from(JSON.stringify(copy)),padded=Buffer.alloc(Math.ceil(text.length/4)*4,32);text.copy(padded);
+  const bin=glb.subarray(binStart),result=Buffer.alloc(28+padded.length+bin.length);glb.copy(result,0,0,12);result.writeUInt32LE(result.length,8);
+  result.writeUInt32LE(padded.length,12);result.writeUInt32LE(0x4e4f534a,16);padded.copy(result,20);
+  result.writeUInt32LE(bin.length,20+padded.length);result.writeUInt32LE(0x004e4942,24+padded.length);bin.copy(result,28+padded.length);return result;};
+const wrongMappings=[['missing texture table',j=>delete j.textures],['swapped learned textures',j=>{j.textures[0].source=1;j.textures[1].source=0;}],['unreachable mesh',j=>delete j.nodes]];
+const falseAccepts=[];
+const rawGeometry={meshInput:Buffer.from(new Float32Array([0,0,0,1,0,0,0,1,0]).buffer),facesInput:Buffer.from(new Uint32Array([0,1,2]).buffer),numVertices:3,numFaces:1};
+for(const [name,change]of wrongMappings)try{subject.inspectCompleteGlb(rewriteJson(change));falseAccepts.push(name);}catch{}
+for(const [name,viewIndex]of [['blank exported positions',0],['all degenerate exported faces',json.accessors[json.meshes[0].primitives[0].indices].bufferView]]){
+  const bad=Buffer.from(glb),bv=json.bufferViews[viewIndex];bad.fill(0,binStart+bv.byteOffset,binStart+bv.byteOffset+bv.byteLength);
+  try{subject.inspectCompleteGlb(bad);falseAccepts.push(name);}catch{}
+}
+const displaced=Buffer.from(glb);displaced.writeFloatLE(2,binStart+json.bufferViews[0].byteOffset);
+try{subject.inspectCompleteGlb(displaced,rawGeometry);falseAccepts.push('export geometry detached from retained raw mesh');}catch{}
+assert.deepEqual(falseAccepts,[],'material texture/image and scene mesh mapping, visible geometry and a nondegenerate face are load-bearing export evidence');
+assert.equal(subject.inspectCompleteGlb(glb,rawGeometry).geometryJoin.facesMatched,1);
 for(const [offset,value]of [[json.bufferViews[0].byteOffset,NaN],[json.bufferViews[json.accessors[json.meshes[0].primitives[0].indices].bufferView].byteOffset,99]]){
   const bad=Buffer.from(glb);if(Number.isNaN(value))bad.writeFloatLE(value,binStart+offset);else bad.writeUInt32LE(value,binStart+offset);assert.throws(()=>subject.inspectCompleteGlb(bad));}
 const blank=Buffer.from(glb);blank[binStart+json.bufferViews[json.images[0].bufferView].byteOffset]=0;assert.throws(()=>subject.inspectCompleteGlb(blank),/JPEG/);
