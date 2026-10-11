@@ -36,6 +36,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     throughBackbone,attentionRowsPerDuty:Number(arg('--attention-rows-per-duty')??128),
     throughPostProcessor,throughFullModel,postChannelsPerDuty:Number(arg('--post-channels-per-duty')??16),
     reuseDeadTriplaneStorage:process.argv.includes('--reuse-dead-triplane-storage'),
+    reuseAttentionResidualStorage:process.argv.includes('--reuse-attention-residual-storage'),
     hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
     cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
   allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V, caller-declared complete-query score scratch and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
@@ -66,6 +67,8 @@ try{
     report.evidencePaths.postProcessorOutput=reportPath+'.postprocessor.f32';
   }
   if(report.requested.reuseDeadTriplaneStorage&&!throughBackbone)throw Error('dead-triplane reuse requires complete backbone invocation');
+  if(report.requested.reuseAttentionResidualStorage&&(!throughBackbone||!report.requested.reuseDeadTriplaneStorage))
+    throw Error('attention residual reuse requires explicit owned dead-triplane backbone route');
   if(!['raw-free-pages-v0',AVAILABLE_MEMORY_DIAGNOSTIC_POLICY].includes(report.requested.hostHeadroomPolicy))throw Error('unknown explicit host headroom policy; no fallback');
   if(report.requested.hostHeadroomPolicy===AVAILABLE_MEMORY_DIAGNOSTIC_POLICY){
     if(!throughBackbone||report.requested.processBudgetBytes!==2147483648)throw Error('available-memory diagnostic requires complete backbone and unchanged2GiB process stop');
@@ -113,7 +116,7 @@ try{
     order.push('two-stream-embedding-weights','two-stream-embedding-rearrange');
     for(const group of groups){
       order.push('two-stream-'+group.stageId);
-      for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage}).requiredBytes>0)
+      for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage}).requiredBytes>0)
         order.push('two-stream-duty-'+duty.dutyIndex);
     }
     order.push('two-stream-output');
@@ -172,6 +175,7 @@ try{
               throw Error('effective complete backbone duty identity mismatch');
             if(phase.attentionRowsPerDuty!==report.requested.attentionRowsPerDuty)throw Error('effective attention allocation granule mismatch');
             if(phase.reuseDeadTriplaneStorage!==report.requested.reuseDeadTriplaneStorage)throw Error('effective owned-storage reuse differs from requested demand');
+            if(phase.reuseAttentionResidualStorage!==report.requested.reuseAttentionResidualStorage)throw Error('effective attention residual reuse differs from requested demand');
             let normX=true;
             if(expected.kind==='fuse-prepare'){
               const prefix='backbone.main_blocks.'+expected.block+'.fuse_block_'+expected.direction+'.norm_x';
@@ -179,7 +183,7 @@ try{
               if(weight!==bias||phase.normX!==weight)throw Error('actual optional normalization differs from canonical complete source metadata');
               normX=weight;
             }
-            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,normX,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage});
+            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,normX,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage});
           }else demand=twoStreamPhaseDemand(phase);
         }else if(phase.name.startsWith('post-processor-')){
           if(!throughPostProcessor)throw Error('requested route does not include postprocessor');
@@ -328,6 +332,7 @@ try{
               onBeforeSourceIntake:sourceGuard('two-stream'),
               imageTokensBuf:result.tokensBuf,N_img:result.N,onBeforePhase:observe,attentionRowsPerDuty:config.requested.attentionRowsPerDuty,
               reuseDeadTriplaneStorage:config.requested.reuseDeadTriplaneStorage,
+              reuseAttentionResidualStorage:config.requested.reuseAttentionResidualStorage,
               async onBeforeDuty(duty,state){
                 if(duty.kind==='output')return observe({name:'two-stream-output',tensors:[]});
                 // Fresh observation at every new work-storage cliff; uniform
@@ -336,6 +341,7 @@ try{
                 if(config.allocatingDutyIndices.includes(duty.dutyIndex))
                   await observe({name:'two-stream-duty-'+duty.dutyIndex,duty,tensors:[],attentionRowsPerDuty:state.attentionRowsPerDuty,
                     reuseDeadTriplaneStorage:state.reuseDeadTriplaneStorage,
+                    reuseAttentionResidualStorage:state.reuseAttentionResidualStorage,
                     ...(duty.kind==='fuse-prepare'?{normX:!!state.weights.mainBlocks[duty.block][duty.direction==='in'?'fuseBlockIn':'fuseBlockOut'].normX}:{})});
               },
               onProgress:p=>{document.querySelector('#status').textContent='Actual complete two-stream backbone '+(p.completedItems??0)+' duties';},
@@ -433,7 +439,7 @@ try{
       catch(error){throw failed?new AggregateError([failure,error],'native DINO failed and cleanup failed',{cause:failure}):error;}
     }
   },{requested:report.requested,source:report.canonicalSource,input:report.inputArtifact,
-    allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
+    allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
   if(throughBackbone)report.twoStreamOutput=inspectTwoStreamOutput(report.evidencePaths.twoStreamOutput);
   if(throughPostProcessor)report.postProcessorOutput=postWitness.inspectPostProcessorOutput(report.evidencePaths.postProcessorOutput);
   if(throughFullModel)Object.assign(report.glbOutput,inspectCompleteGlb(report.evidencePaths.glb));

@@ -60,6 +60,34 @@ try{
     const drift=structuredClone(reuse);mutate(drift);assert.equal(acceptResidentTwoStream(drift).ok,false);
   }
   const diagnostic=structuredClone(valid);diagnostic.requested.hostHeadroomPolicy='darwin-available-memory-estimate-v1';
+
+  const attentionReuse=structuredClone(reuse);attentionReuse.requested.reuseAttentionResidualStorage=true;
+  assert.equal(acceptResidentTwoStream(attentionReuse).ok,false,'requested residual reuse cannot certify an allocating route');
+  attentionReuse.twoStream.reuseAttentionResidualStorage=true;
+  attentionReuse.twoStream.cooperative.adapterTelemetry.reuseAttentionResidualStorage=true;
+  attentionReuse.twoStream.cooperative.adapterTelemetry.attentionResidualReuse=reusePlan
+    .filter(d=>d.kind==='fuse-attention-linear-range'&&d.rangeIndex===d.rangeCount-1).map(d=>
+      ({block:d.block,afterDutyIndex:d.dutyIndex,bytes:27648*1024*4,source:'owned-projected-attention-after-gpu-prefix'}));
+  for(const o of attentionReuse.phaseObservations)if(o.phase.startsWith('two-stream-duty-'))o.descriptor.reuseAttentionResidualStorage=true;
+  attentionReuse.requested.processBudgetBytes=2147483648;
+  const residualCliffs=attentionReuse.twoStream.cooperative.adapterTelemetry.attentionResidualReuse.map(r=>'two-stream-duty-'+(r.afterDutyIndex+1));
+  for(const o of attentionReuse.phaseObservations.filter(o=>residualCliffs.includes(o.phase))){
+    o.descriptor.duty={kind:'fuse-residual-norm'};
+    o.demand=twoStreamPhaseDemand({name:'two-stream-duty',...o.descriptor});o.host.hostFreeBytes=2147483648;
+  }
+  assert.equal(acceptResidentTwoStream(attentionReuse).ok,true,'complete effective attention residual transfers required');
+  for(const mutate of [r=>delete r.twoStream.reuseAttentionResidualStorage,
+    r=>r.twoStream.cooperative.adapterTelemetry.reuseAttentionResidualStorage=false,
+    r=>r.twoStream.cooperative.adapterTelemetry.attentionResidualReuse.pop(),
+    r=>r.twoStream.cooperative.adapterTelemetry.attentionResidualReuse[0].afterDutyIndex--,
+    r=>r.twoStream.cooperative.adapterTelemetry.attentionResidualReuse[0].bytes--,
+    r=>r.twoStream.cooperative.adapterTelemetry.attentionResidualReuse[0].source='requested-only',
+    r=>r.phaseObservations.find(o=>residualCliffs.includes(o.phase)).demand.requiredBytes=0,
+    r=>r.phaseObservations.find(o=>residualCliffs.includes(o.phase)).demand.workGpuBytes=0,
+    r=>r.phaseObservations.find(o=>o.phase.startsWith('two-stream-duty-')).descriptor.reuseAttentionResidualStorage=false]){
+    const drift=structuredClone(attentionReuse);mutate(drift);assert.equal(acceptResidentTwoStream(drift).ok,false);
+  }
+
   diagnostic.hostPressureGuard={status:'observed',policy:'darwin-available-memory-estimate-v1',pressureStopFreePercent:24};
   for(const o of diagnostic.phaseObservations){Object.assign(o.host,{platform:'darwin',hostTotalBytes:1000,hostFreeBytes:0,
     hostMemoryPressureFreePercent:52,startedAtUnixMs:1000,observedAt:new Date(1002).toISOString(),

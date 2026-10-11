@@ -33,6 +33,7 @@ export function defineTwoStreamManifest(options = {}) {
     attentionRowsPerDuty = 128,
     residentFFN = false,
     reuseDeadTriplaneStorage = false,
+    reuseAttentionResidualStorage = false,
   } = options;
   if (!['stage', 'attention-tile'].includes(dutyGranularity)) {
     throw new RangeError(`unknown two-stream duty granularity ${dutyGranularity}`);
@@ -79,6 +80,7 @@ export function defineTwoStreamManifest(options = {}) {
       attentionRowsPerDuty: attentionPlan ? attentionRowsPerDuty : null,
       residentFFN,
       reuseDeadTriplaneStorage,
+      reuseAttentionResidualStorage,
     },
   });
 }
@@ -293,6 +295,7 @@ export async function runCooperativeTwoStream(options) {
     residentFFN = false,
     retireIntermediateBuffers = false,
     reuseDeadTriplaneStorage = false,
+    reuseAttentionResidualStorage = false,
     withGroupWeights = null,
     onProgress,
     signal,
@@ -306,6 +309,8 @@ export async function runCooperativeTwoStream(options) {
   if(typeof reuseDeadTriplaneStorage!=='boolean'||(reuseDeadTriplaneStorage&&
     (!residentFFN||!retireIntermediateBuffers||dutyGranularity!=='attention-tile')))
     throw TypeError('dead-triplane reuse requires explicit resident FFN and owned work retirement');
+  if(typeof reuseAttentionResidualStorage!=='boolean'||(reuseAttentionResidualStorage&&!reuseDeadTriplaneStorage))
+    throw TypeError('attention residual reuse requires explicit owned dead-triplane reuse');
   if(withGroupWeights!==null&&typeof withGroupWeights!=='function')throw TypeError('withGroupWeights must be a function');
   if(backbone._residentWorkOwner||backbone._failedUniforms?.size)throw Error('two-stream work cleanup is quarantined');
   const attentionPlan = dutyGranularity === 'attention-tile'
@@ -333,6 +338,7 @@ export async function runCooperativeTwoStream(options) {
       attentionRowsPerDuty,
       residentFFN,
       reuseDeadTriplaneStorage,
+      reuseAttentionResidualStorage,
     }),
     invocationId,
     schedulingMode,
@@ -344,7 +350,7 @@ export async function runCooperativeTwoStream(options) {
       imageTokensBuf,
       N_img,
       weights,
-      { linearRowsPerDuty, attentionRowsPerDuty, residentFFN, reuseDeadTriplaneStorage },
+      { linearRowsPerDuty, attentionRowsPerDuty, residentFFN, reuseDeadTriplaneStorage, reuseAttentionResidualStorage },
     )
     : backbone.createForwardState(imageTokensBuf, N_img, weights);
   let stageTelemetry = [];
@@ -354,6 +360,7 @@ export async function runCooperativeTwoStream(options) {
   if(owner)backbone._residentWorkOwner=owner;
   let succeeded=false,failure,failed=false;
   const storageReuse=[];
+  const attentionResidualReuse=[];
   const record=fn=>owner?captureGpuBufferAllocations(fn,{ownedAllocations:owner.allocations}).value:fn();
 
   try{
@@ -370,6 +377,8 @@ export async function runCooperativeTwoStream(options) {
           if(owner){
             for(const allocation of owner.allocations)owner.buffers.add(allocation.buffer);
             owner.allocations.length=0;
+            if(reuseAttentionResidualStorage&&duty.kind==='fuse-attention-linear-range'&&duty.rangeIndex===duty.rangeCount-1)
+              attentionResidualReuse.push(backbone._markFineAttentionResidualReusable(state,duty));
             if(reuseDeadTriplaneStorage&&duty.kind==='fuse-residual-norm')
               storageReuse.push(backbone._markFineFuseStorageReusable(state,duty));
             await retireTwoStreamWork(backbone,liveWorkBuffers(state,backbone));
@@ -423,6 +432,8 @@ export async function runCooperativeTwoStream(options) {
         residentFFN,
         reuseDeadTriplaneStorage,
         storageReuse:Object.freeze(storageReuse),
+        reuseAttentionResidualStorage,
+        attentionResidualReuse:Object.freeze(attentionResidualReuse),
         linearRowsPerDuty:attentionPlan?linearRowsPerDuty:null,
         attentionRowsPerDuty:attentionPlan?attentionRowsPerDuty:null,
         declaredDutyCount: attentionPlan?.length ?? TWO_STREAM_DUTY_COUNT,

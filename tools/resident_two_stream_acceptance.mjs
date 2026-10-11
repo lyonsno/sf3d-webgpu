@@ -49,7 +49,9 @@ export function twoStreamPhaseDemand(phase){
     const d=phase.duty;
     const rows=phase.attentionRowsPerDuty??128,normX=phase.normX??true;
     const reuse=phase.reuseDeadTriplaneStorage??false;
-    if(!Number.isSafeInteger(rows)||rows<=0||typeof normX!=='boolean'||typeof reuse!=='boolean')throw Error('exact attention row, optional normalization and storage-reuse configuration required');
+    const residualReuse=phase.reuseAttentionResidualStorage??false;
+    if(!Number.isSafeInteger(rows)||rows<=0||typeof normX!=='boolean'||typeof reuse!=='boolean'||
+      typeof residualReuse!=='boolean'||(residualReuse&&!reuse))throw Error('exact attention row, optional normalization and storage-reuse configuration required');
     switch(d?.kind){
       case 'setup':work=3*tri+2*I*D*4+2*1792*D*4+latent+256+128*1024;break;
       case 'fuse-prepare':{
@@ -62,7 +64,7 @@ export function twoStreamPhaseDemand(phase){
       case 'fuse-finish':work=5*latent+scratch(128)+4096;break;
       case 'basic-finish':work=5*latent+scratch(128)+4096;break;
       case 'fuse-attention-linear-range':work=d.rangeIndex===0?tri+4096:0;break;
-      case 'fuse-residual-norm':work=2*tri+4096;break;
+      case 'fuse-residual-norm':work=(residualReuse?1:2)*tri+4096;break;
       case 'fuse-resident-ffn-range':work=d.rangeIndex===0?(reuse?0:tri)+scratch(128)+4096:0;break;
       case 'fuse-final-residual':work=(reuse?0:tri)+4096;break;
       case 'final':work=2*tri+4096;break;
@@ -108,6 +110,28 @@ export function acceptResidentTwoStream(report){
   const b=report.twoStream,c=b?.cooperative,boundary=c?.boundaries?.[0];
   const rows=report.requested?.attentionRowsPerDuty;
   const reuse=report.requested?.reuseDeadTriplaneStorage??false;
+  const residualReuse=report.requested?.reuseAttentionResidualStorage??false;
+  require(typeof residualReuse==='boolean'&&(!residualReuse||reuse)&&
+    (b?.reuseAttentionResidualStorage??false)===residualReuse&&
+    (c?.adapterTelemetry?.reuseAttentionResidualStorage??false)===residualReuse,
+    'effective attention residual storage reuse differs from requested configuration');
+  if(residualReuse){
+    const records=c?.adapterTelemetry?.attentionResidualReuse;
+    const blockDuties=446+7*Math.ceil(L/rows)+Math.ceil(N/rows);
+    require(records?.length===4&&records.every((r,block)=>r.block===block&&r.bytes===tri&&
+      r.afterDutyIndex===1+block*blockDuties+11+7*Math.ceil(L/rows)+216+Math.ceil(N/rows)&&
+      r.source==='owned-projected-attention-after-gpu-prefix'),'all four actual projected-attention residual transfers missing');
+    const cliffs=Array.from({length:4},(_,block)=>'two-stream-duty-'+
+      (1+block*blockDuties+11+7*Math.ceil(L/rows)+217+Math.ceil(N/rows)));
+    const observed=report.phaseObservations?.filter(o=>cliffs.includes(o.phase));
+    const expected=twoStreamPhaseDemand({name:'two-stream-duty',duty:{kind:'fuse-residual-norm'},
+      reuseDeadTriplaneStorage:true,reuseAttentionResidualStorage:true});
+    require(observed?.length===4&&observed.every(o=>o.descriptor?.duty?.kind==='fuse-residual-norm'&&
+      ['weightGpuBytes','rangeCpuBytes','workGpuBytes','requiredBytes'].every(k=>o.demand?.[k]===expected[k])),
+      'actual reduced residual allocation demand missing or underdeclared');
+    require(report.phaseObservations?.filter(o=>o.phase.startsWith('two-stream-duty-')).every(o=>
+      o.descriptor?.reuseAttentionResidualStorage===true),'fresh duty demand lacks effective attention residual reuse identity');
+  }
   require(typeof reuse==='boolean'&&(b?.reuseDeadTriplaneStorage??false)===reuse&&
     (c?.adapterTelemetry?.reuseDeadTriplaneStorage??false)===reuse,'effective owned-storage reuse differs from requested configuration');
   if(reuse){

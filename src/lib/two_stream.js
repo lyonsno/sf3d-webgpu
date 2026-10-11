@@ -404,14 +404,18 @@ export class TwoStreamBackbone {
 
   createAttentionForwardState(imageTokensBuf, N_img, weights, options = {}) {
     const reuse=options.reuseDeadTriplaneStorage??false;
+    const residualReuse=options.reuseAttentionResidualStorage??false;
     if(typeof reuse!=='boolean'||(reuse&&options.residentFFN!==true))
       throw TypeError('dead-triplane reuse requires explicit resident FFN');
+    if(typeof residualReuse!=='boolean'||(residualReuse&&(!reuse||options.residentFFN!==true)))
+      throw TypeError('attention residual reuse requires explicit resident FFN and dead-triplane reuse');
     const state = this.createForwardState(imageTokensBuf, N_img, weights);
     state.finePlan = createTwoStreamAttentionDutyPlan(N_img, options);
     state.residentFFN = options.residentFFN ?? false;
     state.ffnRowsPerTile = options.linearRowsPerDuty ?? 128;
     state.attentionRowsPerDuty = options.attentionRowsPerDuty ?? 128;
     state.reuseDeadTriplaneStorage=reuse;
+    state.reuseAttentionResidualStorage=residualReuse;
     return state;
   }
 
@@ -754,12 +758,25 @@ export class TwoStreamBackbone {
       throw new Error(`attention projection is incomplete for ${operation.ownerId}`);
     }
     const byteLength = operation.N_z * operation.D * 4;
-    operation.z1Buf = createEmptyBuffer(this.device, byteLength);
-    encoder.copyBufferToBuffer(operation.zBuf, 0, operation.z1Buf, 0, byteLength);
+    let residualSource=phase.output;
+    if(state.reuseAttentionResidualStorage){
+      const token=operation.reusableAttentionResidualStorage,owned=this._residentWorkOwner?.buffers;
+      if(!token||token.buffer!==phase.output||token.afterDutyIndex!==duty.dutyIndex-1||
+        !owned?.has(phase.output)||!owned.has(operation.zBuf)||phase.output.size!==byteLength||
+        operation.zBuf.size!==byteLength||phase.output===operation.zBuf)
+        throw Error('owned attention projection residual reuse prefix/storage identity required');
+      // Complete per-element float32 addition is commutative. Preserve both
+      // inputs without copying over attention; the old triplane remains intact
+      // until the residual/norm prefix grants its later FFN overwrite.
+      operation.z1Buf=phase.output;residualSource=operation.zBuf;
+    }else{
+      operation.z1Buf = createEmptyBuffer(this.device, byteLength);
+      encoder.copyBufferToBuffer(operation.zBuf, 0, operation.z1Buf, 0, byteLength);
+    }
     this._dispatchAdd(
       encoder,
       operation.z1Buf,
-      phase.output,
+      residualSource,
       operation.N_z * operation.D,
     );
     operation.z2NormBuf = createEmptyBuffer(this.device, byteLength);
@@ -776,6 +793,23 @@ export class TwoStreamBackbone {
       // retire these only after this duty's actual queue prefix completes.
       operation.attention=null;operation.attentionProjection=null;
     }
+  }
+
+  // Only the cooperative owner's completed final projection prefix may grant
+  // this transfer. Keep the exact buffer reachable through the active operation.
+  _markFineAttentionResidualReusable(state,duty){
+    const operation=this._requireFineFuseOut(state,duty),phase=operation.attentionProjection;
+    const bytes=operation.N_z*operation.D*4,owned=this._residentWorkOwner?.buffers;
+    if(!state.reuseAttentionResidualStorage||!state.reuseDeadTriplaneStorage||!state.residentFFN||
+      duty.kind!=='fuse-attention-linear-range'||duty.rangeIndex!==duty.rangeCount-1||
+      state.nextFineDutyIndex!==duty.dutyIndex+1||!phase||phase.nextRangeIndex!==phase.rangeCount||
+      phase.nextRowStart!==operation.N_z||!owned?.has(phase.output)||!owned.has(operation.zBuf)||
+      phase.output.size!==bytes||operation.zBuf.size!==bytes||phase.output===operation.zBuf||
+      phase.output===operation.attention?.attnOutBuf)
+      throw Error('owned completed attention projection prefix required for residual reuse');
+    operation.reusableAttentionResidualStorage={buffer:phase.output,afterDutyIndex:duty.dutyIndex};
+    return {block:duty.block,afterDutyIndex:duty.dutyIndex,bytes,
+      source:'owned-projected-attention-after-gpu-prefix'};
   }
 
   _dispatchFineFuseGEGLULinearRange(encoder, state, duty) {
