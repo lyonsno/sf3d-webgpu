@@ -1,7 +1,7 @@
 import {isLoaderMemoryBudget} from './loader_memory_budget.js';
-import {runResidentDecoder} from './resident_decoder.js';
+import {runResidentDecoder,disposeResidentDecoder} from './resident_decoder.js';
 import {TriplaneDecoder} from './triplane_decoder.js';
-import {runResidentMaterials} from './resident_clip.js';
+import {runResidentMaterials,disposeResidentMaterials} from './resident_clip.js';
 import {runResidentMarchingTetrahedra,disposeResidentMarchingTetrahedra,scaleTensor} from './marching_tet.js';
 import {unwrapResidentUV,rasterizeUV,exportGLB} from './texture_baker.js';
 import {materializeTextures,createDilationScratch} from './materialize_core.js';
@@ -19,16 +19,19 @@ const hex=bytes=>Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'
  * The final consumer is awaited while every output lease is still owned.
  * Explicit backing accounting excludes DOM/canvas/JS metadata and driver memory;
  * a caller's fresh process/host guard remains mandatory, not a capacity claim. */
-export async function runResidentArtifact({device,memoryBudget,triplanesBuf,conditionRgba,
+export async function runResidentArtifact({device,handle,memoryBudget,triplanesBuf,conditionRgba,
   weightsUrl,expectedWeightBytes,expectedSourceETag,onBeforePhase,onBeforeDuty,
   onAfterDuty,onGeometry,withResult,withForeground,onProgress}) {
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
+  if(handle?.device!==device||handle._residentArtifactOwner)throw Error('owned nonquarantined artifact handle required');
   if(triplanesBuf?.size!==70778880||!(conditionRgba instanceof Uint8Array)||conditionRgba.length!==512*512*4)
     throw TypeError('complete borrowed postprocessor and actual condition RGBA required');
   if(typeof onBeforePhase!=='function'||typeof onBeforeDuty!=='function'||typeof withResult!=='function')
     throw TypeError('fresh allocation/range observers and awaited actual artifact consumer required');
   const c=RESIDENT_ARTIFACT_CONFIG,leases=[],meshHandle={},spans=[],guardPhases=[];
+  const owner={active:true,disposal:null,leases,meshHandle,decoder:null,clipHandle:{device},refs:{}};
+  handle._residentArtifactOwner=owner;
   let gridRaw,tets,positions,sdf,mesh,uv,raster,queryPositions,occupied,texture,dilationScratch;
   const reserve=(bytes,label)=>{const lease=memoryBudget.reserveCpu(bytes,label);leases.push(lease);return lease;};
   const guard=async(name,bytes,details={})=>{
@@ -51,10 +54,11 @@ export async function runResidentArtifact({device,memoryBudget,triplanesBuf,cond
       const buffer=await response.arrayBuffer();
       if(buffer.byteLength!==bytes||hex(await crypto.subtle.digest('SHA-256',buffer))!==sha)
         throw Error('canonical asset content identity mismatch: '+name);
+      owner.refs[name]=buffer;
       return {buffer,lease:retained};
     }finally{transport.release();}
   };
-  let geometry,materials,bake;
+  let geometry,materials,bake,failed=false,failure;
   try {
     const grid=await load('artifact-grid-source','/tets/_grid_vertices.bin',c.gridBytes,c.gridSha256);
     gridRaw=new Float32Array(grid.buffer);
@@ -65,7 +69,7 @@ export async function runResidentArtifact({device,memoryBudget,triplanesBuf,cond
     // The local grid object retains its borrowed buffer until this scope ends;
     // keep its source lease, rather than claiming GC by retiring it early.
     await onBeforePhase({name:'artifact-decoder-pipelines',tensors:[],workGpuBytes:0,rangeCpuBytes:0,requiredBytes:0});
-    const decoder=new TriplaneDecoder(device);decoder.init();
+    const decoder=owner.decoder=new TriplaneDecoder(device);decoder.init();
     const args={device,decoder,memoryBudget,weightsUrl,expectedWeightBytes,expectedSourceETag,
       triplanesBuf,batchPoints:c.batchPoints,onAfterDuty};
     geometry=await timed('complete-geometry',()=>runResidentDecoder({...args,positions,heads:['density','vertex_offset'],
@@ -83,7 +87,7 @@ export async function runResidentArtifact({device,memoryBudget,triplanesBuf,cond
       }}));
     positions=null;tets=null;scaledLease.release();
     // Canonical source buffers remain charged until this function completes.
-    materials=await timed('actual-clip-materials',()=>runResidentMaterials({device,handle:{device},memoryBudget,
+    materials=await timed('actual-clip-materials',()=>runResidentMaterials({device,handle:owner.clipHandle,memoryBudget,
       weightsUrl,expectedWeightBytes,expectedSourceETag,rgba:conditionRgba,
       onBeforePhase:scoped('materials'),onBeforeDuty:dutyScoped('materials'),onAfterDuty}));
     const uvBytes=84*mesh.numVertices+141*mesh.numFaces+36;
@@ -115,16 +119,39 @@ export async function runResidentArtifact({device,memoryBudget,triplanesBuf,cond
       texture.albedo,texture.normalMap,uv.newNumVertices,uv.newNumFaces,c.textureResolution,
       materials.roughness,materials.metallic,{requireNormalTexture:true,
         onBeforeCpuAllocation:(name,bytes)=>guard(name,bytes)}));
+    owner.refs.glb=glb;
     const metadata={config:c,numVertices:mesh.numVertices,numFaces:mesh.numFaces,
       uvNumVertices:uv.newNumVertices,uvNumFaces:uv.newNumFaces,numOccupied,glbBytes:glb.byteLength,
       geometry,materials,bake,spans,guardPhases,
       authority:'actual complete canonical consumer; output/foreground/native evidence requires caller witness; identified backing excludes opaque JS/canvas/driver allocations'};
     await withResult({glb,mesh,uv,texture,metadata});
     return metadata;
+  } catch(error) {failed=true;failure=error;throw error;
   } finally {
-    gridRaw=null;tets=null;positions=null;sdf=null;mesh=null;uv=null;raster=null;
-    queryPositions=null;occupied=null;texture=null;dilationScratch=null;
-    disposeResidentMarchingTetrahedra(meshHandle);
-    for(const lease of leases)lease.release();
+    Object.assign(owner.refs,{gridRaw,tets,positions,sdf,mesh,uv,raster,queryPositions,occupied,texture,dilationScratch});
+    owner.active=false;
+    try {await disposeResidentArtifact(handle);}
+    catch(error){throw failed?new AggregateError([failure,error],
+      'artifact failed and reachable owned cleanup unresolved',{cause:failure}):error;}
   }
+}
+
+/** Retry exact owned cleanup after settlement; never destroy borrowed device or
+ * planes. Failed child cleanup retains the entire artifact owner and charges.
+ * An active invocation cannot be detached during an awaited allocation guard. */
+export async function disposeResidentArtifact(handle) {
+  const owner=handle?._residentArtifactOwner;if(!owner)return;
+  if(owner.active)throw Error('cannot dispose an active artifact invocation');
+  if(owner.disposal)return owner.disposal;
+  const operation=(async()=>{
+    const errors=[];
+    if(owner.decoder)try{await disposeResidentDecoder(owner.decoder);}catch(error){errors.push(error);}
+    try{await disposeResidentMaterials(owner.clipHandle);}catch(error){errors.push(error);}
+    if(errors.length)throw new AggregateError(errors,'artifact owned retirement unresolved');
+    disposeResidentMarchingTetrahedra(owner.meshHandle);
+    owner.refs={};for(const lease of owner.leases)lease.release();owner.leases.length=0;
+    handle._residentArtifactOwner=null;
+  })();
+  owner.disposal=operation;
+  try{return await operation;}finally{owner.disposal=null;}
 }

@@ -8,13 +8,21 @@ await budget.requestOwnedDevice({async requestDevice(){return device;}});
 const originalFetch=globalThis.fetch;let reads=0,consumed=false;
 globalThis.fetch=async()=>{reads++;throw Error('should not fetch after refusal');};
 try {
-  await assert.rejects(()=>subject.runResidentArtifact({device,memoryBudget:budget,triplanesBuf:{size:70778880},
-    conditionRgba:new Uint8Array(512*512*4),onBeforePhase:async()=>{throw 0;},onBeforeDuty:async()=>{},withResult:async()=>{consumed=true;}}),e=>e===0);
+  const historical=budget.reserveCpu(1,'event-schema-witness');historical.release();
+  assert.equal(budget.events.filter(e=>['reserved','retirement-requested'].includes(e.kind)).length,2,
+    'reservation-history witness must select the actual authority-bearing event schema');
+  const beforeEvents=budget.events.length;
+  const activeHandle={device};
+  await assert.rejects(()=>subject.runResidentArtifact({device,handle:activeHandle,memoryBudget:budget,triplanesBuf:{size:70778880},
+    conditionRgba:new Uint8Array(512*512*4),onBeforePhase:async()=>{
+      await assert.rejects(()=>subject.disposeResidentArtifact(activeHandle),/cannot dispose an active/);throw 0;
+    },onBeforeDuty:async()=>{},withResult:async()=>{consumed=true;}}),e=>e===0);
+  assert.equal(activeHandle._residentArtifactOwner,null);
   assert.equal(reads,0);assert.equal(device.buffers.length,0);assert.equal(consumed,false);
   assert.equal(budget.snapshot().cpu.liveBytes,0);
-  assert.deepEqual(budget.events.filter(e=>['reserved','retirement-requested'].includes(e.type)),[]);
+  assert.deepEqual(budget.events.slice(beforeEvents),[]);
   globalThis.fetch=async()=>{reads++;return new Response(new Uint8Array(16),{headers:{'Content-Length':'16'}});};
-  const run=()=>subject.runResidentArtifact({device,memoryBudget:budget,triplanesBuf:{size:70778880},
+  const run=()=>subject.runResidentArtifact({device,handle:{device},memoryBudget:budget,triplanesBuf:{size:70778880},
     conditionRgba:new Uint8Array(512*512*4),onBeforePhase:async()=>{},onBeforeDuty:async()=>{},withResult:async()=>{consumed=true;}});
   await assert.rejects(run(),/complete canonical asset response required/);
   assert.equal(reads,1);assert.equal(budget.snapshot().cpu.liveBytes,0);
