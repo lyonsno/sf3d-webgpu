@@ -42,4 +42,3 @@ try{
   assert.equal(device.buffers.length,0);assert.equal(budget.snapshot().cpu.liveBytes,0);assert.equal(budget.snapshot().gpu.liveBytes,0);
 }finally{device.destroy();budget.restore();}
 console.log('PASS actual complete resident backbone selects full prefix upload and retains exact canonical intake, authenticated budget and cleanup');
-
