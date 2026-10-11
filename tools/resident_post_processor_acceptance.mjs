@@ -101,6 +101,9 @@ export function acceptPostProcessorCompletion(report){
   require(post?.channelsPerDuty===plan.channelsPerDuty&&telemetry?.channelsPerDuty===plan.channelsPerDuty&&
     telemetry.dutyGranularity==='channel-range'&&telemetry.residentWork===true,'effective resident configuration mismatch');
   require(cooperative?.status==='succeeded'&&cooperative.schedulingMode==='cooperative'&&
+    cooperative.routeId==='sf3d.image-to-mesh.webgpu-local.v0'&&
+    cooperative.manifestId==='sf3d.post-processor-channel-cooperative-boundaries.v0'&&
+    boundary?.boundaryId==='post-processor-triplane-channel-ranges'&&
     cooperative.queueCompletionAuthority==='per-gpu-duty-prefix-fence'&&boundary?.completedItems===plan.duties.length&&
     boundary.totalItems===plan.duties.length&&boundary.actualRangeCount===plan.duties.length,'complete native postprocessor prefix execution missing');
   require(telemetry?.stageDuties?.length===plan.duties.length&&plan.duties.every((d,i)=>
