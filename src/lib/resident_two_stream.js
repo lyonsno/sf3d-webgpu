@@ -56,7 +56,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
   backbone._residentAdapterOwner=owner;
   let failure,failed=false;
   try{
-    owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake});
+    owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake,streamFp16Uploads:true});
     const source=owner.source,template=source.template;
     let embedding,tokenizerEmbeddingRetirement,setupTokenizerEmbeddingRetirement;
     const materializeEmbedding=async(prefix='')=>{
