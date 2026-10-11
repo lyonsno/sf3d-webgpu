@@ -34,7 +34,8 @@ const report={source:{hostname:'host'},requested:{throughPostProcessor:true,thro
     weightPhases:Array.from({length:12},(_,i)=>({status:'completed-retired',
       tensorNames:['weight','bias'].map(s=>'post_processor.upsample.'+(2*(i%4))+'.'+s)})),
     cooperative:{status:'succeeded',schedulingMode:'cooperative',queueCompletionAuthority:'per-gpu-duty-prefix-fence',
-      boundaries:[{completedItems:702,totalItems:702,actualRangeCount:702}],
+      routeId:'sf3d.image-to-mesh.webgpu-local.v0',manifestId:'sf3d.post-processor-channel-cooperative-boundaries.v0',
+      boundaries:[{boundaryId:'post-processor-triplane-channel-ranges',completedItems:702,totalItems:702,actualRangeCount:702}],
       adapterTelemetry:{channelsPerDuty:16,dutyGranularity:'channel-range',residentWork:true,stageDuties:plan.duties}}},
   postProcessorReadbackBytes:70778880,postProcessorOutput:{bytes:70778880,finite:17694720,nonzero:17694720},
   phaseObservations:descriptors.map(descriptor=>{
@@ -49,6 +50,10 @@ const report={source:{hostname:'host'},requested:{throughPostProcessor:true,thro
 assert.equal(subject.acceptPostProcessorCompletion(report).ok,true,
   'synthetic local policy fixture only, not native/backend numerical evidence');
 for(const mutate of [
+  r=>delete r.postProcessor.cooperative.routeId,r=>r.postProcessor.cooperative.routeId='other',
+  r=>delete r.postProcessor.cooperative.manifestId,r=>r.postProcessor.cooperative.manifestId='other',
+  r=>delete r.postProcessor.cooperative.boundaries[0].boundaryId,
+  r=>r.postProcessor.cooperative.boundaries[0].boundaryId='other',
   r=>r.requested.postChannelsPerDuty=32,r=>r.requested.throughBackbone=false,
   r=>delete r.postProcessor,r=>r.postProcessor.shape=[3,40,96,96],
   r=>r.postProcessor.cooperative.schedulingMode='disabled',
@@ -108,4 +113,4 @@ try{
   assert.equal(failure.status,'failed');assert.equal(failure.error.lastTrustworthyPhase,'arguments');
   assert.equal(failure.verdict.ok,false);
 }finally{fs.rmSync(leaf,{recursive:true});}
-console.log('PASS complete postprocessor demand, 23 false-closure paths, additive diagnostics and durable early failure');
+console.log('PASS complete postprocessor demand, 29 false-closure paths, additive diagnostics and durable early failure');
