@@ -161,6 +161,29 @@ export function createStorageBuffer(device, data, usage = 0, label = '') {
 }
 
 /**
+ * Initialize mapped GPU-owned storage without a separate complete CPU payload.
+ */
+export function createMappedStorageBuffer(device,size,initialize,{usage=0,label='',ownedBuffers=null}={}){
+  if(!Number.isSafeInteger(size)||size<=0||size%4||typeof initialize!=='function'||
+    (ownedBuffers!==null&&!(ownedBuffers instanceof Set)))
+    throw TypeError('aligned mapped storage size, initializer and optional owned inventory required');
+  const buffer=device.createBuffer({size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|usage,
+    mappedAtCreation:true,label:label||`storage_${size}`});
+  ownedBuffers?.add(buffer);
+  try{
+    initialize(buffer.getMappedRange());buffer.unmap();
+    return recordBufferAllocation(buffer,size,label);
+  }catch(error){
+    try{buffer.destroy();ownedBuffers?.delete(buffer);}
+    catch(cleanup){
+      const failure=new AggregateError([error,cleanup],'mapped storage initialization and cleanup failed',{cause:error});
+      failure.unresolvedGpuBuffer=buffer;throw failure;
+    }
+    throw error;
+  }
+}
+
+/**
  * Create an empty storage buffer.
  */
 export function createEmptyBuffer(device, size, usage = 0, label = '') {

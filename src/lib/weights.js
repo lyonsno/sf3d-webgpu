@@ -13,7 +13,7 @@
  *   Weight data: packed tensors
  */
 
-import { createStorageBuffer } from './gpu.js';
+import { createStorageBuffer,createMappedStorageBuffer } from './gpu.js';
 import { isLoaderMemoryBudget } from './loader_memory_budget.js';
 import { createFlatTensorRangeSource } from './flat_tensor_ranges.js';
 
@@ -99,9 +99,15 @@ function extractTensor(device, buffer, info, context) {
     return createStorageBuffer(device, fp32);
   } else {
     const fp16 = new Uint16Array(raw.buffer, raw.byteOffset, size / 2);
-    const fp32 = allocateCpu(scoped, fp16.length * 4, 'fp16-conversion', () => new Float32Array(fp16.length), scoped?.temporary);
-    for (let i = 0; i < fp16.length; i++) fp32[i] = fp16ToFp32(fp16[i]);
-    return createStorageBuffer(device, fp32);
+    // Keep the existing conversion/mapped-upload allowance and fresh physical
+    // guards, but initialize the actual mapped GPU destination directly.
+    // Do not materialize another full FP32 CPU array merely to copy it here.
+    const lease=scoped?.budget.reserveCpu(fp16.length*4,'fp16-conversion');
+    if(lease)scoped.temporary.add(lease);
+    return createMappedStorageBuffer(device,fp16.length*4,mapped=>{
+      const fp32=new Float32Array(mapped);
+      for(let i=0;i<fp16.length;i++)fp32[i]=fp16ToFp32(fp16[i]);
+    },{ownedBuffers:scoped?.ownedBuffers??null});
   }
   });
 }
@@ -549,7 +555,7 @@ function rangeLoadContext(device,memoryBudget){
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('tensor-ranges requires authenticated loader budget');
   memoryBudget.assertDevice(device);
   const ownedBuffers=new Set(),ownedCpu=new Set();
-  const context={budget:memoryBudget,ownedCpu};
+  const context={budget:memoryBudget,ownedCpu,ownedBuffers};
   const cleanup=error=>{
     const failures=retireOwnedBuffers(ownedBuffers);
     for(const lease of ownedCpu)lease.release();ownedCpu.clear();
