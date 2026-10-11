@@ -15,7 +15,7 @@ export function selectDecoderHeads(template,heads){
 /** Canonical range source/selected full heads; no eager complete weight set. */
 export async function runResidentDecoder({device,decoder,memoryBudget,weightsUrl,
   expectedWeightBytes,expectedSourceETag,positions,triplanesBuf,heads,batchPoints,
-  onBeforePhase,onBeforeDuty,withResult}){
+  onBeforePhase,onBeforeDuty,withResult,onBeforeSourceIntake,onAfterDuty}){
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
   if(decoder?.device!==device||decoder._residentDecoderAdapterOwner||decoder._residentQueryWorkOwner)
@@ -26,11 +26,11 @@ export async function runResidentDecoder({device,decoder,memoryBudget,weightsUrl
   let failed=false,failure;
   try{
     owner.source=await createWeightPhaseSource(device,weightsUrl,
-      {memoryBudget,expectedWeightBytes,expectedSourceETag});
+      {memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake});
     const source=owner.source,selection=selectDecoderHeads(source.template,heads);
     await onBeforePhase({name:'decoder-selected-complete-heads',tensors:source.describe(selection),workGpuBytes:0});
     const result=await source.withWeights(selection,weights=>runResidentDecoderQueries({device,decoder,
-      memoryBudget,positions,triplanesBuf,weights,heads,batchPoints,onBeforePhase,onBeforeDuty,withResult}));
+      memoryBudget,positions,triplanesBuf,weights,heads,batchPoints,onBeforePhase,onBeforeDuty,withResult,onAfterDuty}));
     return {...result,loadingReport:source.loadingReport,weightPhases:source.phases};
   }catch(error){failed=true;failure=error;throw error;}
   finally{try{await disposeResidentDecoder(decoder);}
@@ -84,7 +84,7 @@ export function describeResidentDecoderDemand({numPoints,batchPoints,heads,weigh
 
 /** Borrowed weights/triplanes/device remain owned by the awaited parent. */
 export async function runResidentDecoderQueries({device,decoder,memoryBudget,positions,triplanesBuf,
-  weights,heads,batchPoints,onBeforePhase,onBeforeDuty,withResult}){
+  weights,heads,batchPoints,onBeforePhase,onBeforeDuty,withResult,onAfterDuty}){
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
   if(decoder?.device!==device||decoder._residentQueryWorkOwner||decoder._slotProvider||decoder._uniformCache.size)
@@ -139,6 +139,7 @@ export async function runResidentDecoderQueries({device,decoder,memoryBudget,pos
         }finally{lease.release();}
       }
       ranges.push({start,end,numPoints,heads:[...heads],queueCompletionAuthority:'actual-prefix-before-range-reuse'});
+      await onAfterDuty?.(ranges.at(-1));
       await new Promise(resolve=>setTimeout(resolve,0));
     }
     const value=await withResult(output);

@@ -22,7 +22,7 @@ export function selectDinoPhase(template,{blockStart,blockEnd,isFirst,isLast}){
  * withResult consumes the complete GPU output before this adapter retires it.
  */
 export async function runResidentDino({device,memoryBudget,weightsUrl,expectedWeightBytes,expectedSourceETag,
-  imageChw,onBeforePhase,onProgress,withResult,foregroundOpportunities=null}){
+  imageChw,onBeforePhase,onProgress,withResult,foregroundOpportunities=null,onBeforeSourceIntake}){
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
   if(!(imageChw instanceof Float32Array)||imageChw.length!==3*512*512||imageChw.some(v=>!Number.isFinite(v)))
@@ -31,7 +31,7 @@ export async function runResidentDino({device,memoryBudget,weightsUrl,expectedWe
   let source,tokenizer,imageBuf,cameraInputBuf,cameraEmbedBuf,result,cameraLease,failure,failed=false;
   const phaseDescriptions=[];
   try{
-    source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag});
+    source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake});
     const before=async(name,selection,details={})=>{
       const descriptor={name,tensors:source.describe(selection),...details};
       phaseDescriptions.push(descriptor);await onBeforePhase(descriptor);

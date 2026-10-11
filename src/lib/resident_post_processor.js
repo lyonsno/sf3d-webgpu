@@ -12,7 +12,7 @@ export function selectPostProcessorPhase(template, layerIndex) {
 /** The complete existing upsampler consumes borrowed backbone output; no eager weights. */
 export async function runResidentPostProcessor({device,postProcessor,memoryBudget,weightsUrl,
   expectedWeightBytes,expectedSourceETag,triplanesBuf,onBeforePhase,onBeforeDuty,onAfterDuty,
-  onProgress,withResult,foregroundOpportunities=null,channelsPerDuty=16}) {
+  onProgress,withResult,foregroundOpportunities=null,channelsPerDuty=16,onBeforeSourceIntake}) {
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
   if(postProcessor?.device!==device||postProcessor._residentAdapterOwner||postProcessor._postProcessorWorkOwner)
@@ -25,7 +25,7 @@ export async function runResidentPostProcessor({device,postProcessor,memoryBudge
   let failed=false,failure;
   try {
     owner.source=await createWeightPhaseSource(device,weightsUrl,
-      {memoryBudget,expectedWeightBytes,expectedSourceETag});
+      {memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake});
     const source=owner.source;
     const executed=await runCooperativePostProcessor({
       device,triplanesBuf,weights:{convLayers:[null,null,null,null]},

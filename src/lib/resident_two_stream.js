@@ -21,7 +21,7 @@ export function selectTwoStreamPhase(template,stageId){
 /** Complete same-backbone consumer; diagnostic admission remains caller-owned. */
 export async function runResidentTwoStream({device,backbone,memoryBudget,weightsUrl,expectedWeightBytes,
   expectedSourceETag,imageTokensBuf,N_img,onBeforePhase,onBeforeDuty,onAfterDuty,onProgress,withResult,
-  foregroundOpportunities=null,linearRowsPerDuty=128,attentionRowsPerDuty=128,reuseDeadTriplaneStorage=false}){
+  foregroundOpportunities=null,linearRowsPerDuty=128,attentionRowsPerDuty=128,reuseDeadTriplaneStorage=false,onBeforeSourceIntake}){
   if(typeof reuseDeadTriplaneStorage!=='boolean')throw TypeError('explicit boolean dead-triplane reuse required');
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
@@ -33,7 +33,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
   backbone._residentAdapterOwner=owner;
   let failure,failed=false;
   try{
-    owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag});
+    owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake});
     const source=owner.source,template=source.template;
     await onBeforePhase({name:'two-stream-embedding-weights',tensors:source.describe(template.tokenizer),workGpuBytes:0});
     let embedding;

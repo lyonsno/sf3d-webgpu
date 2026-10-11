@@ -38,7 +38,7 @@ import { withForegroundScope } from './foreground_scope.js';
  * @param {number} radius - model space radius (unused, kept for API compat)
  * @returns {{ uvs, newVertices, newNormals, newFaces, newNumVertices, newNumFaces, faceAssignment }}
  */
-export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) {
+export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87, streamOverlaps = false) {
   // --- PCA alignment: rotate vertex positions so principal axes align with
   // canonical X/Y/Z, matching PyTorch _align_mesh_with_main_axis.
   // ONLY used for UV generation; output newVertices remain unrotated. ---
@@ -187,8 +187,8 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
   const atlasIndex = new Int32Array(numFaces);
   for (let f = 0; f < numFaces; f++) atlasIndex[f] = faceAssignment[f];
 
-  _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, 0);
-  _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, 6);
+  _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, 0, streamOverlaps);
+  _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth, depthKeepMax, 6, streamOverlaps);
 
   // --- Step 2b: Per-island UV normalization for secondary tier (slots 6-11) ---
   // Matching PyTorch _handle_slice_uvs: rescale all faces in each secondary
@@ -413,7 +413,7 @@ export function unwrapUV(vertices, faces, numVertices, numFaces, radius = 0.87) 
  * triangle against the BVH, bump the occluded face (by depth) to slot+6.
  */
 function _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth,
-    depthKeepMax, slotOffset) {
+    depthKeepMax, slotOffset, streamOverlaps = false) {
 
   for (let slot = slotOffset; slot < slotOffset + 6; slot++) {
     const slotFaces = [];
@@ -442,7 +442,8 @@ function _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth,
     // For each triangle, query the BVH for overlapping triangles
     const bumped = new Set();
     // Collect all unique intersection pairs first (matching PyTorch)
-    const pairs = [];
+    const pairs = streamOverlaps ? null : [];
+    const occludedSet = new Set();
 
     for (const tri of tris) {
       if (bumped.has(tri.f)) continue;
@@ -452,15 +453,19 @@ function _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth,
         if (_trianglesOverlap2D(tri, other)) {
           const a = Math.min(tri.f, other.f);
           const b = Math.max(tri.f, other.f);
-          pairs.push([a, b]);
+          if(streamOverlaps) {
+            // Duplicate intersections select the same face; Set insertion is
+            // idempotent. Still bump only after the complete unchanged query.
+            occludedSet.add(keepMax ? (centroidDepth[a]>=centroidDepth[b]?a:b) :
+              (centroidDepth[a]<=centroidDepth[b]?a:b));
+          } else pairs.push([a, b]);
         }
       }
     }
 
     // Deduplicate pairs and determine which face to bump (by depth)
     const seen = new Set();
-    const occludedSet = new Set();
-    for (const [a, b] of pairs) {
+    for (const [a, b] of pairs ?? []) {
       const key = a * numFaces + b;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -481,6 +486,11 @@ function _detectOverlapsBVH(numFaces, atlasIndex, rawU, rawV, centroidDepth,
       bumped.add(f);
     }
   }
+}
+
+/** Same complete UV algorithm; discard duplicate-pair storage, not faces. */
+export function unwrapResidentUV(vertices,faces,numVertices,numFaces) {
+  return unwrapUV(vertices,faces,numVertices,numFaces,0.87,true);
 }
 
 /** Build a simple 2D AABB BVH over triangles. */
@@ -1056,7 +1066,7 @@ export async function bakeTexture(device, triplaneDecoder, triplanesBuf, decoder
 export async function exportGLB(vertices, vertexNormals, faces, uvs,
                                  albedoTexture, normalMapTexture,
                                  numVertices, numFaces, textureResolution = 1024,
-                                 roughness = 0.5, metallic = 0.0) {
+                                 roughness = 0.5, metallic = 0.0, options = {}) {
   if (numVertices === 0 || numFaces === 0) {
     throw new Error('Cannot export empty mesh as GLB');
   }
@@ -1064,6 +1074,7 @@ export async function exportGLB(vertices, vertexNormals, faces, uvs,
   // Apply coordinate transforms to match glTF conventions
   // Combined: rot(-90, X) then rot(+90, Y) gives (x,y,z) → (-y, z, -x)
   // Then invert face winding to match PyTorch's mesh.invert()
+  await options.onBeforeCpuAllocation?.('glb-transforms',24*numVertices+12*numFaces);
   const transformedVerts = new Float32Array(numVertices * 3);
   for (let i = 0; i < numVertices; i++) {
     const x = vertices[i * 3];
@@ -1096,15 +1107,22 @@ export async function exportGLB(vertices, vertexNormals, faces, uvs,
   }
 
   // Encode textures as JPEG
+  await options.onBeforeCpuAllocation?.('glb-albedo-image-data',4*textureResolution*textureResolution);
   const albedoBlob = await _textureToJPEG(albedoTexture, textureResolution);
   if (!albedoBlob) throw new Error('Failed to encode albedo texture as JPEG');
+  await options.onBeforeCpuAllocation?.('glb-albedo-encoded',albedoBlob.size);
   const albedoBytes = new Uint8Array(await albedoBlob.arrayBuffer());
 
   let normalBytes = null;
   if (normalMapTexture) {
+    await options.onBeforeCpuAllocation?.('glb-normal-image-data',4*textureResolution*textureResolution);
     const normalBlob = await _textureToJPEG(normalMapTexture, textureResolution, 0.95);
-    if (normalBlob) normalBytes = new Uint8Array(await normalBlob.arrayBuffer());
+    if (normalBlob) {
+      await options.onBeforeCpuAllocation?.('glb-normal-encoded',normalBlob.size);
+      normalBytes = new Uint8Array(await normalBlob.arrayBuffer());
+    }
   }
+  if(options.requireNormalTexture&&!normalBytes)throw Error('complete learned normal texture encode required');
 
   // Compute bounding box
   let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -1194,10 +1212,17 @@ export async function exportGLB(vertices, vertexNormals, faces, uvs,
   };
 
   const jsonStr = JSON.stringify(gltf);
+  // This exporter authors ASCII-only keys/values and finite numeric metadata.
+  // Refuse drift rather than underdeclare TextEncoder's actual byte count.
+  if(options.onBeforeCpuAllocation){
+    if(/[^\x00-\x7f]/.test(jsonStr))throw Error('GLB authored JSON UTF8 demand changed');
+    await options.onBeforeCpuAllocation('glb-json',jsonStr.length);
+  }
   const jsonBytes = new TextEncoder().encode(jsonStr);
   const jsonPadLen = pad4(jsonBytes.byteLength);
 
   const glbLen = 12 + 8 + jsonPadLen + 8 + totalBinLen;
+  await options.onBeforeCpuAllocation?.('glb-complete-buffer',glbLen);
   const glb = new ArrayBuffer(glbLen); // zero-initialized per JS spec (BIN padding = 0x00)
   const view = new DataView(glb);
   const bytes = new Uint8Array(glb);

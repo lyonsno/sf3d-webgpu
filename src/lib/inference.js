@@ -87,7 +87,7 @@ export async function preprocessImage(imageData, width, height, options = {}) {
   return (await preprocessConditionImage(imageData, options)).chw;
 }
 
-async function preprocessConditionImage(imageData, options = {}) {
+export async function preprocessConditionImage(imageData, options = {}) {
   const size = CONFIG.condImageSize;
   const { srcFloat, srcW, srcH } = extractSourcePixels(imageData);
   const bg = CONFIG.bgColor, imageMean = CONFIG.imageMean, imageStd = CONFIG.imageStd;

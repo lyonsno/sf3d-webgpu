@@ -77,7 +77,7 @@ export function dilateTexture(texture, mask, resolution, iterations = 6) {
  * @param {number}       o.numOccupied
  * @returns {{ albedo: Uint8Array, normalMap: Uint8Array }}
  */
-export function materializeTextures({ featuresCPU, normalsCPU, occupiedIndices, tbnData, mask, resolution, numOccupied }) {
+export function materializeTextures({ featuresCPU, normalsCPU, occupiedIndices, tbnData, mask, resolution, numOccupied, dilationScratch = null }) {
   // Build albedo RGBA texture
   const albedo = new Uint8Array(resolution * resolution * 4);
   for (let i = 0; i < numOccupied; i++) {
@@ -126,8 +126,44 @@ export function materializeTextures({ featuresCPU, normalsCPU, occupiedIndices, 
 
   // Dilate both textures (matching PyTorch: resolution // 150 ≈ 7 at 1024)
   const dilateIters = Math.max(1, Math.round(resolution / 150));
-  dilateTexture(albedo, mask, resolution, dilateIters);
-  dilateTexture(normalMap, mask, resolution, dilateIters);
+  if (dilationScratch) {
+    dilateTextureCounted(albedo, mask, resolution, dilateIters, dilationScratch);
+    dilateTextureCounted(normalMap, mask, resolution, dilateIters, dilationScratch);
+  } else {
+    dilateTexture(albedo, mask, resolution, dilateIters);
+    dilateTexture(normalMap, mask, resolution, dilateIters);
+  }
 
   return { albedo, normalMap };
+}
+
+/** Complete pixel capacity, not a retained-output cap. Caller admits 8*N bytes. */
+export function createDilationScratch(pixels) {
+  if (!Number.isSafeInteger(pixels) || pixels < 1) throw TypeError('complete pixel count required');
+  return {workMask:new Uint8Array(pixels),indices:new Uint32Array(pixels),rgb:new Uint8Array(3*pixels)};
+}
+
+export function dilateTextureCounted(texture,mask,resolution,iterations,scratch) {
+  const pixels=resolution*resolution,{workMask,indices,rgb}=scratch;
+  if(workMask.length!==pixels||indices.length!==pixels||rgb.length!==3*pixels||
+    mask.length!==pixels||texture.length!==4*pixels)throw Error('complete dilation backing shape mismatch');
+  workMask.set(mask);
+  for(let iter=0;iter<iterations;iter++) {
+    let pending=0;
+    for(let y=0;y<resolution;y++)for(let x=0;x<resolution;x++) {
+      const idx=y*resolution+x;if(workMask[idx])continue;
+      let r=0,g=0,b=0,count=0;
+      for(let neighbor=0;neighbor<4;neighbor++) {
+        const nx=x+(neighbor===0?-1:neighbor===1?1:0),ny=y+(neighbor===2?-1:neighbor===3?1:0);
+        if(nx<0||nx>=resolution||ny<0||ny>=resolution)continue;
+        const n=ny*resolution+nx;if(!workMask[n])continue;
+        r+=texture[4*n];g+=texture[4*n+1];b+=texture[4*n+2];count++;
+      }
+      if(count){indices[pending]=idx;rgb[3*pending]=Math.round(r/count);
+        rgb[3*pending+1]=Math.round(g/count);rgb[3*pending+2]=Math.round(b/count);pending++;}
+    }
+    for(let i=0;i<pending;i++){const idx=indices[i];texture[4*idx]=rgb[3*i];
+      texture[4*idx+1]=rgb[3*i+1];texture[4*idx+2]=rgb[3*i+2];texture[4*idx+3]=255;workMask[idx]=1;}
+    if(!pending)break;
+  }
 }
