@@ -7,7 +7,7 @@ import {webcrypto} from 'node:crypto';
 // consumer-order/borrowed-custody test, not model arithmetic or native fit.
 const source = fs.readFileSync(new URL('./smoke_resident_dino.mjs', import.meta.url), 'utf8');
 const startText = 'Object.assign(report,await page.evaluate(async config=>{';
-const start = source.indexOf(startText), end = source.indexOf('\n  },{requested:report.requested', start);
+const start = source.indexOf(startText), end = source.indexOf('\n  },{', start);
 assert(start >= 0 && end > start, 'actual native callback source required');
 const body = source.slice(start + startText.length, end)
   .replace("await import('/dist-lib/sf3d-producer.js')", '$module');
