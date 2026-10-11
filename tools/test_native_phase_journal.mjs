@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {EventEmitter} from 'node:events';
+import {memoryStopAction} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
 import {createParentPhaseJournal} from './parent_phase_journal.mjs';
 
@@ -76,6 +78,12 @@ try{
   const partialReport=JSON.parse(fs.readFileSync(partial.output,'utf8'));
   assert.equal(partialReport.status,'failed');assert.equal(partialReport.phaseJournal.writtenPhaseCount,0);
   assert.equal(partialReport.phaseObservations,undefined,'failed hot checkpoint still does not counterfeit history');
+  const owned=new EventEmitter();Object.assign(owned,{pid:12345,exitCode:null,signalCode:null,
+    kill(signal){assert.equal(signal,'SIGTERM');queueMicrotask(()=>{owned.exitCode=0;owned.emit('exit',0,null);});return true;}});
+  await assert.rejects(memoryStopAction({child:()=>owned,report:partial.value,persist:partial.writer})({reason:'process-footprint-budget'}),/partial write/);
+  assert.equal(owned.exitCode,0,'journal failure must not bypass exact owned browser stop');
+  const stopped=JSON.parse(fs.readFileSync(partial.output,'utf8'));
+  assert.equal(stopped.memorySafety.stop.exitObserved,true);assert.equal(stopped.memorySafety.stop.ownedPid,12345);
   const intact=fs.readFileSync(journalPathFrom(live));
   const reused=implementation.createNativePhaseEvidenceWriter({reportPath,report:{...report,status:'running',terminalAt:undefined}});
   assert.throws(reused,/EEXIST/);assert.deepEqual(fs.readFileSync(journalPathFrom(live)),intact,'occupied journal must never be replaced');
