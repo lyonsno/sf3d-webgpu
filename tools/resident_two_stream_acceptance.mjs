@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import {createHash} from 'node:crypto';
 import {acceptResidentDino} from './resident_dino_acceptance.mjs';
+import {phaseHostHeadroomIsAdmitted} from './memory_admission.mjs';
 const D=1024,N=27648,L=3089,I=1297,tri=N*D*4,latent=L*D*4;
 const scratch=rows=>rows*(2*D+3*4096)*4;
 const attention=(q,kv,rows)=>(2*q+2*kv)*D*4+16*rows*kv*4+rows*D*4;
@@ -123,7 +124,7 @@ export function acceptResidentTwoStream(report){
   require(configured&&report.expectedPhaseOrder?.join(',')===expected&&
     report.phaseObservations?.map(o=>o.phase).join(',')===expected,'actual approved backbone cliff sequence incomplete');
   require(report.phaseObservations?.every(o=>o.verdict==='admitted'&&o.host?.source==='live-macos'&&
-    o.host.hostFreeBytes>=o.demand.requiredBytes&&o.host.hostname===report.source?.hostname&&
+    phaseHostHeadroomIsAdmitted(report,o)&&o.host.hostname===report.source?.hostname&&
     o.host.model==='Mac14,9'&&o.host.processor==='Apple M2 Pro'&&!o.host.observerErrors?.length&&
     o.process?.coverage==='sampled-owned-process-tree'&&o.process.lastObservation?.runId===report.runId&&
     o.process.lastObservation.rootPid===report.rootPid&&o.process.lastObservation.status==='observed'&&

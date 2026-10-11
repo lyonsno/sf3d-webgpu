@@ -38,8 +38,17 @@ export function parseSwapUsage(text) {
   };
 }
 
-export function observeMacMemory({ exec = execute, statfs = fs.statfsSync, volumePath = '/' } = {}) {
+export function observeMacMemory({ exec = execute, statfs = fs.statfsSync, volumePath = '/', availableMemory = process.availableMemory } = {}) {
+  const startedAtUnixMs = Date.now();
   const observerErrors = [];
+  const availability = {source:'process.availableMemory/uv_get_available_memory',nodeVersion:process.version,
+    libuvVersion:process.versions.uv,executable:process.execPath,bytes:null,observedAtUnixMs:null};
+  try {
+    if(typeof availableMemory!=='function')throw Error('process.availableMemory unsupported');
+    availability.bytes=availableMemory();availability.observedAtUnixMs=Date.now();
+    requireSafeNonnegativeInteger(availability.bytes,'availableMemory.bytes');
+    if(availability.bytes===0)throw Error('available-memory observation unavailable (zero)');
+  }catch(error){availability.bytes=null;availability.error=error.message;}
   let pressurePercent = null;
   let swap = null;
   let dataVolumeFreeBytes = null;
@@ -67,8 +76,10 @@ export function observeMacMemory({ exec = execute, statfs = fs.statfsSync, volum
     source: 'live-macos',
     platform: process.platform,
     hostname: os.hostname(),
+    startedAtUnixMs,
     hostTotalBytes: os.totalmem(),
     hostFreeBytes: os.freemem(),
+    availableMemory: availability,
     hostMemoryPressureFreePercent: pressurePercent,
     hostSwapTotalBytes: swap?.totalBytes ?? null,
     hostSwapUsedBytes: swap?.usedBytes ?? null,
@@ -78,6 +89,82 @@ export function observeMacMemory({ exec = execute, statfs = fs.statfsSync, volum
     observedAt: new Date().toISOString(),
     observerErrors,
   };
+}
+
+export const AVAILABLE_MEMORY_DIAGNOSTIC_POLICY='darwin-available-memory-estimate-v1';
+// Historical prefix warning, not a conversion to bytes or calibrated reserve.
+// tools/memory-admission-plans/darwin-16gib-full-route-circuit-breaker-v0.json
+export const HOST_PRESSURE_STOP_FREE_PERCENT=24;
+
+export function evaluatePhaseHostHeadroom({host,requiredBytes,policy='raw-free-pages-v0',requestedAtUnixMs}={}){
+  const reasons=[],check=(condition,message)=>{if(!condition)reasons.push(message);};
+  check(Number.isSafeInteger(requiredBytes)&&requiredBytes>=0,'identified nonnegative new backing required');
+  let availableBytes=host?.hostFreeBytes,pressureStopFreePercent=null;
+  if(policy===AVAILABLE_MEMORY_DIAGNOSTIC_POLICY){
+    const a=host?.availableMemory,terminal=Date.parse(host?.observedAt);
+    availableBytes=a?.bytes;pressureStopFreePercent=HOST_PRESSURE_STOP_FREE_PERCENT;
+    check(host?.source==='live-macos'&&host.platform==='darwin'&&!host.observerErrors?.length,'live complete Darwin observation required');
+    check(Number.isSafeInteger(host?.hostTotalBytes)&&host.hostTotalBytes>0,'observed host total required');
+    check(a?.source==='process.availableMemory/uv_get_available_memory'&&a.nodeVersion==='v25.9.0'&&a.libuvVersion==='1.52.1'&&
+      typeof a.executable==='string'&&a.executable.startsWith('/'),'effective source-verified Node25.9/libuv1.52.1 route required');
+    check(Number.isSafeInteger(a?.bytes)&&a.bytes>0&&a.bytes<=host?.hostTotalBytes,'positive bounded OS availability estimate required');
+    check(Number.isFinite(requestedAtUnixMs)&&Number.isFinite(host?.startedAtUnixMs)&&host.startedAtUnixMs>=requestedAtUnixMs&&
+      Number.isFinite(a?.observedAtUnixMs)&&a.observedAtUnixMs>=host.startedAtUnixMs&&a.observedAtUnixMs<=terminal,'post-request availability observation required');
+    check(Number.isFinite(host?.hostMemoryPressureFreePercent)&&host.hostMemoryPressureFreePercent>pressureStopFreePercent&&
+      host.hostMemoryPressureFreePercent<=100,'host-pressure warning boundary reached or unavailable');
+  }else check(policy==='raw-free-pages-v0','unknown host headroom policy; no fallback');
+  check(Number.isSafeInteger(availableBytes)&&availableBytes>=requiredBytes,'observed selected headroom below identified new backing');
+  return {policy,authority:'reversible identified-phase diagnostic only; not physical capacity or ordinary full-route admission',
+    availableBytes:availableBytes??null,requiredBytes,pressureStopFreePercent,verdict:reasons.length?'refused':'admitted',reasons};
+}
+
+// Replay the effective selection, not the requested label or a self-reported verdict.
+// Old/default reports retain their original raw-free predicate.
+export function phaseHostHeadroomIsAdmitted(report,phase){
+  const policy=report?.requested?.hostHeadroomPolicy??'raw-free-pages-v0';
+  const actual=evaluatePhaseHostHeadroom({host:phase?.host,requiredBytes:phase?.demand?.requiredBytes,policy,
+    requestedAtUnixMs:phase?.phaseRequestedAtUnixMs});
+  if(actual.verdict!=='admitted')return false;
+  const recorded=phase?.hostHeadroom;
+  if(policy==='raw-free-pages-v0')return !recorded||recorded.policy===policy&&recorded.verdict==='admitted'&&recorded.availableBytes===actual.availableBytes;
+  const guard=report?.hostPressureGuard;
+  return policy===AVAILABLE_MEMORY_DIAGNOSTIC_POLICY&&guard?.status==='observed'&&guard.policy===policy&&
+    guard.pressureStopFreePercent===HOST_PRESSURE_STOP_FREE_PERCENT&&recorded?.policy===actual.policy&&recorded.verdict===actual.verdict&&
+    recorded.availableBytes===actual.availableBytes&&recorded.requiredBytes===actual.requiredBytes&&recorded.pressureStopFreePercent===actual.pressureStopFreePercent;
+}
+
+export async function startHostPressureGuard({rawPath,observe=observeMacMemory,onUnsafe,periodMs=1000}={}){
+  if(!rawPath||typeof onUnsafe!=='function'||!Number.isFinite(periodMs)||periodMs<=0)throw Error('owned host-pressure output and stop action required');
+  const summary={policy:AVAILABLE_MEMORY_DIAGNOSTIC_POLICY,pressureStopFreePercent:HOST_PRESSURE_STOP_FREE_PERCENT,rawPath,
+    periodMs,status:'running',sampleCount:0,meaning:'sampled OS availability and historical pressure warning; not guaranteed physical capacity'};
+  let pending,timer,stopped=false,failed;
+  const unsafe=async reason=>{
+    if(summary.safety)return;
+    clearInterval(timer);summary.status='refused';summary.safety={...reason,atUnixMs:Date.now()};
+    // Logging is never a predecessor of stopping this run's exact browser.
+    try{await onUnsafe(summary.safety);summary.safety.actionStatus='returned';}
+    catch(error){summary.safety.actionStatus='failed';summary.safety.actionError=error.message;throw error;}
+  };
+  const sample=async()=>{
+    if(stopped||failed)return pending;
+    if(pending)return pending;
+    pending=(async()=>{
+      const requestedAtUnixMs=Date.now(),host=observe();
+      const decision=evaluatePhaseHostHeadroom({host,requiredBytes:0,policy:summary.policy,requestedAtUnixMs});
+      summary.sampleCount++;summary.lastObservation={requestedAtUnixMs,host,decision};
+      if(decision.verdict!=='admitted')await unsafe({reason:'host-pressure-warning',observation:summary.lastObservation});
+      await fs.promises.appendFile(rawPath,JSON.stringify(summary.lastObservation)+'\n');
+    })().catch(async error=>{
+      failed=error;summary.error=error.message;
+      try{await unsafe({reason:'host-observation-unavailable',error:error.message});}catch(stopError){summary.stopActionError=stopError.message;}
+    }).finally(()=>pending=null);
+    await pending;
+  };
+  await sample();
+  if(failed||summary.safety){const error=failed??Error('host pressure guard refused before launch');error.hostPressureSummary=summary;throw error;}
+  timer=setInterval(()=>{void sample();},periodMs);
+  return {sample,async stop(){clearInterval(timer);if(pending)await pending;stopped=true;
+    if(!summary.safety&&!failed)summary.status='observed';return structuredClone(summary);}};
 }
 
 export function readMemoryObservation(observationPath) {

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import {createHash} from 'node:crypto';
+import {phaseHostHeadroomIsAdmitted} from './memory_admission.mjs';
 // Component accounting for the source-fixed encoder, not opaque driver backing.
 export function dinoPhaseDemand(phase){
   if(!['preprocess','camera','dino-output'].includes(phase.name)&&!/^dino-block-(?:[0-9]|1[0-9]|2[0-3])$/.test(phase.name))throw Error('unknown encoder phase');
@@ -67,7 +68,7 @@ export function acceptResidentDino(report){
   const observations=report.phaseObservations;
   require(Array.isArray(observations)&&observations.length===27&&observations.every(o=>o.verdict==='admitted'&&o.host?.source==='live-macos'&&
     o.host.hostname===report.source?.hostname&&o.host.model==='Mac14,9'&&o.host.processor==='Apple M2 Pro'&&!o.host.observerErrors?.length&&
-    o.host.hostFreeBytes>=o.demand?.requiredBytes&&o.process?.coverage==='sampled-owned-process-tree'&&o.process?.lastObservation?.runId===report.runId&&
+    phaseHostHeadroomIsAdmitted(report,o)&&o.process?.coverage==='sampled-owned-process-tree'&&o.process?.lastObservation?.runId===report.runId&&
     o.process.lastObservation.rootPid===report.rootPid&&o.process.lastObservation.status==='observed'&&
     o.process.lastObservation.sampledAggregatePhysicalFootprintBytes+o.demand.requiredBytes<=report.requested?.processBudgetBytes),
     'fresh effective-host phase observations incomplete');

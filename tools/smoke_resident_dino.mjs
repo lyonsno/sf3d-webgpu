@@ -12,7 +12,7 @@ import puppeteer from 'puppeteer-core';
 import {prepareCanonicalTensorSource,closeCanonicalSource} from './canonical_tensor_source.mjs';
 import {PATCH_TENSOR_NAMES} from './patch_phase_reference.mjs';
 import {parseFlatWeightHeader} from '../src/lib/flat_tensor_ranges.js';
-import {observeMacMemory} from './memory_admission.mjs';
+import {observeMacMemory,evaluatePhaseHostHeadroom,startHostPressureGuard,AVAILABLE_MEMORY_DIAGNOSTIC_POLICY} from './memory_admission.mjs';
 import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction,stopOwnedBrowser,ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
@@ -31,16 +31,26 @@ const report={schema:throughBackbone?'sf3d.native-resident-backbone.v0':'sf3d.na
   requested:{report:requestedReportPath,repoRoot:root,revision:arg('--expected-revision'),weightsPath:arg('--weights'),weightsSha256:arg('--expected-weights-sha256'),
     input:arg('--input'),inputSha256:arg('--expected-input-sha256'),chrome:arg('--chrome'),processBudgetBytes:Number(arg('--process-budget-bytes')),
     throughBackbone,attentionRowsPerDuty:Number(arg('--attention-rows-per-duty')??128),
+    hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
     cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
   allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V, caller-declared complete-query score scratch and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
   evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',twoStreamOutput:reportPath+'.triplane.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 const persist=()=>writeJsonReportAtomic(reportPath,report);
-let source,monitor,child,browser,server,profile;
+let source,monitor,hostMonitor,child,browser,server,profile,safetyStop;
+const stopForSafety=safety=>{
+  if(!safetyStop)safetyStop=memoryStopAction({child:()=>child,report,persist})(safety);
+  return safetyStop;
+};
 try{
   await persist();
   if(occupied)throw Error('requested evidence paths already exist; retained previous evidence without reuse or overwrite');
+  if(!['raw-free-pages-v0',AVAILABLE_MEMORY_DIAGNOSTIC_POLICY].includes(report.requested.hostHeadroomPolicy))throw Error('unknown explicit host headroom policy; no fallback');
+  if(report.requested.hostHeadroomPolicy===AVAILABLE_MEMORY_DIAGNOSTIC_POLICY){
+    if(!throughBackbone||report.requested.processBudgetBytes!==2147483648)throw Error('available-memory diagnostic requires complete backbone and unchanged2GiB process stop');
+    report.allowanceBasis+='; explicitly selected OS availability estimate, independent historical24% pressure stop, no ordinary full-route admission';
+  }
   if(!root||!report.requested.revision||!report.requested.chrome||!report.requested.input||
     !Number.isSafeInteger(report.requested.processBudgetBytes)||report.requested.processBudgetBytes<1)throw Error('explicit source, browser, input and process diagnostic allowance required');
   if(throughBackbone){
@@ -129,10 +139,11 @@ try{
         const processObservation=await monitor.sample({fresh:true});
         const host={...observeMacMemory(),model:execFileSync('sysctl',['-n','hw.model'],{encoding:'utf8'}).trim(),processor:execFileSync('sysctl',['-n','machdep.cpu.brand_string'],{encoding:'utf8'}).trim()};
         const processRow=processObservation.lastObservation;
-        const observation={phase:phase.name,phaseRequestedAtUnixMs,descriptor:phase,demand,host,process:processObservation,
+        const hostHeadroom=evaluatePhaseHostHeadroom({host,requiredBytes:demand.requiredBytes,policy:report.requested.hostHeadroomPolicy,requestedAtUnixMs:phaseRequestedAtUnixMs});
+        const observation={phase:phase.name,phaseRequestedAtUnixMs,descriptor:phase,demand,host,hostHeadroom,process:processObservation,
           authority:'reversible encoder phase with observed baseline and diagnostic process stop; not production physical fit',
           verdict:host.hostname===report.source.hostname&&host.model==='Mac14,9'&&host.processor==='Apple M2 Pro'&&!host.observerErrors.length&&
-            host.hostFreeBytes>=demand.requiredBytes&&processObservation.coverage==='sampled-owned-process-tree'&&processRow?.status==='observed'&&
+            hostHeadroom.verdict==='admitted'&&processObservation.coverage==='sampled-owned-process-tree'&&processRow?.status==='observed'&&
             processRow.runId===report.runId&&processRow.rootPid===process.pid&&
             processObservation.freshness?.route==='new-probe-after-request'&&
             processObservation.freshness.requestedAtUnixMs>=phaseRequestedAtUnixMs&&
@@ -172,7 +183,12 @@ try{
   report.url='http://127.0.0.1:'+server.address().port+'/';
   report.phase='process-guard';await persist();
   monitor=await startProcessMemory({python:'/usr/bin/python3',script:path.join(root,'tools/process_memory.py'),runId:report.runId,
-    rawPath:report.evidencePaths.process,maxFootprintBytes:report.requested.processBudgetBytes,onUnsafe:memoryStopAction({child:()=>child,report,persist})});
+    rawPath:report.evidencePaths.process,maxFootprintBytes:report.requested.processBudgetBytes,onUnsafe:stopForSafety});
+  if(report.requested.hostHeadroomPolicy===AVAILABLE_MEMORY_DIAGNOSTIC_POLICY){
+    report.evidencePaths.hostPressure=reportPath+'.host.jsonl';
+    try{hostMonitor=await startHostPressureGuard({rawPath:report.evidencePaths.hostPressure,onUnsafe:stopForSafety});}
+    catch(error){report.hostPressureGuard=error.hostPressureSummary;throw error;}
+  }
   profile=await fs.promises.mkdtemp(path.join(os.tmpdir(),'sf3d-resident-dino-browser-'));
   const allowed=['HOME','TMPDIR','PATH','LANG','LC_ALL','LC_CTYPE','__CF_USER_TEXT_ENCODING'];
   const env=Object.fromEntries(allowed.filter(n=>process.env[n]!=null).map(n=>[n,process.env[n]]));
@@ -272,6 +288,8 @@ try{
 }catch(error){report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};}
 finally{
   report.cleanup={};
+  try{if(hostMonitor)report.hostPressureGuard=await hostMonitor.stop();if(safetyStop)await safetyStop;}
+  catch(error){report.cleanup.hostObserverError=error.message;report.status='failed';}
   try{if(monitor)report.processObservation=await monitor.stop();}catch(error){report.cleanup.observerError=error.message;report.status='failed';}
   try{report.cleanup.browser=child?await stopOwnedBrowser(child):{status:'not-started',exitObserved:true};}catch(error){report.cleanup.browser={error:error.message};report.status='failed';}
   try{if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';}catch(error){report.cleanup.serverError=error.message;report.status='failed';}

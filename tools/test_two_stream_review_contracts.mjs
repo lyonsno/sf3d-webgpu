@@ -43,6 +43,17 @@ try{
   const absent=structuredClone(valid);absent.phaseObservations=absent.phaseObservations.slice(0,27);absent.expectedPhaseOrder=names.slice(0,27);
   assert.equal(acceptResidentTwoStream(absent).ok,false,'zero backbone observations cannot pass via a self-reported shortened expected graph');
   assert.equal(acceptResidentTwoStream(valid).ok,true,'synthetic acceptance-policy fixture only');
+  const diagnostic=structuredClone(valid);diagnostic.requested.hostHeadroomPolicy='darwin-available-memory-estimate-v1';
+  diagnostic.hostPressureGuard={status:'observed',policy:'darwin-available-memory-estimate-v1',pressureStopFreePercent:24};
+  for(const o of diagnostic.phaseObservations){Object.assign(o.host,{platform:'darwin',hostTotalBytes:1000,hostFreeBytes:0,
+    hostMemoryPressureFreePercent:52,startedAtUnixMs:1000,observedAt:new Date(1002).toISOString(),
+    availableMemory:{bytes:100,source:'process.availableMemory/uv_get_available_memory',nodeVersion:'v25.9.0',libuvVersion:'1.52.1',executable:'/fixture/node',observedAtUnixMs:1001}});
+    o.hostHeadroom={policy:'darwin-available-memory-estimate-v1',verdict:'admitted',availableBytes:100,requiredBytes:10,pressureStopFreePercent:24};}
+  assert.equal(acceptResidentTwoStream(diagnostic).ok,true,'explicit estimate policy is accepted only with complete effective observations and pressure guard');
+  for(const mutate of [r=>delete r.hostPressureGuard,r=>r.hostPressureGuard.status='refused',r=>r.phaseObservations[28].host.availableMemory.bytes=0,
+    r=>delete r.phaseObservations[0].hostHeadroom,r=>r.phaseObservations[28].hostHeadroom.policy='raw-free-pages-v0',
+    r=>r.phaseObservations[28].host.hostMemoryPressureFreePercent=24,r=>r.requested.hostHeadroomPolicy='unknown']){
+    const drift=structuredClone(diagnostic);mutate(drift);assert.equal(acceptResidentTwoStream(drift).ok,false);}
   const smaller=structuredClone(valid),rows=32;
   const smallerNames=['preprocess','camera',...Array.from({length:24},(_,i)=>'dino-block-'+i),'dino-output',
     'two-stream-embedding-weights','two-stream-embedding-rearrange'];
