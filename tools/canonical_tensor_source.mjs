@@ -42,7 +42,15 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
       units.push({name,...info,sha256:digest(bytes),expandedBytes,...(referenceMode==='inline-words'?{rawHex:bytes.toString('hex'),expectedF32Words:expandedWords(bytes,info.dtype)}:{})});
     }
     const hash=createHash('sha256');
-    for await(const chunk of fs.createReadStream(weightsPath,{fd,autoClose:false,start:0}))hash.update(chunk);
+    // Hash every byte through one reusable IO backing before any GPU launch.
+    // update() consumes synchronously; no source-sized succession of retained
+    // chunk allocations is needed. Short reads are valid, partial EOF is not.
+    const hashBuffer=Buffer.alloc(65536);
+    for(let offset=0;offset<before.size;){
+      const count=fs.readSync(fd,hashBuffer,0,Math.min(hashBuffer.length,before.size-offset),offset);
+      if(count===0)throw Error('canonical full source truncated during hash');
+      hash.update(hashBuffer.subarray(0,count));offset+=count;
+    }
     const sha256=hash.digest('hex');check();
     if(sha256!==expectedSha256)throw Error('canonical artifact SHA256 mismatch');
     const etag='"sha256-'+sha256+'"';
