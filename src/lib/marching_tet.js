@@ -8,6 +8,7 @@
  */
 
 import { callWorker } from './worker_call.js';
+import {isLoaderMemoryBudget} from './loader_memory_budget.js';
 
 // Lookup tables (matching the buffers in system.py)
 const TRIANGLE_TABLE = [
@@ -262,6 +263,124 @@ export function marchingTetrahedra(gridVertices, sdf, tetIndices, vertexOffsets 
     numVertices: vertexCount,
     numFaces: faces.length / 3,
   };
+}
+
+/**
+ * Opt-in complete marching with counted typed backing. The edge hash contains
+ * crossing edges only, in the same first-encounter order as the ordinary
+ * routine's filtered all-edge list. Math/tables/winding are unchanged.
+ * Escaping mesh storage stays charged to the caller's handle until disposal.
+ * Lease release is not a statement of physical reclamation.
+ */
+export async function runResidentMarchingTetrahedra({handle,memoryBudget,gridVertices,sdf,tetIndices,
+  vertexOffsets=null,resolution=160,onBeforePhase}) {
+  if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated marching budget required');
+  if(!handle||handle._residentMarchingOwner)throw Error('unoccupied owned marching handle required');
+  if(typeof onBeforePhase!=='function')throw TypeError('fresh before-allocation marching guard required');
+  if(!(gridVertices instanceof Float32Array)||gridVertices.length%3||!(sdf instanceof Float32Array)||
+    sdf.length!==gridVertices.length/3||!(tetIndices instanceof Int32Array)||tetIndices.length%4||
+    (vertexOffsets!==null&&(!(vertexOffsets instanceof Float32Array)||vertexOffsets.length!==gridVertices.length))||
+    !Number.isFinite(resolution)||resolution<=0)throw TypeError('complete finite marching shape required');
+  const nv=sdf.length,nt=tetIndices.length/4;
+  for(const array of [gridVertices,sdf,vertexOffsets])if(array)
+    for(const value of array)if(!Number.isFinite(value))throw Error('nonfinite marching input');
+  const caseAt=t=>{
+    let bits=0;
+    for(let j=0;j<4;j++){
+      const v=tetIndices[t*4+j];
+      if(v<0||v>=nv)throw Error('marching tet index outside complete grid');
+      if(sdf[v]>0)bits|=1<<j;
+    }
+    return bits;
+  };
+  let validCount=0,numTriangles=0,edgeCapacity=0;
+  // Count before any large allocation; all input indices are validated here.
+  for(let t=0;t<nt;t++){
+    const bits=caseAt(t),triangles=NUM_TRIANGLES_TABLE[bits];
+    if(triangles){
+      validCount++;numTriangles+=triangles;
+      for(let e=0;e<6;e++)if(((bits>>BASE_TET_EDGES[e*2])&1)!==
+        ((bits>>BASE_TET_EDGES[e*2+1])&1))edgeCapacity++;
+    }
+  }
+  let hashSlots=1;
+  while(hashSlots<2*edgeCapacity)hashSlots*=2;
+  const scratchBytes=(vertexOffsets?gridVertices.byteLength:0)+nv+validCount*28+
+    edgeCapacity*8+hashSlots*4;
+  if(!Number.isSafeInteger(scratchBytes))throw Error('marching backing demand exceeds exact integer capacity');
+  const owner={scratch:null,scratchLease:null,outputLease:null,value:null};
+  handle._residentMarchingOwner=owner;
+  try{
+    await onBeforePhase({name:'marching-counted-scratch',rangeCpuBytes:scratchBytes,workGpuBytes:0,
+      requiredBytes:scratchBytes,validTets:validCount,edgeCapacity,hashSlots,numTriangles,gridPoints:nv});
+    owner.scratchLease=memoryBudget.reserveCpu(scratchBytes,'marching-counted-scratch');
+    const s=owner.scratch={};
+    s.positions=vertexOffsets?new Float32Array(gridVertices.length):gridVertices;
+    s.occ=new Uint8Array(nv);s.valid=new Uint32Array(validCount);
+    s.tetEdges=new Int32Array(validCount*6).fill(-1);
+    s.edge0=new Uint32Array(edgeCapacity);s.edge1=new Uint32Array(edgeCapacity);
+    s.hash=new Uint32Array(hashSlots);
+    if(vertexOffsets){const scale=1.74/resolution;
+      for(let i=0;i<gridVertices.length;i++)s.positions[i]=gridVertices[i]+scale*Math.tanh(vertexOffsets[i]);}
+    for(let i=0;i<nv;i++)s.occ[i]=sdf[i]>0?1:0;
+    let vi=0,vertexCount=0,faceCount=0;
+    for(let t=0;t<nt;t++){
+      const bits=caseAt(t);
+      if(!NUM_TRIANGLES_TABLE[bits])continue;
+      if(vi>=validCount)throw Error('marching input changed during guarded allocation');
+      s.valid[vi]=t;faceCount+=NUM_TRIANGLES_TABLE[bits];
+      for(let e=0;e<6;e++){
+        let v0=tetIndices[t*4+BASE_TET_EDGES[e*2]],v1=tetIndices[t*4+BASE_TET_EDGES[e*2+1]];
+        if(s.occ[v0]===s.occ[v1])continue;
+        if(v0>v1){const v=v0;v0=v1;v1=v;}
+        let slot=((Math.imul(v0,0x9e3779b1)^Math.imul(v1,0x85ebca6b))>>>0)%hashSlots;
+        let id;
+        for(;;){
+          const entry=s.hash[slot];
+          if(!entry){
+            if(vertexCount>=edgeCapacity)throw Error('marching crossing demand changed');
+            id=vertexCount++;s.edge0[id]=v0;s.edge1[id]=v1;s.hash[slot]=id+1;break;
+          }
+          id=entry-1;
+          if(s.edge0[id]===v0&&s.edge1[id]===v1)break;
+          slot=(slot+1)%hashSlots;
+        }
+        s.tetEdges[vi*6+e]=id;
+      }
+      vi++;
+    }
+    if(vi!==validCount||faceCount!==numTriangles)throw Error('marching counted topology changed');
+    const outputBytes=vertexCount*12+numTriangles*12;
+    await onBeforePhase({name:'marching-complete-mesh',rangeCpuBytes:outputBytes,workGpuBytes:0,
+      requiredBytes:outputBytes,numVertices:vertexCount,numFaces:numTriangles,gridPoints:nv});
+    owner.outputLease=memoryBudget.reserveCpu(outputBytes,'marching-complete-mesh');
+    const output=owner.value={vertices:new Float32Array(vertexCount*3),faces:new Uint32Array(numTriangles*3),
+      numVertices:vertexCount,numFaces:numTriangles};
+    for(let id=0;id<vertexCount;id++){
+      const v0=s.edge0[id],v1=s.edge1[id],s0=sdf[v0],s1=sdf[v1],denom=s0-s1;
+      const t=denom!==0?s0/denom:0.5;
+      for(let d=0;d<3;d++)output.vertices[id*3+d]=s.positions[v0*3+d]*(1-t)+s.positions[v1*3+d]*t;
+    }
+    let f=0;
+    for(let v=0;v<validCount;v++){
+      const bits=caseAt(s.valid[v]),row=TRIANGLE_TABLE[bits];
+      for(let j=0;j<NUM_TRIANGLES_TABLE[bits]*3;j++){
+        const id=s.tetEdges[v*6+row[j]];
+        if(id<0||id>=vertexCount)throw Error('marching lookup has no crossing vertex');
+        output.faces[f++]=id;
+      }
+    }
+    if(f!==output.faces.length)throw Error('marching complete face count drift');
+    owner.scratch=null;owner.scratchLease.release();owner.scratchLease=null;
+    return output;
+  }catch(error){disposeResidentMarchingTetrahedra(handle);throw error;}
+}
+
+export function disposeResidentMarchingTetrahedra(handle){
+  const owner=handle?._residentMarchingOwner;if(!owner)return;
+  owner.scratch=null;owner.scratchLease?.release();owner.scratchLease=null;
+  if(owner.value){owner.value.vertices=new Float32Array(0);owner.value.faces=new Uint32Array(0);owner.value=null;}
+  owner.outputLease?.release();owner.outputLease=null;handle._residentMarchingOwner=null;
 }
 
 /**

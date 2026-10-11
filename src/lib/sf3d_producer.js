@@ -45,6 +45,7 @@ export {runResidentDecoder,runResidentDecoderQueries,disposeResidentDecoder,
   disposeResidentDecoderQueries,selectDecoderHeads,describeResidentDecoderDemand} from './resident_decoder.js';
 export {TriplaneDecoder} from './triplane_decoder.js';
 export {runResidentMaterials,disposeResidentMaterials,selectResidentClipPhase} from './resident_clip.js';
+export {runResidentMarchingTetrahedra,disposeResidentMarchingTetrahedra} from './marching_tet.js';
 export {TwoStreamBackbone} from './two_stream.js';
 export { preprocessImage } from './inference.js';
 import { initPipelines } from './inference.js';
