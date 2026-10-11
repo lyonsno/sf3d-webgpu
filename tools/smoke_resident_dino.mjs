@@ -52,7 +52,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 const persist=report.requested.appendPhaseJournal?createNativePhaseEvidenceWriter({reportPath,report}):()=>writeJsonReportAtomic(reportPath,report);
-let source,monitor,hostMonitor,child,browser,server,profile,safetyStop,foregroundService,foregroundChild,foregroundModule;
+let source,monitor,hostMonitor,child,browser,server,profile,safetyStop,foregroundService,foregroundChild,foregroundModule,displayChild;
 const stopForSafety=safety=>{
   if(!safetyStop)safetyStop=memoryStopAction({child:()=>child,report,persist})(safety);
   return safetyStop;
@@ -334,6 +334,12 @@ try{
       outputDir:reportPath+'.foreground/service',onSpawn:owned=>{foregroundChild=owned;}});
     report.foreground.service=foregroundService.receipt;
     foregroundService.onServed=record=>{report.foreground.servedSources[new URL(record.url,'http://localhost').pathname.slice(1)]=record.sha256;};
+    // Temporary process-owned power assertion, not changed global settings.
+    // It keeps this rendered assay visible and is included in owned-tree RAM.
+    const displayArgv=['-d','-i','-u','-w',String(process.pid)];
+    displayChild=spawn('/usr/bin/caffeinate',displayArgv,{stdio:['ignore','ignore','ignore']});
+    await new Promise((resolve,reject)=>{displayChild.once('spawn',resolve);displayChild.once('error',reject);});
+    report.foreground.displayAssertion={route:'owned-caffeinate-process-lifetime',executable:'/usr/bin/caffeinate',argv:displayArgv,ownedPid:displayChild.pid};
   }
   profile=await fs.promises.mkdtemp(path.join(os.tmpdir(),'sf3d-resident-dino-browser-'));
   const allowed=['HOME','TMPDIR','PATH','LANG','LC_ALL','LC_CTYPE','__CF_USER_TEXT_ENCODING'];
@@ -569,6 +575,8 @@ try{
   if(throughFullModel)Object.assign(report.glbOutput,inspectCompleteGlb(report.evidencePaths.glb));
   if(foregroundRoot){
     report.phase='actual-foreground-post-model-capture';await persist();
+    report.foreground.displayAssertion.aliveAtCapture=displayChild.exitCode===null&&displayChild.signalCode===null;
+    if(!report.foreground.displayAssertion.aliveAtCapture)throw Error('owned render display assertion exited before native capture');
     report.foreground.after=await page.evaluate(()=>window.__miniResidentForeground.snapshot());
     await page.screenshot({path:report.evidencePaths.foregroundAfter,fromSurface:false});
     const pixels=fs.readFileSync(report.evidencePaths.foregroundAfter);report.foreground.captures.after={path:report.evidencePaths.foregroundAfter,bytes:pixels.length,sha256:digest(pixels),inspection:'not-yet-inspected'};
@@ -587,6 +595,7 @@ finally{
       authority:'actual host process lifetime closed; no claim that live API ledgers were zero or that physical memory has been reclaimed'};
   }
   try{if(foregroundService)report.cleanup.foregroundService=await foregroundService.close();}catch(error){report.cleanup.foregroundServiceError=error.message;report.status='failed';}
+  try{if(displayChild)report.cleanup.displayAssertion=await stopOwnedBrowser(displayChild);}catch(error){report.cleanup.displayAssertionError=error.message;report.status='failed';}
   try{if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';}catch(error){report.cleanup.serverError=error.message;report.status='failed';}
   closeCanonicalSource(report,source);
   try{if(profile&&report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});}catch(error){report.cleanup.profileError=error.message;report.status='failed';}

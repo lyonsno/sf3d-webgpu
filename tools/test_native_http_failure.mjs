@@ -56,7 +56,7 @@ try{
       kill(signal){assert.equal(signal,'SIGTERM');queueMicrotask(()=>{child.exitCode=0;child.emit('exit',0,null);});return true;}});
     const cleanup=vm.runInNewContext('(async()=>{try{await pageEvaluate();'+source.slice(catchStart,cleanupEnd)+'}})',{
       report,pageEvaluate:()=>observe({name:'real-phase'}),
-      foregroundRoot:null,foregroundService:null,
+      foregroundRoot:null,foregroundService:null,displayChild:null,
       hostMonitor:{async stop(){hostStopped=true;return {status:'stopped'};}},safetyStop:null,
       monitor:{async stop(){processStopped=true;return {status:'observed'};}},
       child,stopOwnedBrowser,server:{close(done){serverClosed=true;done();}},

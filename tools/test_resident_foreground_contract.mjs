@@ -45,8 +45,9 @@ const report={requested,runId:'fixture-run',rootPid:1,ownedBrowserPid:123,source
     service:{route:'owned-actual-kaminos-handler.v0',ownedPid:124,effective:{source:{repoRoot:requested.foreground.repoRoot,commit:requested.foreground.revision,dirty:false}}},admission,
     compositionModule:{sha256:'3'.repeat(64),servedSha256:'3'.repeat(64),sourceRevision:'2'.repeat(40)},
     before:snapshot,after:snapshot,warmup:{completedFrameCount:200},pageErrors:[],
-    captures:{before:{bytes:10,sha256:'before'},after:{bytes:10,sha256:'after'}},deviceRetirement:{route:'exact-owned-browser-exit',ownedPid:123}},
-  cleanup:{browser:{exitObserved:true,ownedPid:123},foregroundService:{exitObserved:true,ownedPid:124}}};
+    captures:{before:{bytes:10,sha256:'before'},after:{bytes:10,sha256:'after'}},deviceRetirement:{route:'exact-owned-browser-exit',ownedPid:123},
+    displayAssertion:{route:'owned-caffeinate-process-lifetime',ownedPid:125,aliveAtCapture:true}},
+  cleanup:{browser:{exitObserved:true,ownedPid:123},foregroundService:{exitObserved:true,ownedPid:124},displayAssertion:{exitObserved:true,ownedPid:125}}};
 assert.deepEqual(acceptResidentForeground(report).errors,[]);
 for(const change of [r=>r.foreground.source.revision='other',r=>r.foreground.service.route='copy',r=>r.foreground.admission.verdict='refused',
   r=>r.foreground.admission.process.lastObservation.runId='stale',r=>r.foreground.admission.process.freshness.requestedAtUnixMs=999,
@@ -57,7 +58,8 @@ for(const change of [r=>r.foreground.source.revision='other',r=>r.foreground.ser
   r=>r.foreground.warmup.completedFrameCount=199,r=>r.foregroundRun.runId='stale',r=>r.foregroundRun.status='failed',r=>r.foregroundRun.frames=[],
   r=>r.foregroundRun.frames[1].result.simStepCount=1,r=>r.foregroundRun.frames[0].submissions=[],r=>r.foregroundRun.frames[0].result.renderer='alternate-volume',
   r=>r.foreground.captures.after.bytes=0,r=>r.foreground.captures.after.sha256='before',r=>r.foreground.deviceRetirement.ownedPid=456,
-  r=>r.cleanup.browser.exitObserved=false,r=>r.cleanup.foregroundService.exitObserved=false,r=>r.foreground.pageErrors.push({message:'error'})]){
+  r=>r.cleanup.browser.exitObserved=false,r=>r.cleanup.foregroundService.exitObserved=false,r=>r.foreground.pageErrors.push({message:'error'}),
+  r=>r.cleanup.displayAssertion.exitObserved=false,r=>r.foreground.displayAssertion.aliveAtCapture=false]){
   const bad=structuredClone(report);change(bad);assert.equal(acceptResidentForeground(bad).ok,false,'false closure path must refuse');
 }
 // Exercise the actual native fresh admission conjunction, not a second policy.

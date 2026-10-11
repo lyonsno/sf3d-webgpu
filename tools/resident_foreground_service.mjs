@@ -71,5 +71,8 @@ export function acceptResidentForeground(report){
     'live shared host retirement lacks exact owned-browser exit');
   require(report.cleanup?.foregroundService?.exitObserved===true&&report.cleanup.foregroundService.ownedPid===f?.service?.ownedPid,'exact owned foreground handler cleanup missing');
   require(!f?.pageErrors?.length,'foreground page exception present');
+  require(f?.displayAssertion?.route==='owned-caffeinate-process-lifetime'&&f.displayAssertion.aliveAtCapture===true&&
+    report.cleanup?.displayAssertion?.exitObserved===true&&report.cleanup.displayAssertion.ownedPid===f.displayAssertion.ownedPid,
+    'owned rendered-assay display assertion missing, exited early or not retired');
   return {ok:!errors.length,errors,authority:'complete native model alongside actual same-device ordinary volume and Three submissions; pixels require separate inspection'};
 }
