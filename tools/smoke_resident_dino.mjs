@@ -356,7 +356,12 @@ try{
   });
   child.stderr.on('data',chunk=>fs.appendFileSync(report.evidencePaths.browserLog,chunk));
   browser=await puppeteer.connect({browserWSEndpoint:endpoint,protocolTimeout:0});report.browserVersion=await browser.version();
-  const page=await browser.newPage();await page.setViewport({width:1280,height:960});
+  const existingPages=await browser.pages();
+  if(existingPages.length!==1||existingPages[0].url()!=='about:blank'||existingPages[0].browser()!==browser)
+    throw Error('exact owned single initial blank page required');
+  const page=existingPages[0];
+  report.browserPage={route:'exact-owned-initial-blank-page',initialPageCount:existingPages.length,urlBefore:page.url()};
+  await page.setViewport({width:1280,height:960});
   if(foregroundRoot){
     report.foreground.pageErrors=[];report.foreground.captures={};
     page.on('console',message=>fs.appendFileSync(report.evidencePaths.foregroundConsole,JSON.stringify({at:new Date().toISOString(),type:message.type(),text:message.text()})+'\n'));
