@@ -8,7 +8,8 @@ const attention=(q,kv,rows)=>(2*q+2*kv)*D*4+16*rows*kv*4+rows*D*4;
 /** Approved complete1297-token/128-row graph; independently checked against
  * the source planner by test_two_stream_review_contracts. Reporter input is
  * never the authority for a shorter sequence. */
-export function residentTwoStreamExpectedPhases(attentionRowsPerDuty=128){
+export function residentTwoStreamExpectedPhases(attentionRowsPerDuty=128,rematerializeTokenizerEmbedding=false){
+  if(typeof rematerializeTokenizerEmbedding!=='boolean')throw Error('exact boolean tokenizer rematerialization required');
   if(!Number.isSafeInteger(attentionRowsPerDuty)||attentionRowsPerDuty<=0)throw Error('exact positive attention row configuration required');
   const latentTiles=Math.ceil(L/attentionRowsPerDuty),triTiles=Math.ceil(N/attentionRowsPerDuty);
   const blockDuties=446+7*latentTiles+triTiles;
@@ -27,6 +28,7 @@ export function residentTwoStreamExpectedPhases(attentionRowsPerDuty=128){
     const out=start+11+7*latentTiles;
     add('block-'+b+'-fuse-out',[out,out+1+triTiles,out+217+triTiles,out+218+triTiles,out+434+triTiles]);
   }
+  if(rematerializeTokenizerEmbedding)names.push('two-stream-embedding-rematerialize-weights','two-stream-embedding-rematerialize-rearrange');
   add('final',[1+4*blockDuties]);names.push('two-stream-output');return names;
 }
 /** Source-fixed actual new backing, not driver backing or physical fit. */
@@ -36,8 +38,12 @@ export function twoStreamPhaseDemand(phase){
     if(!Number.isSafeInteger(t.size)||t.size<=0||![0,1].includes(t.dtype))throw Error('invalid tensor component');
     weights+=t.size*(t.dtype===1?2:1);cpu=Math.max(cpu,2*t.size+(t.dtype===1?2*t.size:0));
   }
-  if(phase.name==='two-stream-embedding-weights')work=0;
-  else if(phase.name==='two-stream-embedding-rearrange'){
+  if(phase.name==='two-stream-embedding-rematerialize-weights'){
+    const t=phase.tensors?.[0];
+    if(phase.tensors?.length!==1||t.name!=='tokenizer.embeddings'||t.dtype!==1||t.size!==56623104||
+      t.shape?.join(',')!=='3,1024,96,96')throw Error('complete canonical tokenizer rematerialization weights required');
+  }else if(phase.name==='two-stream-embedding-weights')work=0;
+  else if(['two-stream-embedding-rearrange','two-stream-embedding-rematerialize-rearrange'].includes(phase.name)){
     if(phase.tensors?.length)throw Error('rearrangement cannot reacquire embedding weights');
     work=tri+20;
   }
@@ -109,6 +115,24 @@ export function acceptResidentTwoStream(report){
   const errors=[...base.errors],require=(test,message)=>{if(!test)errors.push(message);};
   const b=report.twoStream,c=b?.cooperative,boundary=c?.boundaries?.[0];
   const rows=report.requested?.attentionRowsPerDuty;
+  const rematerialize=report.requested?.rematerializeTokenizerEmbedding??false;
+  require(typeof rematerialize==='boolean'&&(b?.rematerializeTokenizerEmbedding??false)===rematerialize,
+    'effective tokenizer rematerialization differs from requested configuration');
+  if(rematerialize){
+    for(const [key,group]of [['setupTokenizerEmbeddingRetirement','setup'],['tokenizerEmbeddingRetirement','final']]){
+      const r=b?.[key];require(r?.status==='retired'&&r.afterGroup===group&&r.bufferCount===2&&r.logicalBytes===tri+20,
+        'complete logical tokenizer consumer retirement missing: '+group);
+    }
+    require([0,22].every(index=>b?.weightPhases?.[index]?.tensorNames?.join(',')==='tokenizer.embeddings'),
+      'both actual complete tokenizer weight selections missing');
+    for(const name of ['two-stream-embedding-rematerialize-weights','two-stream-embedding-rematerialize-rearrange']){
+      const o=report.phaseObservations?.find(o=>o.phase===name);
+      try{const demand=twoStreamPhaseDemand(o?.descriptor??{});
+        require(o?.descriptor?.name===name&&['weightGpuBytes','rangeCpuBytes','workGpuBytes','requiredBytes'].every(k=>o.demand?.[k]===demand[k]),
+          'effective complete tokenizer rematerialization demand missing or underdeclared');
+      }catch(error){errors.push(error.message);}
+    }
+  }
   const reuse=report.requested?.reuseDeadTriplaneStorage??false;
   const residualReuse=report.requested?.reuseAttentionResidualStorage??false;
   require(typeof residualReuse==='boolean'&&(!residualReuse||reuse)&&
@@ -147,7 +171,7 @@ export function acceptResidentTwoStream(report){
   const duties=configured?2+4*(446+7*Math.ceil(L/rows)+Math.ceil(N/rows)):null;
   require(b?.residentFFN===true&&b.linearRowsPerDuty===128&&b.blocks===4&&b.basicBlocks===12&&
     b.shape?.join(',')==='3,1024,96,96'&&configured&&b.attentionRowsPerDuty===rows,'complete effective resident backbone configuration missing');
-  require(b?.weightPhases?.length===23&&b.weightPhases.every(p=>p.status==='completed-retired'),'complete embedding and22 weight groups missing');
+  require(b?.weightPhases?.length===(rematerialize?24:23)&&b.weightPhases.every(p=>p.status==='completed-retired'),'complete embedding and22 weight groups missing');
   require(c?.status==='succeeded'&&c.routeId==='sf3d.image-to-mesh.webgpu-local.v0'&&
     c.manifestId==='sf3d.two-stream-attention-cooperative-boundaries.v0'&&c.schedulingMode==='cooperative'&&
     c.queueCompletionAuthority==='per-gpu-duty-prefix-fence'&&boundary?.boundaryId==='two-stream-attention-duties'&&
@@ -157,7 +181,7 @@ export function acceptResidentTwoStream(report){
     c.adapterTelemetry.declaredDutyCount===duties,'complete actual configured cooperative backbone missing');
   require(!!b?.loadingReport?.sourceETag&&b.loadingReport.sourceETag===report.canonicalSource?.etag&&
     b.loadingReport.expectedWeightBytes===report.canonicalSource?.byteLength,'backbone effective immutable source drift');
-  const expected=configured?residentTwoStreamExpectedPhases(rows).join(','):null;
+  const expected=configured&&typeof rematerialize==='boolean'?residentTwoStreamExpectedPhases(rows,rematerialize).join(','):null;
   require(configured&&report.expectedPhaseOrder?.join(',')===expected&&
     report.phaseObservations?.map(o=>o.phase).join(',')===expected,'actual approved backbone cliff sequence incomplete');
   require(report.phaseObservations?.every(o=>o.verdict==='admitted'&&o.host?.source==='live-macos'&&

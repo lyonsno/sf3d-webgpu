@@ -112,6 +112,41 @@ try{
   Object.assign(c.boundaries[0],{completedItems:smallerPlan.length,totalItems:smallerPlan.length,actualRangeCount:smallerPlan.length});
   smaller.expectedPhaseOrder=smallerNames;smaller.phaseObservations=smallerNames.map(observation);
   assert.equal(acceptResidentTwoStream(smaller).ok,true);
+  const rematerialized=structuredClone(smaller),rematerializedNames=[...smallerNames];
+  rematerializedNames.splice(rematerializedNames.indexOf('two-stream-final'),0,
+    'two-stream-embedding-rematerialize-weights','two-stream-embedding-rematerialize-rearrange');
+  assert.deepEqual(residentTwoStreamExpectedPhases(rows,true),rematerializedNames,
+    'explicit rematerialization adds both complete guarded phases without removing model work');
+  rematerialized.requested.rematerializeTokenizerEmbedding=true;
+  rematerialized.twoStream.rematerializeTokenizerEmbedding=true;
+  rematerialized.twoStream.weightPhases.push({status:'completed-retired'});
+  for(const index of [0,22])rematerialized.twoStream.weightPhases[index].tensorNames=['tokenizer.embeddings'];
+  rematerialized.twoStream.setupTokenizerEmbeddingRetirement={status:'retired',afterGroup:'setup',bufferCount:2,logicalBytes:113246228};
+  rematerialized.twoStream.tokenizerEmbeddingRetirement={status:'retired',afterGroup:'final',bufferCount:2,logicalBytes:113246228};
+  rematerialized.expectedPhaseOrder=rematerializedNames;rematerialized.phaseObservations=rematerializedNames.map(observation);
+  for(const name of ['two-stream-embedding-rematerialize-weights','two-stream-embedding-rematerialize-rearrange']){
+    const o=rematerialized.phaseObservations.find(o=>o.phase===name);
+    o.descriptor={name,tensors:name.endsWith('weights')?[{name:'tokenizer.embeddings',dtype:1,size:56623104,shape:[3,1024,96,96]}]:[]};
+    o.demand=twoStreamPhaseDemand(o.descriptor);
+  }
+  rematerialized.requested.processBudgetBytes=2147483648;
+  for(const o of rematerialized.phaseObservations)o.host.hostFreeBytes=2147483648;
+  assert.equal(acceptResidentTwoStream(rematerialized).ok,true);
+  for(const mutate of [r=>delete r.twoStream.rematerializeTokenizerEmbedding,
+    r=>r.twoStream.rematerializeTokenizerEmbedding=false,
+    r=>delete r.twoStream.tokenizerEmbeddingRetirement,
+    r=>r.twoStream.tokenizerEmbeddingRetirement.afterGroup='setup',
+    r=>r.twoStream.tokenizerEmbeddingRetirement.logicalBytes--,
+    r=>delete r.twoStream.setupTokenizerEmbeddingRetirement,
+    r=>r.twoStream.setupTokenizerEmbeddingRetirement.bufferCount=0,
+    r=>r.twoStream.weightPhases.pop(),
+    r=>r.twoStream.weightPhases[22].tensorNames=['other.tensor'],
+    r=>r.phaseObservations.find(o=>o.phase==='two-stream-embedding-rematerialize-weights').demand.requiredBytes=0,
+    r=>r.phaseObservations.find(o=>o.phase==='two-stream-embedding-rematerialize-rearrange').demand.workGpuBytes=0,
+    r=>r.phaseObservations.splice(r.phaseObservations.findIndex(o=>o.phase==='two-stream-embedding-rematerialize-weights'),1),
+    r=>r.requested.rematerializeTokenizerEmbedding='true']){
+    const drift=structuredClone(rematerialized);mutate(drift);assert.equal(acceptResidentTwoStream(drift).ok,false);
+  }
   c.adapterTelemetry.attentionRowsPerDuty=128;assert.equal(acceptResidentTwoStream(smaller).ok,false,'requested smaller scratch cannot conceal effective unchanged128-row route');
   for(const mutate of [
     r=>r.expectedPhaseOrder.pop(),r=>r.phaseObservations.pop(),r=>r.phaseObservations.splice(28,1),

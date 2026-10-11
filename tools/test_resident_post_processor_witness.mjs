@@ -96,6 +96,14 @@ const prefix=subject.residentBackbonePrefix(whole);
 assert.deepEqual(prefix.expectedPhaseOrder,backboneNames);
 assert.deepEqual(prefix.phaseObservations.map(p=>p.phase),backboneNames);
 assert.equal(whole.phaseObservations.length,backboneNames.length+postNames.length,'the whole downstream plan remains separately checked');
+const rematerializedNames=residentTwoStreamExpectedPhases(32,true);
+const rematerializedWhole={requested:{attentionRowsPerDuty:32,rematerializeTokenizerEmbedding:true},
+  expectedPhaseOrder:[...rematerializedNames,...postNames],
+  phaseObservations:[...rematerializedNames,...postNames].map(phase=>({phase}))};
+const rematerializedPrefix=subject.residentBackbonePrefix(rematerializedWhole);
+assert.deepEqual(rematerializedPrefix.expectedPhaseOrder,rematerializedNames);
+assert.deepEqual(rematerializedPrefix.phaseObservations.map(p=>p.phase),rematerializedNames,
+  'complete extra guarded tokenizer phases remain in the backbone prefix rather than cutting downstream output');
 assert.equal(subject.validateCompleteReadbackChunk({offset:0,bytes:4,receivedBytes:0,totalBytes:8}),4);
 assert.equal(subject.validateCompleteReadbackChunk({offset:4,bytes:4,receivedBytes:4,totalBytes:8}),8);
 for(const args of [{offset:0,bytes:0,receivedBytes:0,totalBytes:8},

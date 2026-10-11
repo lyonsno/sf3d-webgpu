@@ -20,7 +20,7 @@ export function validateCompleteReadbackChunk({offset,bytes,receivedBytes,totalB
 }
 
 export function residentBackbonePrefix(report){
-  const count=residentTwoStreamExpectedPhases(report.requested?.attentionRowsPerDuty).length;
+  const count=residentTwoStreamExpectedPhases(report.requested?.attentionRowsPerDuty,report.requested?.rematerializeTokenizerEmbedding??false).length;
   return {...report,expectedPhaseOrder:report.expectedPhaseOrder?.slice(0,count),
     phaseObservations:report.phaseObservations?.slice(0,count)};
 }
@@ -147,7 +147,7 @@ export function acceptNativeResidentPostProcessor(report){
   try{errors.push(...acceptResidentTwoStream(residentBackbonePrefix(report)).errors);}
   catch(error){errors.push(error.message);}
   try{
-    const expected=[...residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty),
+    const expected=[...residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty,report.requested.rematerializeTokenizerEmbedding??false),
       ...postProcessorExpectedPhases(report.requested.postChannelsPerDuty)];
     if(report.phaseObservations?.map(p=>p.phase).join(',')!==expected.join(','))errors.push('whole requested execution phase order mismatch');
   }catch(error){errors.push(error.message);}

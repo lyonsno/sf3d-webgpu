@@ -37,6 +37,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     throughPostProcessor,throughFullModel,postChannelsPerDuty:Number(arg('--post-channels-per-duty')??16),
     reuseDeadTriplaneStorage:process.argv.includes('--reuse-dead-triplane-storage'),
     reuseAttentionResidualStorage:process.argv.includes('--reuse-attention-residual-storage'),
+    rematerializeTokenizerEmbedding:process.argv.includes('--rematerialize-tokenizer-embedding'),
     hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
     cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
   allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V, caller-declared complete-query score scratch and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
@@ -67,6 +68,7 @@ try{
     report.evidencePaths.postProcessorOutput=reportPath+'.postprocessor.f32';
   }
   if(report.requested.reuseDeadTriplaneStorage&&!throughBackbone)throw Error('dead-triplane reuse requires complete backbone invocation');
+  if(report.requested.rematerializeTokenizerEmbedding&&!throughBackbone)throw Error('tokenizer rematerialization requires complete backbone invocation');
   if(report.requested.reuseAttentionResidualStorage&&(!throughBackbone||!report.requested.reuseDeadTriplaneStorage))
     throw Error('attention residual reuse requires explicit owned dead-triplane backbone route');
   if(!['raw-free-pages-v0',AVAILABLE_MEMORY_DIAGNOSTIC_POLICY].includes(report.requested.hostHeadroomPolicy))throw Error('unknown explicit host headroom policy; no fallback');
@@ -115,12 +117,14 @@ try{
   if(throughBackbone){
     order.push('two-stream-embedding-weights','two-stream-embedding-rearrange');
     for(const group of groups){
+      if(group.stageId==='final'&&report.requested.rematerializeTokenizerEmbedding)
+        order.push('two-stream-embedding-rematerialize-weights','two-stream-embedding-rematerialize-rearrange');
       order.push('two-stream-'+group.stageId);
       for(const duty of group.duties)if(twoStreamPhaseDemand({name:'two-stream-duty',duty,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage}).requiredBytes>0)
         order.push('two-stream-duty-'+duty.dutyIndex);
     }
     order.push('two-stream-output');
-    if(order.join(',')!==residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty).join(','))throw Error('effective source graph differs from approved complete backbone cliffs');
+    if(order.join(',')!==residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty,report.requested.rematerializeTokenizerEmbedding).join(','))throw Error('effective source graph differs from approved complete backbone cliffs');
   }
   report.expectedPhaseOrder=order;
   if(throughPostProcessor)order.push(...postWitness.postProcessorExpectedPhases(report.requested.postChannelsPerDuty));
@@ -333,6 +337,7 @@ try{
               imageTokensBuf:result.tokensBuf,N_img:result.N,onBeforePhase:observe,attentionRowsPerDuty:config.requested.attentionRowsPerDuty,
               reuseDeadTriplaneStorage:config.requested.reuseDeadTriplaneStorage,
               reuseAttentionResidualStorage:config.requested.reuseAttentionResidualStorage,
+              rematerializeTokenizerEmbedding:config.requested.rematerializeTokenizerEmbedding,
               async onBeforeDuty(duty,state){
                 if(duty.kind==='output')return observe({name:'two-stream-output',tensors:[]});
                 // Fresh observation at every new work-storage cliff; uniform

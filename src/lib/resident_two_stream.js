@@ -4,9 +4,9 @@ import {captureGpuBufferAllocations} from './gpu.js';
 import {dispatchTokenizerEmbedding} from './tokenizer_embedding.js';
 import {runCooperativeTwoStream,retireTwoStreamWork} from './cooperative_two_stream.js';
 
-async function retireConsumedTokenizerEmbedding(device,owner){
-  // The complete setup group has consumed the rearranged embedding. This
-  // separate prefix must also resolve before any exact captured backing dies.
+async function retireConsumedTokenizerEmbedding(device,owner,afterGroup){
+  // Only a completed consumer may authorize retirement. Rematerialization
+  // supplies a new canonical operand before the later final consumer.
   await device.queue.onSubmittedWorkDone();
   const errors=[];let logicalBytes=0,bufferCount=0;
   for(const allocation of [...owner.allocations]){
@@ -17,7 +17,7 @@ async function retireConsumedTokenizerEmbedding(device,owner){
     }catch(error){errors.push(error);}
   }
   if(errors.length)throw new AggregateError(errors,'consumed tokenizer embedding retirement failed');
-  return {status:'retired',afterGroup:'setup',logicalBytes,bufferCount,
+  return {status:'retired',afterGroup,logicalBytes,bufferCount,
     authority:'logical owned retirement after completed prefix; not physical reclamation credit'};
 }
 
@@ -39,7 +39,8 @@ export function selectTwoStreamPhase(template,stageId){
 export async function runResidentTwoStream({device,backbone,memoryBudget,weightsUrl,expectedWeightBytes,
   expectedSourceETag,imageTokensBuf,N_img,onBeforePhase,onBeforeDuty,onAfterDuty,onProgress,withResult,
   foregroundOpportunities=null,linearRowsPerDuty=128,attentionRowsPerDuty=128,reuseDeadTriplaneStorage=false,
-  reuseAttentionResidualStorage=false,onBeforeSourceIntake}){
+  reuseAttentionResidualStorage=false,rematerializeTokenizerEmbedding=false,onBeforeSourceIntake}){
+  if(typeof rematerializeTokenizerEmbedding!=='boolean')throw TypeError('explicit boolean tokenizer rematerialization required');
   if(typeof reuseDeadTriplaneStorage!=='boolean')throw TypeError('explicit boolean dead-triplane reuse required');
   if(typeof reuseAttentionResidualStorage!=='boolean'||(reuseAttentionResidualStorage&&!reuseDeadTriplaneStorage))
     throw TypeError('attention residual reuse requires explicit owned dead-triplane reuse');
@@ -55,30 +56,40 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
   try{
     owner.source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake});
     const source=owner.source,template=source.template;
-    await onBeforePhase({name:'two-stream-embedding-weights',tensors:source.describe(template.tokenizer),workGpuBytes:0});
-    let embedding,tokenizerEmbeddingRetirement;
-    await source.withWeights(template.tokenizer,async selected=>{
-      // Conversion custody has ended, not necessarily physical backing.
-      // A fresh post-upload observation includes anything still resident.
-      await onBeforePhase({name:'two-stream-embedding-rearrange',tensors:[],workGpuBytes:3*1024*96*96*4+20});
-      const encoder=device.createCommandEncoder();
-      captureGpuBufferAllocations(()=>{
-        embedding=dispatchTokenizerEmbedding(encoder,device,backbone.pipelines,selected.embeddings);
-      },{ownedAllocations:owner.allocations});
-      device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();
-    });
+    let embedding,tokenizerEmbeddingRetirement,setupTokenizerEmbeddingRetirement;
+    const materializeEmbedding=async(prefix='')=>{
+      await onBeforePhase({name:'two-stream-embedding-'+prefix+'weights',tensors:source.describe(template.tokenizer),workGpuBytes:0});
+      await source.withWeights(template.tokenizer,async selected=>{
+        // Conversion custody has ended, not necessarily physical backing.
+        // A fresh post-upload observation includes anything still resident.
+        await onBeforePhase({name:'two-stream-embedding-'+prefix+'rearrange',tensors:[],workGpuBytes:3*1024*96*96*4+20});
+        const encoder=device.createCommandEncoder();
+        captureGpuBufferAllocations(()=>{
+          embedding=dispatchTokenizerEmbedding(encoder,device,backbone.pipelines,selected.embeddings);
+        },{ownedAllocations:owner.allocations});
+        device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();
+      });
+    };
+    await materializeEmbedding();
     const executed=await runCooperativeTwoStream({device,backbone,imageTokensBuf,N_img,weights:{},
       dutyGranularity:'attention-tile',linearRowsPerDuty,attentionRowsPerDuty,residentFFN:true,retireIntermediateBuffers:true,
       reuseDeadTriplaneStorage,
       reuseAttentionResidualStorage,
       foregroundOpportunities,onProgress,onBeforeDuty,onAfterDuty,
       async withGroupWeights(group,work){
+        if(group.stageId==='final'&&rematerializeTokenizerEmbedding)
+          await materializeEmbedding('rematerialize-');
         const selection=selectTwoStreamPhase(template,group.stageId);
         await onBeforePhase({name:'two-stream-'+group.stageId,tensors:source.describe(selection)});
-        const value=await source.withWeights(selection,weights=>work(group.stageId==='setup'
+        const value=await source.withWeights(selection,weights=>work(group.stageId==='setup'||group.stageId==='final'
           ?{...weights,tokenizer_embeddings_buf:embedding}:weights));
-        if(group.stageId==='setup'){
-          tokenizerEmbeddingRetirement=await retireConsumedTokenizerEmbedding(device,owner);
+        if(group.stageId==='setup'&&rematerializeTokenizerEmbedding){
+          setupTokenizerEmbeddingRetirement=await retireConsumedTokenizerEmbedding(device,owner,'setup');
+          embedding=null;
+        }
+        if(group.stageId==='final'){
+          tokenizerEmbeddingRetirement=await retireConsumedTokenizerEmbedding(device,owner,'final');
+          if(backbone._diagnosticBuffers?.rearrangedEmb===embedding)delete backbone._diagnosticBuffers.rearrangedEmb;
           embedding=null;
         }
         return value;
@@ -91,7 +102,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
     const value=await withResult(executed.result);
     return {value,cooperative:executed.report,loadingReport:source.loadingReport,weightPhases:source.phases,
       shape:[3,1024,96,96],blocks:4,basicBlocks:12,residentFFN:true,linearRowsPerDuty,attentionRowsPerDuty,reuseDeadTriplaneStorage,
-      reuseAttentionResidualStorage,tokenizerEmbeddingRetirement};
+      reuseAttentionResidualStorage,rematerializeTokenizerEmbedding,tokenizerEmbeddingRetirement,setupTokenizerEmbeddingRetirement};
   }catch(error){failed=true;failure=error;throw error;}
   finally{
     try{await disposeResidentTwoStream(backbone);}

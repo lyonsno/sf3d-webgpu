@@ -33,7 +33,7 @@ async function exercise({failRetirement = false} = {}) {
     async preprocessImage() {return new Float32Array([1]);},
     async preprocessConditionImage() {return {chw: new Float32Array([1]), rgba: new Uint8Array(4)};},
     async runResidentDino(options) {return {value: await options.withResult({tokensBuf: {size: 4}, N: 1297})};},
-    async runResidentTwoStream(options) {try {return {value: await options.withResult({buffer: {size: 4}})};}
+    async runResidentTwoStream(options) {assert.equal(options.rematerializeTokenizerEmbedding,true);try {return {value: await options.withResult({buffer: {size: 4}})};}
       finally {await module.disposeResidentTwoStream(backbone);}},
     async runResidentPostProcessor(options) {assert.equal(retired, false, 'input must survive all postprocessor work');
       postComplete = true; events.push('complete-post-prefix');
@@ -60,7 +60,7 @@ async function exercise({failRetirement = false} = {}) {
   const callback = vm.compileFunction('return async config => {' + body + '\n};', ['$module'],
     {parsingContext: context})(module);
   const config = {requested: {throughBackbone: true, throughPostProcessor: true, throughFullModel: true,
-    attentionRowsPerDuty: 32, postChannelsPerDuty: 16, reuseDeadTriplaneStorage: true, reuseAttentionResidualStorage: true},
+    attentionRowsPerDuty: 32, postChannelsPerDuty: 16, reuseDeadTriplaneStorage: true, reuseAttentionResidualStorage: true,rematerializeTokenizerEmbedding:true},
     input: {width: 503, height: 503}, source: {byteLength: 2285308688, etag: 'exact-source'}, allocatingDutyIndices: []};
   if (failRetirement) {
     await assert.rejects(callback(config), /injected upstream retirement failure/);

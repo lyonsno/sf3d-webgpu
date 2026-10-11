@@ -220,7 +220,7 @@ export function acceptNativeArtifact(report,table) {
   try {
     require(report.requested?.throughFullModel===true&&report.requested.throughPostProcessor===true&&report.requested.throughBackbone===true,'complete effective full-model request missing');
     require(report.requested.processBudgetBytes===2147483648&&report.requested.cpuBytes===256*1024*1024&&report.requested.gpuBytes===1024*1024*1024&&report.requested.totalBytes===1280*1024*1024,'effective guards changed');
-    const prefix=[...residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty),...postProcessorExpectedPhases(report.requested.postChannelsPerDuty)];
+    const prefix=[...residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty,report.requested.rematerializeTokenizerEmbedding??false),...postProcessorExpectedPhases(report.requested.postChannelsPerDuty)];
     prefix.unshift('device-acquisition');
     for(const [before,scope]of [['camera','dino'],['two-stream-embedding-weights','two-stream'],['post-processor-output-allocation','post-processor']])
       prefix.splice(prefix.indexOf(before),0,scope+'-source-weight-header-prefix',scope+'-source-weight-header');
