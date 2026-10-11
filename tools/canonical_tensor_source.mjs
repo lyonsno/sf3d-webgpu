@@ -54,26 +54,47 @@ export async function prepareCanonicalTensorSource({weightsPath,expectedSha256,t
     const sha256=hash.digest('hex');check();
     if(sha256!==expectedSha256)throw Error('canonical artifact SHA256 mismatch');
     const etag='"sha256-'+sha256+'"';
-    let closed=false;
+    let closed=false;const idleResponseBuffers=[];
     return {receipt:{path:fs.realpathSync(weightsPath),sha256,byteLength:before.size,headerSha256:digest(header),headerBytes:headerSize,referenceMode,
       tensorCount:tensors.size,etag,units,totalGpuBytes,cpuBytes,gpuBytes,sourceStat:{dev:before.dev,ino:before.ino,size:before.size,mtimeMs:before.mtimeMs,ctimeMs:before.ctimeMs}},
-      serve(req,res){
+      async serve(req,res){
+        let responseFd,buffer,reusable=false;
         try{
           check();const match=req.headers.range?.match(/^bytes=(\d+)-(\d+)$/);
           if(req.headers['if-match']!==etag){res.writeHead(412).end();return;}
           if(!match){res.writeHead(416).end();return;}
           const start=Number(match[1]),end=Number(match[2]);
           if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||end>=before.size){res.writeHead(416).end();return;}
+          // Each response owns its checked descriptor and exclusive IO backing.
+          // A completed write callback releases that backing for the next read;
+          // successful responses return it for later ranges of the same source.
+          // Aborted/error writes never lend their backing to another response.
+          responseFd=fs.openSync(weightsPath,'r');
+          if(stamp(fs.fstatSync(responseFd))!==identity)throw Error('canonical range descriptor changed');
+          buffer=idleResponseBuffers.pop()??Buffer.alloc(65536);
+          res.on('error',()=>{});
           res.writeHead(206,{'Content-Type':'application/octet-stream','Content-Length':end-start+1,'Content-Range':`bytes ${start}-${end}/${before.size}`,ETag:etag,'Cache-Control':'no-store'});
-          // destroy() closes a ReadStream fd even with autoClose:false. Each
-          // HTTP response owns a separately checked fd, never the source anchor.
-          const responseFd=fs.openSync(weightsPath,'r');
-          if(stamp(fs.fstatSync(responseFd))!==identity){fs.closeSync(responseFd);throw Error('canonical range descriptor changed');}
-          let stream;
-          try{stream=fs.createReadStream(weightsPath,{fd:responseFd,autoClose:true,start,end});}
-          catch(error){fs.closeSync(responseFd);throw error;}
-          stream.on('error',error=>res.destroy(error));res.on('close',()=>stream.destroy());stream.pipe(res);
-        }catch(error){res.writeHead(409).end(error.message);}
+          for(let position=start;position<=end;){
+            if(res.destroyed)throw Error('canonical range response closed');
+            const count=await new Promise((resolve,reject)=>fs.read(responseFd,buffer,0,
+              Math.min(buffer.length,end-position+1),position,(error,count)=>error?reject(error):resolve(count)));
+            if(count===0)throw Error('canonical range truncated during response');
+            if(res.destroyed)throw Error('canonical range response closed');
+            await new Promise((resolve,reject)=>{
+              const onClose=()=>reject(Error('canonical range response closed during write'));
+              res.once('close',onClose);
+              try{res.write(buffer.subarray(0,count),error=>{
+                res.off('close',onClose);error?reject(error):resolve();
+              });}catch(error){res.off('close',onClose);reject(error);}
+            });
+            position+=count;
+          }
+          reusable=true;res.end();
+        }catch(error){if(res.headersSent||res.destroyed)res.destroy(error);else res.writeHead(409).end(error.message);}
+        finally{
+          if(responseFd!==undefined)fs.closeSync(responseFd);
+          if(reusable)idleResponseBuffers.push(buffer);
+        }
       },close(){if(closed)return;closed=true;try{check();}finally{fs.closeSync(fd);}}};
   }catch(error){fs.closeSync(fd);throw error;}
 }
