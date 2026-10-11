@@ -142,7 +142,13 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
         buffers.set(buffer, {lease, destroy});
         try {
           const wrapped = function(...args) {
-            const result = Reflect.apply(destroy, this, args); buffers.get(this)?.lease.release(); return result;
+            const result = Reflect.apply(destroy, this, args), row = buffers.get(this);
+            if (row) {
+              this.destroy = row.destroy;
+              if (this.destroy !== row.destroy) throw new Error('retired GPUBuffer hook restoration failed');
+              row.lease.release(); buffers.delete(this);
+            }
+            return result;
           };
           buffer.destroy = wrapped;
           if (buffer.destroy !== wrapped) throw new Error('GPUBuffer retirement hook installation failed');
@@ -168,7 +174,15 @@ export function createLoaderMemoryBudget({cpuBytes, gpuBytes, totalBytes=cpuByte
         if(typeof destroy!=='function'){unresolvedAllocations.add(lease);throw Error('GPUTexture retirement contract unavailable');}
         buffers.set(texture,{lease,destroy});
         try{
-          const wrapped=function(...args){const result=Reflect.apply(destroy,this,args);buffers.get(this)?.lease.release();return result;};
+          const wrapped=function(...args){
+            const result=Reflect.apply(destroy,this,args),row=buffers.get(this);
+            if(row){
+              this.destroy=row.destroy;
+              if(this.destroy!==row.destroy)throw Error('retired GPUTexture hook restoration failed');
+              row.lease.release();buffers.delete(this);
+            }
+            return result;
+          };
           texture.destroy=wrapped;if(texture.destroy!==wrapped)throw Error('GPUTexture retirement hook installation failed');
         }catch(error){
           try{Reflect.apply(destroy,texture,[]);lease.release();buffers.delete(texture);}
