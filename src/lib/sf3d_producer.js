@@ -37,6 +37,10 @@ import { isLoaderMemoryBudget } from './loader_memory_budget.js';
 // Hosts use the same bundled authority as the constructor, not a duplicated
 // module's lookalike budget or an assertion about an unobserved old device.
 export { createLoaderMemoryBudget } from './loader_memory_budget.js';
+// The explicit resident diagnostic mounts the existing common service on its
+// pre-acquired, budget-owned host device; this is not eager-route admission.
+export {createWebGpuForegroundService} from '@kaminos/webgpu-inference-kit';
+export {hostTexturePlan} from '../../tools/foreground_guard_browser.js';
 // Opt-in complete encoder consumer; this does not enable the held full model.
 export { runResidentDino,selectDinoPhase } from './resident_dino.js';
 export {runResidentTwoStream,disposeResidentTwoStream} from './resident_two_stream.js';

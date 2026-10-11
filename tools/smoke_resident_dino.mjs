@@ -17,6 +17,8 @@ import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction,stopOwnedBrowser,ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
 import {createNativePhaseEvidenceWriter} from './native_phase_journal.mjs';
+import {startForegroundService} from './foreground_service.mjs';
+import {validateResidentForegroundRequest,prepareResidentForeground,acceptResidentForeground} from './resident_foreground_service.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
@@ -26,8 +28,9 @@ let groups=null,postWitness=null,tensorTable,artifactContract;
 let createArtifactPhaseContract,sourceIntakePhaseDemand,inspectCompleteGlb,acceptNativeArtifact,persistArtifactDelivery,RESIDENT_ARTIFACT_CONFIG;
 const arg=name=>{const i=process.argv.indexOf(name);return i<0?null:process.argv[i+1];};
 const root=arg('--repo-root')?path.resolve(arg('--repo-root')):null;
+const foregroundRoot=arg('--foreground-repo-root')?path.resolve(arg('--foreground-repo-root')):null;
 const requestedReportPath=path.resolve(arg('--report')??path.join(os.tmpdir(),'sf3d-dino-'+randomUUID()+'.json'));
-const occupied=['','.input.f32','.output.f32','.triplane.f32','.postprocessor.f32','.model.glb','.mesh.f32','.faces.u32'].some(s=>fs.existsSync(requestedReportPath+s));
+const occupied=['','.input.f32','.output.f32','.triplane.f32','.postprocessor.f32','.model.glb','.mesh.f32','.faces.u32','.foreground-before.png','.foreground-after.png'].some(s=>fs.existsSync(requestedReportPath+s));
 const reportPath=occupied?requestedReportPath+'.refused-'+randomUUID()+'.json':requestedReportPath;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':throughPostProcessor?'sf3d.native-resident-postprocessor.v0':throughBackbone?'sf3d.native-resident-backbone.v0':'sf3d.native-resident-dino.v0',status:'running',phase:'arguments',runId:randomUUID(),rootPid:process.pid,
@@ -41,13 +44,15 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     rematerializeTokenizerEmbedding:process.argv.includes('--rematerialize-tokenizer-embedding'),
     appendPhaseJournal:process.argv.includes('--append-phase-journal'),
     hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
+    foreground:foregroundRoot?{repoRoot:foregroundRoot,revision:arg('--foreground-revision'),grid:Number(arg('--foreground-grid')),
+      sourceDepth:Number(arg('--foreground-source-depth')),rendererCpuBytes:Number(arg('--foreground-cpu-bytes')),warmupFrames:Number(arg('--foreground-warmup-frames'))}:null,
     cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
   allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V, caller-declared complete-query score scratch and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
   evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',twoStreamOutput:reportPath+'.triplane.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 const persist=report.requested.appendPhaseJournal?createNativePhaseEvidenceWriter({reportPath,report}):()=>writeJsonReportAtomic(reportPath,report);
-let source,monitor,hostMonitor,child,browser,server,profile,safetyStop;
+let source,monitor,hostMonitor,child,browser,server,profile,safetyStop,foregroundService,foregroundChild,foregroundModule;
 const stopForSafety=safety=>{
   if(!safetyStop)safetyStop=memoryStopAction({child:()=>child,report,persist})(safety);
   return safetyStop;
@@ -56,6 +61,7 @@ try{
   await persist();
   if(occupied)throw Error('requested evidence paths already exist; retained previous evidence without reuse or overwrite');
   if(report.requested.appendPhaseJournal&&!throughFullModel)throw Error('append-phase journal requires the explicit full-model diagnostic');
+  validateResidentForegroundRequest(report.requested);
   if(throughFullModel){
     report.claim='complete canonical native model and textured GLB; no reference-parity, opaque physical-capacity or living-foreground claim';
     Object.assign(report.evidencePaths,{glb:reportPath+'.model.glb',mesh:reportPath+'.mesh.f32',faces:reportPath+'.faces.u32'});
@@ -105,6 +111,16 @@ try{
   if(digest(image)!==report.requested.inputSha256||image.toString('ascii',12,16)!=='IHDR')throw Error('canonical PNG input identity required');
   report.inputArtifact={sha256:digest(image),byteLength:image.length,width:image.readUInt32BE(16),height:image.readUInt32BE(20)};
   if(report.inputArtifact.width!==503||report.inputArtifact.height!==503)throw Error('source-fixed preprocessing dimensions changed');
+  if(foregroundRoot){
+    report.phase='foreground-source-preparation';await persist();
+    const {dependency,...foreground}=await prepareResidentForeground({requested:report.requested,outputDir:reportPath+'.foreground'});
+    report.foreground=foreground;
+    foregroundModule=fs.readFileSync(path.join(root,'tools/resident_foreground_browser.mjs'));
+    if(!foregroundModule.equals(execFileSync('git',['show',report.source.revision+':tools/resident_foreground_browser.mjs'],{cwd:root})))throw Error('resident foreground composition module differs from exact source');
+    report.foreground.compositionModule={url:'/resident-foreground-browser.mjs',sha256:digest(foregroundModule),sourceRevision:report.source.revision};
+    Object.assign(report.evidencePaths,{foregroundBefore:reportPath+'.foreground-before.png',foregroundAfter:reportPath+'.foreground-after.png',foregroundConsole:reportPath+'.foreground-console.jsonl'});
+    report.claim='complete canonical native model and textured GLB alongside same-device ordinary volume/Three submissions; pixels inspected separately; no ordinary/eager admission or reference-parity claim';
+  }
   report.phase='library-build';await persist();
   const log=fs.openSync(reportPath+'.build.log','w');
   try{execFileSync(process.execPath,[path.join(root,'node_modules/vite/bin/vite.js'),'build','-c','vite.lib.config.js'],{cwd:root,stdio:['ignore',log,log]});}finally{fs.closeSync(log);}
@@ -138,12 +154,45 @@ try{
     report.artifactPrefixPhaseCount=order.length;
   }
   const readBody=async req=>{const chunks=[];for await(const chunk of req)chunks.push(chunk);return Buffer.concat(chunks);};
+  const freshObservation=async(phase,demand,phaseRequestedAtUnixMs)=>{
+    const processObservation=await monitor.sample({fresh:true,includeLifetimeHistory:!throughPostProcessor});
+    const host={...observeMacMemory(),model:execFileSync('sysctl',['-n','hw.model'],{encoding:'utf8'}).trim(),processor:execFileSync('sysctl',['-n','machdep.cpu.brand_string'],{encoding:'utf8'}).trim()};
+    const processRow=processObservation.lastObservation;
+    const hostHeadroom=evaluatePhaseHostHeadroom({host,requiredBytes:demand.requiredBytes,policy:report.requested.hostHeadroomPolicy,requestedAtUnixMs:phaseRequestedAtUnixMs});
+    return {phase:phase.name,phaseRequestedAtUnixMs,descriptor:phase,demand,host,hostHeadroom,
+      process:throughPostProcessor?postWitness.projectFreshProcessEvidence(processObservation):processObservation,
+      authority:'reversible phase with observed owned-process baseline including observer, unchanged stop and independent host-pressure guard; not production physical fit',
+      verdict:host.hostname===report.source.hostname&&host.model==='Mac14,9'&&host.processor==='Apple M2 Pro'&&!host.observerErrors.length&&
+        hostHeadroom.verdict==='admitted'&&processObservation.coverage==='sampled-owned-process-tree'&&processRow?.status==='observed'&&
+        processRow.runId===report.runId&&processRow.rootPid===process.pid&&processObservation.freshness?.route==='new-probe-after-request'&&
+        processObservation.freshness.requestedAtUnixMs>=phaseRequestedAtUnixMs&&processRow.atUnixMs>=processObservation.freshness.requestedAtUnixMs&&
+        processObservation.freshness.probeAtUnixMs===processRow.atUnixMs&&processObservation.freshness.observationIndex===processObservation.sampleCount&&
+        processRow.sampledAggregatePhysicalFootprintBytes+demand.requiredBytes<=report.requested.processBudgetBytes&&!report.memorySafety?'admitted':'refused'};
+  };
   server=http.createServer(async(req,res)=>{
     try{
       const name=new URL(req.url,'http://localhost').pathname;
       if(name==='/canonical-weights.bin'){source.serve(req,res);return;}
       if(name==='/'){res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'}).end('<title>Guarded SF3D native diagnostic</title><h1>'+ (throughFullModel?'Complete canonical model':'Complete DINO encoder') +' — guarded diagnostic</h1><p id="status">No model work started</p><img id="input">');return;}
       if(name==='/favicon.ico'){res.writeHead(204).end();return;}
+      if(foregroundRoot&&name==='/resident-foreground-config'){
+        const {cpuBytes,gpuBytes,totalBytes,foreground}=report.requested;
+        res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify({runId:report.runId,allowance:{cpuBytes,gpuBytes,totalBytes},foreground}));return;
+      }
+      if(foregroundRoot&&name==='/resident-foreground-browser.mjs'){
+        report.foreground.compositionModule.servedSha256=digest(foregroundModule);
+        res.writeHead(200,{'Content-Type':'text/javascript','Cache-Control':'no-store'}).end(foregroundModule);return;
+      }
+      if(foregroundRoot&&name==='/foreground-admission'&&req.method==='POST'){
+        const phaseRequestedAtUnixMs=Date.now(),phase=JSON.parse((await readBody(req)).toString()),f=report.requested.foreground;
+        if(report.foreground.admission||report.phaseObservations.length!==1||report.phaseObservations[0].phase!=='device-acquisition'||report.phaseObservations[0].verdict!=='admitted'||
+          !report.backend||report.memorySafety||phase.requiredBytes!==report.requested.totalBytes||phase.grid!==f.grid||phase.rendererCpuBytes!==f.rendererCpuBytes||phase.sourceDepth!==f.sourceDepth)
+          throw Error('foreground initialization identity, fresh order or safety mismatch');
+        const demand={requiredBytes:report.requested.totalBytes,authority:'whole unchanged explicit combined allowance before host construction; not opaque physical capacity'};
+        const observation=await freshObservation({name:'foreground-initialization',...phase},demand,phaseRequestedAtUnixMs);
+        report.foreground.admission=observation;report.phase='foreground-initialization';await persist();
+        res.writeHead(observation.verdict==='admitted'?200:409,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(observation));return;
+      }
       if(name==='/backend'&&req.method==='POST'){
         const backend=JSON.parse((await readBody(req)).toString());
         if(report.backend)throw Error('native backend identity already fixed');
@@ -196,25 +245,9 @@ try{
           if(!throughPostProcessor)throw Error('requested route does not include postprocessor');
           demand=postWitness.postProcessorPhaseDemand(phase,report.requested.postChannelsPerDuty);
         }else demand=dinoPhaseDemand(phase);
-        const processObservation=await monitor.sample({fresh:true,includeLifetimeHistory:!throughPostProcessor});
-        const host={...observeMacMemory(),model:execFileSync('sysctl',['-n','hw.model'],{encoding:'utf8'}).trim(),processor:execFileSync('sysctl',['-n','machdep.cpu.brand_string'],{encoding:'utf8'}).trim()};
-        const processRow=processObservation.lastObservation;
-        const hostHeadroom=evaluatePhaseHostHeadroom({host,requiredBytes:demand.requiredBytes,policy:report.requested.hostHeadroomPolicy,requestedAtUnixMs:phaseRequestedAtUnixMs});
-        // Full raw process journal and terminal lifetime summary retain all
-        // data. Per-phase evidence needs the exact fresh row, not another copy
-        // of every historical observer process accumulated by the monitor.
-        const observation={phase:phase.name,phaseRequestedAtUnixMs,descriptor:phase,demand,host,hostHeadroom,
-          process:throughPostProcessor?postWitness.projectFreshProcessEvidence(processObservation):processObservation,
-          authority:'reversible encoder phase with observed baseline and diagnostic process stop; not production physical fit',
-          verdict:host.hostname===report.source.hostname&&host.model==='Mac14,9'&&host.processor==='Apple M2 Pro'&&!host.observerErrors.length&&
-            hostHeadroom.verdict==='admitted'&&processObservation.coverage==='sampled-owned-process-tree'&&processRow?.status==='observed'&&
-            processRow.runId===report.runId&&processRow.rootPid===process.pid&&
-            processObservation.freshness?.route==='new-probe-after-request'&&
-            processObservation.freshness.requestedAtUnixMs>=phaseRequestedAtUnixMs&&
-            processRow.atUnixMs>=processObservation.freshness.requestedAtUnixMs&&
-            processObservation.freshness.probeAtUnixMs===processRow.atUnixMs&&
-            processObservation.freshness.observationIndex===processObservation.sampleCount&&
-            processRow.sampledAggregatePhysicalFootprintBytes+demand.requiredBytes<=report.requested.processBudgetBytes&&!report.memorySafety?'admitted':'refused'};
+        // Preserve the same fresh host/process conjunction for model cliffs
+        // and the separate foreground construction gate, without history copies.
+        const observation=await freshObservation(phase,demand,phaseRequestedAtUnixMs);
         report.phaseObservations.push(observation);report.phase='phase-'+phase.name;
         if(throughFullModel)report.expectedPhaseOrder=[...order,...artifactContract.received.map(r=>r.name)];
         await persist();
@@ -264,6 +297,17 @@ try{
         await persist();
         res.writeHead(200).end();return;
       }
+      if(foregroundRoot&&foregroundService){
+        const requestedUrl=req.url,target=new URL(req.url,'http://localhost');
+        let decoded=target.pathname,previous;
+        do{previous=decoded;decoded=decodeURIComponent(decoded);}while(decoded!==previous);
+        if(decoded.startsWith('/foreground/'))decoded=decoded.slice('/foreground'.length);
+        const ownedLayoutWrite=req.method==='POST'&&decoded==='/api/volume-cockpit-layouts';
+        if(decoded.startsWith('//')||decoded.includes('\\')||(!['GET','HEAD'].includes(req.method)&&!ownedLayoutWrite)||
+          /\.(bin|glb|gltf|safetensors|npy|npz|pt|gguf)$/i.test(decoded)||/^\/api\/(read|delete|job)/.test(decoded))
+          throw Error('unadmitted model/data/mutation route remains held by resident diagnostic');
+        req.url=decoded+target.search;await foregroundService.proxy(req,res,{requestedUrl});return;
+      }
       res.writeHead(404).end();
     }catch(error){
       const message=String(error?.message??error);report.lastServerError={message,phase:report.phase};
@@ -283,6 +327,14 @@ try{
     try{hostMonitor=await startHostPressureGuard({rawPath:report.evidencePaths.hostPressure,onUnsafe:stopForSafety});}
     catch(error){report.hostPressureGuard=error.hostPressureSummary;throw error;}
   }
+  if(foregroundRoot){
+    report.phase='actual-foreground-service';await persist();
+    if(report.memorySafety)throw Error('memory guard prevents foreground server launch');
+    foregroundService=await startForegroundService({repoRoot:foregroundRoot,revision:report.requested.foreground.revision,
+      outputDir:reportPath+'.foreground/service',onSpawn:owned=>{foregroundChild=owned;}});
+    report.foreground.service=foregroundService.receipt;
+    foregroundService.onServed=record=>{report.foreground.servedSources[new URL(record.url,'http://localhost').pathname.slice(1)]=record.sha256;};
+  }
   profile=await fs.promises.mkdtemp(path.join(os.tmpdir(),'sf3d-resident-dino-browser-'));
   const allowed=['HOME','TMPDIR','PATH','LANG','LC_ALL','LC_CTYPE','__CF_USER_TEXT_ENCODING'];
   const env=Object.fromEntries(allowed.filter(n=>process.env[n]!=null).map(n=>[n,process.env[n]]));
@@ -298,7 +350,32 @@ try{
   });
   child.stderr.on('data',chunk=>fs.appendFileSync(report.evidencePaths.browserLog,chunk));
   browser=await puppeteer.connect({browserWSEndpoint:endpoint,protocolTimeout:0});report.browserVersion=await browser.version();
-  const page=await browser.newPage();await page.setViewport({width:1280,height:960});await page.goto(report.url,{timeout:0});
+  const page=await browser.newPage();await page.setViewport({width:1280,height:960});
+  if(foregroundRoot){
+    report.foreground.pageErrors=[];report.foreground.captures={};
+    page.on('console',message=>fs.appendFileSync(report.evidencePaths.foregroundConsole,JSON.stringify({at:new Date().toISOString(),type:message.type(),text:message.text()})+'\n'));
+    page.on('pageerror',error=>report.foreground.pageErrors.push({message:error.message,stack:error.stack}));
+    let rejectStartup;const startupFailure=new Promise((_resolve,reject)=>{rejectStartup=reject;});
+    const failStartup=error=>rejectStartup(Error('actual foreground startup failed: '+error.message));
+    const failConsole=message=>{if(message.type()==='error'&&/^(Volume cockpit initialization failed:|Volume route initialization failed:|initScene failed:)/.test(message.text()))failStartup(Error(message.text()));};
+    page.on('pageerror',failStartup);page.on('console',failConsole);
+    report.phase='actual-foreground-navigation';await persist();
+    try{
+      const response=await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'networkidle0',timeout:0}),startupFailure]);
+      if(!response?.ok())throw Error('actual foreground navigation refused: '+response?.status());
+      await Promise.race([page.waitForFunction(()=>window.__kaminosCompositionSetup?.status==='mounted'||window.__kaminosCompositionSetup?.status==='failed'||window.__kaminosVolumePrototype?.debugState().error,{timeout:0,polling:100}),startupFailure]);
+      const mounted=await page.evaluate(()=>({setup:window.__kaminosCompositionSetup,state:window.__kaminosVolumePrototype?.debugState()}));
+      report.foreground.mount=mounted;
+      if(mounted.setup?.status!=='mounted'||!mounted.state?.active||mounted.state.error)throw Error('actual ordinary foreground failed to mount: '+JSON.stringify(mounted.setup));
+      await Promise.race([page.waitForFunction(frames=>window.__kaminosVolumePrototype.debugState().frameCount>=frames||window.__kaminosVolumePrototype.debugState().error,{timeout:0,polling:100},report.requested.foreground.warmupFrames),startupFailure]);
+    }finally{page.off('pageerror',failStartup);page.off('console',failConsole);}
+    report.foreground.before=await page.evaluate(()=>window.__miniResidentForeground.snapshot());
+    if(report.foreground.before.state.error||report.foreground.before.state.controls?.emitterSourceDepth!==report.requested.foreground.sourceDepth)throw Error('actual foreground warmup error/effective controls mismatch');
+    report.foreground.warmup={requestedFrames:report.requested.foreground.warmupFrames,completedFrameCount:report.foreground.before.state.frameCount};
+    await page.screenshot({path:report.evidencePaths.foregroundBefore,fromSurface:false});
+    const pixels=fs.readFileSync(report.evidencePaths.foregroundBefore);report.foreground.captures.before={path:report.evidencePaths.foregroundBefore,bytes:pixels.length,sha256:digest(pixels),inspection:'not-yet-inspected'};
+    await persist();
+  }else await page.goto(report.url,{timeout:0});
   report.phase='native-dino';await persist();
   Object.assign(report,await page.evaluate(async config=>{
     const {createLoaderMemoryBudget,runResidentDino,runResidentTwoStream,disposeResidentTwoStream,runResidentPostProcessor,TwoStreamBackbone,preprocessImage,
@@ -306,13 +383,26 @@ try{
     const observe=async phase=>{const response=await fetch('/phase',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(phase)});
       if(!response.ok)throw Error('fresh phase observation refused: '+await response.text());};
     const persistTensor=async(url,bytes)=>{const response=await fetch(url,{method:'POST',body:bytes});if(!response.ok)throw Error('complete tensor persistence failed: '+await response.text());};
-    const adapter=await navigator.gpu?.requestAdapter({powerPreference:'high-performance'});if(!adapter)throw Error('WebGPU adapter unavailable');
-    const info=adapter.info,backend={vendor:info.vendor,architecture:info.architecture,description:info.description,isFallbackAdapter:info.isFallbackAdapter??adapter.isFallbackAdapter};
-    const backendResponse=await fetch('/backend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(backend)});
-    if(!backendResponse.ok)throw Error('native backend identity refused: '+await backendResponse.text());
-    if(backend.isFallbackAdapter!==false||!/apple/i.test(backend.vendor))throw Error('actual nonfallback Apple adapter required');
-    if(config.requested.throughFullModel)await observe({name:'device-acquisition',tensors:[],workGpuBytes:0,rangeCpuBytes:0,requiredBytes:0});
-    const budget=createLoaderMemoryBudget(config.requested),device=await budget.requestOwnedDevice(adapter,{requiredLimits:{maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
+    const foreground=config.requested.foreground?window.__miniResidentForeground:null;
+    if(config.requested.foreground&&!foreground)throw Error('actual resident foreground composition missing; no standalone fallback');
+    let budget,device,backend,foregroundRun,foregroundFinish;
+    if(foreground){
+      ({budget,device,backend}=foreground);budget.assertDeviceAcquiredHere(device);
+      foregroundRun=await foreground.beginRun(config.runId);
+    }else{
+      const adapter=await navigator.gpu?.requestAdapter({powerPreference:'high-performance'});if(!adapter)throw Error('WebGPU adapter unavailable');
+      const info=adapter.info;backend={vendor:info.vendor,architecture:info.architecture,description:info.description,isFallbackAdapter:info.isFallbackAdapter??adapter.isFallbackAdapter};
+      const backendResponse=await fetch('/backend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(backend)});
+      if(!backendResponse.ok)throw Error('native backend identity refused: '+await backendResponse.text());
+      if(backend.isFallbackAdapter!==false||!/apple/i.test(backend.vendor))throw Error('actual nonfallback Apple adapter required');
+      if(config.requested.throughFullModel)await observe({name:'device-acquisition',tensors:[],workGpuBytes:0,rangeCpuBytes:0,requiredBytes:0});
+      budget=createLoaderMemoryBudget(config.requested);device=await budget.requestOwnedDevice(adapter,{requiredLimits:{maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
+    }
+    const foregroundOpportunities=foregroundRun?.foregroundOpportunities,withForeground=foregroundRun?.withForeground;
+    let artifactForegroundDuty=0;
+    const afterArtifactDuty=foregroundRun?duty=>foregroundOpportunities.serviceAtBoundary({invocationId:config.runId,
+      boundaryId:'resident-artifact-prefix',dutyId:'resident-artifact-'+(++artifactForegroundDuty),
+      phase:duty.name??duty.kind??'artifact-prefix',position:'before-encode'}):undefined;
     let imageLease,bitmap,staging,failure,failed=false,twoStream,postProcessor,fullArtifact,artifactHandle,decodedGlbImages,upstreamRetirement;
     const sourceGuard=scope=>config.requested.throughFullModel?phase=>observe({...phase,name:scope+'-source-'+phase.name}):undefined;
     device.pushErrorScope('validation');
@@ -331,6 +421,7 @@ try{
         imageLease=budget.reserveCpu(chw.byteLength+(condition.rgba?.byteLength??0),'complete-preprocessed-CHW-and-condition-RGBA');
       }
       const dino=await runResidentDino({device,memoryBudget:budget,imageChw:chw,weightsUrl:'/canonical-weights.bin',
+        foregroundOpportunities,
         expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag,onBeforePhase:observe,
         onBeforeSourceIntake:sourceGuard('dino'),
         onProgress:p=>{document.querySelector('#status').textContent='DINO '+(p.completedItems??0)+'/24 blocks';},
@@ -341,6 +432,7 @@ try{
           if(config.requested.throughBackbone){
             const backbone=new TwoStreamBackbone(device);backbone.init();
             twoStream=await runResidentTwoStream({device,backbone,memoryBudget:budget,weightsUrl:'/canonical-weights.bin',
+              foregroundOpportunities,
               expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag,
               onBeforeSourceIntake:sourceGuard('two-stream'),
               imageTokensBuf:result.tokensBuf,N_img:result.N,onBeforePhase:observe,attentionRowsPerDuty:config.requested.attentionRowsPerDuty,
@@ -373,6 +465,7 @@ try{
                 staging.destroy();staging=null;
                 if(config.requested.throughPostProcessor){
                   postProcessor=await runResidentPostProcessor({
+                    foregroundOpportunities,
                     device,postProcessor:{device},memoryBudget:budget,
                     weightsUrl:'/canonical-weights.bin',expectedWeightBytes:config.source.byteLength,
                     expectedSourceETag:config.source.etag,triplanesBuf:output.buffer,
@@ -404,6 +497,7 @@ try{
                           disposition:'returned',authority:'logical owned retirement only; next fresh kernel sample governs physical margin'};
                         artifactHandle={device};
                         fullArtifact=await runResidentArtifact({device,handle:artifactHandle,memoryBudget:budget,
+                          withForeground,onAfterDuty:afterArtifactDuty,
                           triplanesBuf:result.buffer,conditionRgba:condition.rgba,weightsUrl:'/canonical-weights.bin',
                           expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag,
                           onBeforePhase:observe,onBeforeDuty:observe,
@@ -452,18 +546,34 @@ try{
         'Actual complete canonical model and textured GLB exported; foreground composition not yet witnessed':config.requested.throughPostProcessor?
         'Complete DINO/backbone/postprocessor; mesh/material/GLB not yet run':config.requested.throughBackbone?
         'All24 DINO blocks and complete four-block backbone completed; full mesh/material/GLB not yet run':'All24 DINO blocks completed; full SF3D not yet run';
-      return {backend,dino,twoStream,postProcessor,fullArtifact,decodedGlbImages,upstreamRetirement,inputConsumed,validationError:null,budget:budget.snapshot()};
+      if(foreground)foregroundFinish=await foreground.finishRun();
+      return {backend,dino,twoStream,postProcessor,fullArtifact,decodedGlbImages,upstreamRetirement,inputConsumed,validationError:null,budget:budget.snapshot(),foregroundRun:foregroundFinish};
     }catch(error){failed=true;failure=error;throw error;}
     finally{
       bitmap?.close();
-      try{if(artifactHandle)await disposeResidentArtifact(artifactHandle);await device.queue.onSubmittedWorkDone();staging?.destroy();imageLease?.release();device.destroy();budget.restore();}
+      try{
+        // Failed foreground settlement quarantines model resources. The outer
+        // diagnostic still owns and stops the exact browser on that failure.
+        if(foreground&&!foregroundFinish)foregroundFinish=await foreground.finishRun();
+        if(artifactHandle)await disposeResidentArtifact(artifactHandle);await device.queue.onSubmittedWorkDone();staging?.destroy();imageLease?.release();
+        // A living host still owns this device and all its allocations. Actual
+        // owned-browser exit, not false logical-zero credit, retires that host.
+        if(!foreground){device.destroy();budget.restore();}
+      }
       catch(error){throw failed?new AggregateError([failure,error],'native DINO failed and cleanup failed',{cause:failure}):error;}
     }
-  },{requested:report.requested,source:report.canonicalSource,input:report.inputArtifact,
+  },{runId:report.runId,requested:report.requested,source:report.canonicalSource,input:report.inputArtifact,
     allocatingDutyIndices:groups?.flatMap(g=>g.duties).filter(d=>twoStreamPhaseDemand({name:'two-stream-duty',duty:d,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage}).requiredBytes>0).map(d=>d.dutyIndex)??[]}));
   if(throughBackbone)report.twoStreamOutput=inspectTwoStreamOutput(report.evidencePaths.twoStreamOutput);
   if(throughPostProcessor)report.postProcessorOutput=postWitness.inspectPostProcessorOutput(report.evidencePaths.postProcessorOutput);
   if(throughFullModel)Object.assign(report.glbOutput,inspectCompleteGlb(report.evidencePaths.glb));
+  if(foregroundRoot){
+    report.phase='actual-foreground-post-model-capture';await persist();
+    report.foreground.after=await page.evaluate(()=>window.__miniResidentForeground.snapshot());
+    await page.screenshot({path:report.evidencePaths.foregroundAfter,fromSurface:false});
+    const pixels=fs.readFileSync(report.evidencePaths.foregroundAfter);report.foreground.captures.after={path:report.evidencePaths.foregroundAfter,bytes:pixels.length,sha256:digest(pixels),inspection:'not-yet-inspected'};
+    if(report.foreground.pageErrors.length)throw Error('actual foreground browser exception: '+report.foreground.pageErrors[0].message);
+  }
   report.output=inspectDinoOutput(report.evidencePaths.output);report.phase='complete';report.status='passed';
 }catch(error){report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};}
 finally{
@@ -472,10 +582,17 @@ finally{
   catch(error){report.cleanup.hostObserverError=error.message;report.status='failed';}
   try{if(monitor)report.processObservation=await monitor.stop();}catch(error){report.cleanup.observerError=error.message;report.status='failed';}
   try{report.cleanup.browser=child?await stopOwnedBrowser(child):{status:'not-started',exitObserved:true};}catch(error){report.cleanup.browser={error:error.message};report.status='failed';}
+  if(foregroundRoot&&report.cleanup.browser?.exitObserved&&report.ownedBrowserPid){
+    report.foreground.deviceRetirement={route:'exact-owned-browser-exit',ownedPid:report.ownedBrowserPid,
+      authority:'actual host process lifetime closed; no claim that live API ledgers were zero or that physical memory has been reclaimed'};
+  }
+  try{if(foregroundService)report.cleanup.foregroundService=await foregroundService.close();}catch(error){report.cleanup.foregroundServiceError=error.message;report.status='failed';}
   try{if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';}catch(error){report.cleanup.serverError=error.message;report.status='failed';}
   closeCanonicalSource(report,source);
   try{if(profile&&report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});}catch(error){report.cleanup.profileError=error.message;report.status='failed';}
-  report.verdict=throughFullModel?(acceptNativeArtifact?acceptNativeArtifact(report,tensorTable):{ok:false,errors:['full model witness unavailable before graph import completed']}):throughPostProcessor?(postWitness?postWitness.acceptNativeResidentPostProcessor(report):{ok:false,errors:['postprocessor witness unavailable before arguments completed']}):throughBackbone?acceptResidentTwoStream(report):acceptResidentDino(report);if(!report.verdict.ok)report.status='failed';report.terminalAt=new Date().toISOString();await persist();
+  report.verdict=throughFullModel?(acceptNativeArtifact?acceptNativeArtifact(report,tensorTable):{ok:false,errors:['full model witness unavailable before graph import completed']}):throughPostProcessor?(postWitness?postWitness.acceptNativeResidentPostProcessor(report):{ok:false,errors:['postprocessor witness unavailable before arguments completed']}):throughBackbone?acceptResidentTwoStream(report):acceptResidentDino(report);
+  if(foregroundRoot){report.foreground??={};const foregroundVerdict=acceptResidentForeground(report);report.foreground.verdict=foregroundVerdict;report.verdict.errors.push(...foregroundVerdict.errors);report.verdict.ok=report.verdict.ok&&foregroundVerdict.ok;}
+  if(!report.verdict.ok)report.status='failed';report.terminalAt=new Date().toISOString();await persist();
   console.log(JSON.stringify({status:report.status,phase:report.phase,report:reportPath,errors:report.verdict.errors}));
   if(report.status!=='passed')process.exitCode=1;
 }

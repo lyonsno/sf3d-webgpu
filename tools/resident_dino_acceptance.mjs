@@ -74,7 +74,12 @@ export function acceptResidentDino(report){
     'fresh effective-host phase observations incomplete');
   require(observations?.map(o=>o.phase).join(',')===['preprocess','camera',...Array.from({length:24},(_,i)=>'dino-block-'+i),'dino-output'].join(','),'phase order or all24 blocks missing');
   require(report.validationError===null&&!report.memorySafety,'native validation or original process safety failure');
-  require(report.budget?.cpu.liveBytes===0&&report.budget?.gpu.liveBytes===0,'unretired owned resources');
+  require((report.budget?.cpu.liveBytes===0&&report.budget?.gpu.liveBytes===0)||
+    (report.requested?.foreground&&report.requested.throughFullModel===true&&report.foregroundRun?.status==='finished'&&
+      report.foregroundRun.sameDevice===true&&report.foregroundRun.sameQueue===true&&
+      report.foreground?.deviceRetirement?.route==='exact-owned-browser-exit'&&report.ownedBrowserPid>0&&
+      report.foreground.deviceRetirement.ownedPid===report.ownedBrowserPid&&report.cleanup?.browser?.exitObserved===true&&
+      report.cleanup.browser.ownedPid===report.ownedBrowserPid),'unretired owned resources');
   require(report.processObservation?.status==='observed'&&report.processObservation.coverage==='sampled-owned-process-tree'&&
     report.processObservation.sampledPeakAggregatePhysicalFootprintBytes<=report.requested?.processBudgetBytes,'terminal process guard missing');
   require(report.cleanup?.browser?.exitObserved&&report.cleanup?.server==='closed','exact owned cleanup missing');
