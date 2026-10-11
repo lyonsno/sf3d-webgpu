@@ -16,6 +16,7 @@ import {observeMacMemory,evaluatePhaseHostHeadroom,startHostPressureGuard,AVAILA
 import {startProcessMemory} from './process_memory_guard.mjs';
 import {memoryStopAction,stopOwnedBrowser,ownedBrowserArguments} from './owned_browser_stop.mjs';
 import {writeJsonReportAtomic} from './json_report_atomic.mjs';
+import {createNativePhaseEvidenceWriter} from './native_phase_journal.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
@@ -38,13 +39,14 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     reuseDeadTriplaneStorage:process.argv.includes('--reuse-dead-triplane-storage'),
     reuseAttentionResidualStorage:process.argv.includes('--reuse-attention-residual-storage'),
     rematerializeTokenizerEmbedding:process.argv.includes('--rematerialize-tokenizer-embedding'),
+    appendPhaseJournal:process.argv.includes('--append-phase-journal'),
     hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
     cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
   allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V, caller-declared complete-query score scratch and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
   evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',twoStreamOutput:reportPath+'.triplane.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
-const persist=()=>writeJsonReportAtomic(reportPath,report);
+const persist=report.requested.appendPhaseJournal?createNativePhaseEvidenceWriter({reportPath,report}):()=>writeJsonReportAtomic(reportPath,report);
 let source,monitor,hostMonitor,child,browser,server,profile,safetyStop;
 const stopForSafety=safety=>{
   if(!safetyStop)safetyStop=memoryStopAction({child:()=>child,report,persist})(safety);
@@ -53,6 +55,7 @@ const stopForSafety=safety=>{
 try{
   await persist();
   if(occupied)throw Error('requested evidence paths already exist; retained previous evidence without reuse or overwrite');
+  if(report.requested.appendPhaseJournal&&!throughFullModel)throw Error('append-phase journal requires the explicit full-model diagnostic');
   if(throughFullModel){
     report.claim='complete canonical native model and textured GLB; no reference-parity, opaque physical-capacity or living-foreground claim';
     Object.assign(report.evidencePaths,{glb:reportPath+'.model.glb',mesh:reportPath+'.mesh.f32',faces:reportPath+'.faces.u32'});
