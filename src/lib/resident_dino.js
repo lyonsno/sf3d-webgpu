@@ -22,7 +22,13 @@ export function selectDinoPhase(template,{blockStart,blockEnd,isFirst,isLast}){
  * withResult consumes the complete GPU output before this adapter retires it.
  */
 export async function runResidentDino({device,memoryBudget,weightsUrl,expectedWeightBytes,expectedSourceETag,
-  imageChw,onBeforePhase,onProgress,withResult,foregroundOpportunities=null,onBeforeSourceIntake}){
+  imageChw,onBeforePhase,onProgress,withResult,foregroundOpportunities=null,onBeforeSourceIntake,
+  streamFp16Uploads=true,onAfterWeightsLoaded,onDiagnosticCheckpoint}){
+  if(typeof streamFp16Uploads!=='boolean')throw TypeError('exact boolean DINO FP16 upload mode required');
+  if(onAfterWeightsLoaded!==undefined&&typeof onAfterWeightsLoaded!=='function')
+    throw TypeError('weight observation callback must be a function');
+  if(onDiagnosticCheckpoint!==undefined&&typeof onDiagnosticCheckpoint!=='function')
+    throw TypeError('diagnostic checkpoint callback must be a function');
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
   if(!(imageChw instanceof Float32Array)||imageChw.length!==3*512*512||imageChw.some(v=>!Number.isFinite(v)))
@@ -30,9 +36,14 @@ export async function runResidentDino({device,memoryBudget,weightsUrl,expectedWe
   if(typeof onBeforePhase!=='function'||typeof withResult!=='function')throw TypeError('fresh phase observer and complete result consumer required');
   let source,tokenizer,imageBuf,cameraInputBuf,cameraEmbedBuf,result,cameraLease,failure,failed=false;
   const phaseDescriptions=[];
+  const observedCheckpoints=new Set();
+  const observe=async(tensors)=>{
+    if(onDiagnosticCheckpoint&&tensors.length)await onDiagnosticCheckpoint(Object.freeze({
+      tensors:Object.freeze(tensors.map(tensor=>Object.freeze(tensor)))}));
+  };
   try{
     source=await createWeightPhaseSource(device,weightsUrl,{memoryBudget,expectedWeightBytes,expectedSourceETag,onBeforeSourceIntake,
-      streamFp16Uploads:true});
+      streamFp16Uploads,onAfterWeightsLoaded});
     const before=async(name,selection,details={})=>{
       const descriptor={name,tensors:source.describe(selection),...details};
       phaseDescriptions.push(descriptor);await onBeforePhase(descriptor);
@@ -48,12 +59,28 @@ export async function runResidentDino({device,memoryBudget,weightsUrl,expectedWe
       tokenizer._dispatchLinear(encoder,cameraInputBuf,cameraEmbedBuf,weights.weight,weights.bias,1,25,768);
       device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();
     });
+    if(onDiagnosticCheckpoint)await observe([{name:'cameraEmbed',buffer:cameraEmbedBuf,shape:Object.freeze([768])}]);
     const encoded=await runCooperativeDino({device,tokenizer,imageBuf,cameraEmbedBuf,weights:source.template.imageTokenizer,
       numBlocks:24,chunkBlocks:1,schedulingMode:'cooperative',foregroundOpportunities,onProgress,retireIntermediateBuffers:true,
       async withChunkWeights(boundary,work){
         const selection=selectDinoPhase(source.template.imageTokenizer,boundary);
         await before('dino-block-'+boundary.blockStart,selection,boundary);
-        return source.withWeights(selection,work);
+        return source.withWeights(selection,async weights=>{
+          const value=await work(weights);
+          // The actual cooperative driver has drained this chunk. Existing
+          // diagnostic copies retire in encodeCooperative's finally, so consume
+          // them here without allocating duplicates or transferring ownership.
+          if(onDiagnosticCheckpoint){
+            const tensors=[];
+            for(const [name,buffer]of Object.entries(tokenizer._dinov2Diag??{})){
+              if(observedCheckpoints.has(name))continue;
+              tensors.push({name,buffer,shape:Object.freeze([1297,1024])});
+              observedCheckpoints.add(name);
+            }
+            await observe(tensors);
+          }
+          return value;
+        });
       },
     });
     result=encoded.result;

@@ -21,6 +21,7 @@ import {startForegroundService} from './foreground_service.mjs';
 import {validateResidentForegroundRequest,prepareResidentForeground,acceptResidentForeground} from './resident_foreground_service.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
+import {createNativeDinoObservation} from './native_dino_observation.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
 const throughPostProcessor=process.argv.includes('--through-postprocessor');
 const throughFullModel=process.argv.includes('--through-full-model');
@@ -30,7 +31,7 @@ const arg=name=>{const i=process.argv.indexOf(name);return i<0?null:process.argv
 const root=arg('--repo-root')?path.resolve(arg('--repo-root')):null;
 const foregroundRoot=arg('--foreground-repo-root')?path.resolve(arg('--foreground-repo-root')):null;
 const requestedReportPath=path.resolve(arg('--report')??path.join(os.tmpdir(),'sf3d-dino-'+randomUUID()+'.json'));
-const occupied=['','.input.f32','.output.f32','.triplane.f32','.postprocessor.f32','.model.glb','.mesh.f32','.faces.u32','.foreground-before.png','.foreground-after.png'].some(s=>fs.existsSync(requestedReportPath+s));
+const occupied=['','.input.f32','.output.f32','.triplane.f32','.postprocessor.f32','.model.glb','.mesh.f32','.faces.u32','.foreground-before.png','.foreground-after.png','.dino-observations'].some(s=>fs.existsSync(requestedReportPath+s));
 const reportPath=occupied?requestedReportPath+'.refused-'+randomUUID()+'.json':requestedReportPath;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':throughPostProcessor?'sf3d.native-resident-postprocessor.v0':throughBackbone?'sf3d.native-resident-backbone.v0':'sf3d.native-resident-dino.v0',status:'running',phase:'arguments',runId:randomUUID(),rootPid:process.pid,
@@ -45,6 +46,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     rematerializeTokenizerEmbedding:process.argv.includes('--rematerialize-tokenizer-embedding'),
     reuseTokenizerSetupStorage:process.argv.includes('--reuse-tokenizer-setup-storage'),
     appendPhaseJournal:process.argv.includes('--append-phase-journal'),
+    observeDino:process.argv.includes('--observe-dino'),
     hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
     foreground:foregroundRoot?{repoRoot:foregroundRoot,revision:arg('--foreground-revision'),grid:Number(arg('--foreground-grid')),
       sourceDepth:Number(arg('--foreground-source-depth')),rendererCpuBytes:Number(arg('--foreground-cpu-bytes')),warmupFrames:Number(arg('--foreground-warmup-frames'))}:null,
@@ -54,7 +56,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 const persist=report.requested.appendPhaseJournal?createNativePhaseEvidenceWriter({reportPath,report}):()=>writeJsonReportAtomic(reportPath,report);
-let source,monitor,hostMonitor,child,browser,server,profile,safetyStop,foregroundService,foregroundChild,foregroundModule,displayChild;
+let source,monitor,hostMonitor,child,browser,server,profile,safetyStop,foregroundService,foregroundChild,foregroundModule,displayChild,dinoObservation;
 const stopForSafety=safety=>{
   if(!safetyStop)safetyStop=memoryStopAction({child:()=>child,report,persist})(safety);
   return safetyStop;
@@ -62,6 +64,10 @@ const stopForSafety=safety=>{
 try{
   await persist();
   if(occupied)throw Error('requested evidence paths already exist; retained previous evidence without reuse or overwrite');
+  if(report.requested.observeDino&&(!throughFullModel||!throughBackbone||!throughPostProcessor||
+    !report.requested.appendPhaseJournal||report.requested.processBudgetBytes!==2147483648||
+    report.requested.hostHeadroomPolicy!==AVAILABLE_MEMORY_DIAGNOSTIC_POLICY))
+    throw Error('DINO observation requires unchanged explicit full-model and available-memory/process/journal guards');
   if(report.requested.appendPhaseJournal&&!throughFullModel)throw Error('append-phase journal requires the explicit full-model diagnostic');
   validateResidentForegroundRequest(report.requested);
   if(throughFullModel){
@@ -111,6 +117,11 @@ try{
   if(digest(header)!==source.receipt.headerSha256)throw Error('header source identity drift');
   const table=tensorTable=parseFlatWeightHeader(header.buffer.slice(header.byteOffset,header.byteOffset+header.length),source.receipt.byteLength).tensors;
   if(throughFullModel)artifactContract=createArtifactPhaseContract({table,headerBytes:source.receipt.headerBytes});
+  if(report.requested.observeDino){
+    dinoObservation=createNativeDinoObservation({table,sourceETag:source.receipt.etag,outputDir:reportPath+'.dino-observations'});
+    report.dinoDiagnostics={scope:'all536 camera/DINO GPU weights before compute; existing camera/patch/block0/1/2/23 features; full model unchanged',
+      status:'incomplete',observations:dinoObservation.observations};
+  }
   const image=fs.readFileSync(report.requested.input);
   if(digest(image)!==report.requested.inputSha256||image.toString('ascii',12,16)!=='IHDR')throw Error('canonical PNG input identity required');
   report.inputArtifact={sha256:digest(image),byteLength:image.length,width:image.readUInt32BE(16),height:image.readUInt32BE(20)};
@@ -260,6 +271,25 @@ try{
         if(throughFullModel)report.expectedPhaseOrder=[...order,...artifactContract.received.map(r=>r.name)];
         await persist();
         res.writeHead(observation.verdict==='admitted'?200:409,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(observation));return;
+      }
+      if(name==='/dino-observation'&&req.method==='POST'){
+        if(!dinoObservation||report.memorySafety||report.backend?.isFallbackAdapter!==false)
+          throw Error('actual guarded diagnostic route unavailable');
+        const requestedAt=Date.now(),request=JSON.parse((await readBody(req)).toString());
+        const admitted=await dinoObservation.admit(request,report.phaseObservations.at(-1),
+          (phase,demand)=>freshObservation(phase,demand,requestedAt));
+        await persist();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(admitted));return;
+      }
+      if(name==='/dino-observation-tensor'&&req.method==='POST'){
+        if(!dinoObservation||report.memorySafety)throw Error('actual guarded diagnostic persistence unavailable');
+        const bytes=await readBody(req);
+        dinoObservation.persistTensor(Number(req.headers['x-observation-index']),Number(req.headers['x-tensor-index']),bytes);
+        await persist();res.writeHead(200).end();return;
+      }
+      if(name==='/dino-observation-complete'&&req.method==='POST'){
+        if(!dinoObservation||report.memorySafety)throw Error('actual guarded diagnostic unavailable');
+        dinoObservation.assertComplete();report.dinoDiagnostics.status='complete';
+        await persist();res.writeHead(200).end();return;
       }
       if(throughFullModel&&req.method==='POST'&&['/model.glb','/mesh.f32','/faces.u32'].includes(name)){
         const c=artifactContract.context,bytes=await readBody(req);
@@ -424,6 +454,34 @@ try{
       phase:duty.name??duty.kind??'artifact-prefix',position:'before-encode'}):undefined;
     let imageLease,bitmap,staging,failure,failed=false,twoStream,postProcessor,fullArtifact,artifactHandle,decodedGlbImages,upstreamRetirement;
     const sourceGuard=scope=>config.requested.throughFullModel?phase=>observe({...phase,name:scope+'-source-'+phase.name}):undefined;
+    const diagnostic=async(kind,observation)=>{
+      const tensors=observation.tensors.map(({name,shape,size,dtype,offset,value,buffer})=>({
+        name,shape,size,dtype,offset,byteLength:(value??buffer).size}));
+      const response=await fetch('/dino-observation',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({kind,sourceETag:observation.sourceETag,tensors})});
+      if(!response.ok)throw Error('fresh diagnostic allocation refused: '+await response.text());
+      const admitted=await response.json();
+      const lease=budget.reserveCpu(admitted.demand.rangeCpuBytes,'whole-tensor-diagnostic-persistence');
+      let readback,readbackFailure,readbackFailed=false;
+      try{
+        for(let i=0;i<observation.tensors.length;i++){
+          const tensor=observation.tensors[i],buffer=tensor.value??tensor.buffer;
+          readback=device.createBuffer({size:buffer.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ,label:'dino-diagnostic-'+tensor.name});
+          const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(buffer,0,readback,0,buffer.size);
+          device.queue.submit([encoder.finish()]);await readback.mapAsync(GPUMapMode.READ);
+          const persisted=await fetch('/dino-observation-tensor',{method:'POST',
+            headers:{'X-Observation-Index':String(admitted.index),'X-Tensor-Index':String(i)},body:new Uint8Array(readback.getMappedRange())});
+          if(!persisted.ok)throw Error('complete diagnostic persistence failed: '+await persisted.text());
+          readback.unmap();readback.destroy();readback=null;
+        }
+      }catch(error){readbackFailed=true;readbackFailure=error;throw error;}
+      finally{
+        // A rejected queue drain cannot authorize destroying possibly-live data.
+        try{await device.queue.onSubmittedWorkDone();readback?.destroy();lease.release();}
+        catch(error){throw readbackFailed?new AggregateError([readbackFailure,error],
+          'DINO diagnostic failed and readback cleanup is unresolved',{cause:readbackFailure}):error;}
+      }
+    };
     device.pushErrorScope('validation');
     try{
       await observe({name:'preprocess',tensors:[],width:config.input.width,height:config.input.height});
@@ -443,11 +501,17 @@ try{
         foregroundOpportunities,
         expectedWeightBytes:config.source.byteLength,expectedSourceETag:config.source.etag,onBeforePhase:observe,
         onBeforeSourceIntake:sourceGuard('dino'),
+        onAfterWeightsLoaded:config.requested.observeDino?observation=>diagnostic('weights',observation):undefined,
+        onDiagnosticCheckpoint:config.requested.observeDino?observation=>diagnostic('checkpoint',observation):undefined,
         onProgress:p=>{document.querySelector('#status').textContent='DINO '+(p.completedItems??0)+'/24 blocks';},
         async withResult(result){
           staging=device.createBuffer({size:result.tokensBuf.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ,label:'complete-dino-readback'});
           const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(result.tokensBuf,0,staging,0,result.tokensBuf.size);device.queue.submit([encoder.finish()]);
           await staging.mapAsync(GPUMapMode.READ);await persistTensor('/output.f32',new Uint8Array(staging.getMappedRange()));staging.unmap();staging.destroy();staging=null;
+          if(config.requested.observeDino){
+            const completed=await fetch('/dino-observation-complete',{method:'POST'});
+            if(!completed.ok)throw Error('complete DINO diagnostics missing: '+await completed.text());
+          }
           if(config.requested.throughBackbone){
             const backbone=new TwoStreamBackbone(device);backbone.init();
             twoStream=await runResidentTwoStream({device,backbone,memoryBudget:budget,weightsUrl:'/canonical-weights.bin',

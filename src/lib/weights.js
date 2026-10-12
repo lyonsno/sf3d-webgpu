@@ -693,6 +693,9 @@ async function loadRangeWeights(device,url,onProgress,options){
 export async function createWeightPhaseSource(device,url,options={}){
   const streamFp16Uploads=options.streamFp16Uploads===undefined?false:options.streamFp16Uploads;
   if(typeof streamFp16Uploads!=='boolean')throw TypeError('explicit boolean phase FP16 upload mode required');
+  const onAfterWeightsLoaded=options.onAfterWeightsLoaded;
+  if(onAfterWeightsLoaded!==undefined&&typeof onAfterWeightsLoaded!=='function')
+    throw TypeError('weight observation callback must be a function');
   if(!isLoaderMemoryBudget(options.memoryBudget))throw TypeError('authenticated loader budget required');
   options.memoryBudget.assertDevice(device);
   const source=await createFlatTensorRangeSource(url,options),references=new WeakMap();
@@ -736,6 +739,15 @@ export async function createWeightPhaseSource(device,url,options={}){
             try{buffers.set(name,extractTensorCPU(unit.bytes.buffer,{...source.tensors.get(name),offset:0},owner.context));}
             finally{unit.release();unit.bytes=null;}
           }else buffers.set(name,(await uploadRangeTensor(device,source,name,owner,{streamFp16Uploads})).buffer);
+        }
+        // Opt-in borrowed observation, while the original phase owns every
+        // buffer/lease. The observer must complete before compute or retirement.
+        if(onAfterWeightsLoaded){
+          if(owner.ownedBuffers.size)await device.queue.onSubmittedWorkDone();
+          phase.status='observing-loaded-weights';
+          await onAfterWeightsLoaded(Object.freeze({storageKind,sourceETag:source.report.sourceETag,
+            tensors:Object.freeze([...buffers].map(([name,value])=>Object.freeze({
+              name,value,...source.tensors.get(name)})))}));
         }
         phase.status='computing';value=await work(select(pinned,new Set(),buffers));
       }catch(failure){failed=true;error=failure;phase.error=String(failure?.message??failure);}
