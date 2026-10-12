@@ -5,6 +5,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {weightFixture} from './fixtures/weight_resource_fixture.mjs';
 import {parseFlatWeightHeader} from '../src/lib/flat_tensor_ranges.js';
+import {createHash} from 'node:crypto';
 const root=path.resolve(new URL('..',import.meta.url).pathname);
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sf3d-dino-observation-contract-'));
 const reportPath=path.join(dir,'report.json');
@@ -27,7 +28,7 @@ const callbackFixture=({transportFailure=false,drainFailure=false})=>{
     createBuffer(){allocations++;return {async mapAsync(){},getMappedRange:()=>new ArrayBuffer(4),unmap(){},destroy(){destroyed++;}};},
     createCommandEncoder:()=>({copyBufferToBuffer(){},finish:()=>({})})};
   const budget={reserveCpu(){return {release(){released++;}};}};
-  const fetch=async()=>{if(requests++&&transportFailure)throw 0;return {ok:true,json:async()=>({index:0,demand:{rangeCpuBytes:16}})};};
+  const fetch=async url=>{requests++;if(url==='/dino-observation-tensor'&&transportFailure)throw 0;return {ok:true,json:async()=>({index:0,demand:{rangeCpuBytes:16,workGpuBytes:4}})};};
   const callback=new Function('device','budget','fetch','GPUBufferUsage','GPUMapMode','return ('+callbackSource+')')(
     device,budget,fetch,{COPY_DST:8,MAP_READ:1},{READ:1});
   return {callback,counters:()=>({destroyed,released,allocations})};
@@ -43,16 +44,16 @@ assert.deepEqual(settled.counters(),{destroyed:1,released:1,allocations:1});
 const table=new Map([['camera_embedder.linear.weight',{shape:[1],size:2,dtype:1,offset:0}]]);
 const phase={phase:'camera',verdict:'admitted',descriptor:{name:'camera',tensors:[{name:'camera_embedder.linear.weight',...table.values().next().value}]}};
 const request={kind:'weights',sourceETag:'"source"',tensors:[{name:'camera_embedder.linear.weight',...table.values().next().value,byteLength:4}]};
-const create=leaf=>createNativeDinoObservation({table,sourceETag:'"source"',outputDir:path.join(dir,leaf)});
+const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+const bytes=Buffer.alloc(4);bytes.writeFloatLE(1);
+const create=leaf=>createNativeDinoObservation({table,sourceETag:'"source"',outputDir:path.join(dir,leaf),
+  expectedWeightHashes:new Map([['camera_embedder.linear.weight',sha(bytes)]])});
 const admitted=async(_p,d)=>({verdict:'admitted',demand:d});
 const c=create('success');const a=await c.admit(request,phase,admitted);
 assert.equal(a.index,0);assert.equal(a.demand.requiredBytes,20);
 assert.equal(a.demand.workGpuBytes,4);assert.equal(a.demand.rangeCpuBytes,16);
-assert.throws(()=>c.persistTensor(0,0,Buffer.alloc(0)),/partial/);
-const bytes=Buffer.alloc(4);bytes.writeFloatLE(1);
-c.persistTensor(0,0,bytes);assert.equal(c.observations[0].status,'complete');
+await c.admitTensor(0,0,admitted);await c.persistTensor(0,0,bytes);assert.equal(c.observations[0].status,'complete');
 assert.equal(fs.readFileSync(c.observations[0].outputs[0].path).length,4);
-assert.throws(()=>c.persistTensor(0,0,bytes),/active|duplicate/);
 await assert.rejects(c.admit(request,phase,admitted),/kind|checkpoint/);
 const checkpoint={kind:'checkpoint',tensors:[{name:'cameraEmbed',shape:[768],byteLength:3072}]};
 await c.admit(checkpoint,phase,admitted);
@@ -65,13 +66,14 @@ for(const mutation of [r=>r.sourceETag='"wrong"',r=>r.tensors=[],r=>r.tensors[0]
   assert.equal(observed,false);
 }
 const refused=create('refused');await assert.rejects(refused.admit(request,phase,async()=>({verdict:'refused'})),/refused/);
-assert.throws(()=>refused.persistTensor(0,0,bytes),/admitted/);
+await assert.rejects(refused.persistTensor(0,0,bytes),/admitted/);
 await assert.rejects(create('wrong-phase').admit(request,{...phase,phase:'dino-block-0'},admitted),/phase/);
 await assert.rejects(create('wrong-route').admit(request,{...phase,verdict:'refused'},admitted),/phase/);
 assert.throws(()=>c.assertComplete(),/incomplete/);
 const fullFixture=weightFixture(),headerBytes=new DataView(fullFixture.bytes.buffer).getUint32(12,true);
 const fullTable=parseFlatWeightHeader(fullFixture.bytes.buffer.slice(0,headerBytes),fullFixture.bytes.length).tensors;
-const full=createNativeDinoObservation({table:fullTable,sourceETag:'"source"',outputDir:path.join(dir,'full')});
+const full=createNativeDinoObservation({table:fullTable,sourceETag:'"source"',outputDir:path.join(dir,'full'),
+  expectedWeightHashes:new Map([...fullTable].map(([name,t])=>[name,sha(Buffer.alloc(t.size*(t.dtype===1?2:1)))]))});
 for(const phaseName of ['camera',...Array.from({length:24},(_,i)=>'dino-block-'+i)]){
   const block=Number(phaseName.slice('dino-block-'.length));
   const selected=[...fullTable].filter(([name])=>phaseName==='camera'?name.startsWith('camera_embedder.linear.'):
@@ -81,20 +83,22 @@ for(const phaseName of ['camera',...Array.from({length:24},(_,i)=>'dino-block-'+
   const phase={phase:phaseName,verdict:'admitted',descriptor:{name:phaseName,tensors:selected}};
   const weights=selected.map(t=>({...t,byteLength:t.size*(t.dtype===1?2:1)}));
   const row=await full.admit({kind:'weights',sourceETag:'"source"',tensors:weights},phase,admitted);
-  weights.forEach((t,i)=>full.persistTensor(row.index,i,Buffer.alloc(t.byteLength)));
+  for(const [i,t]of weights.entries()){await full.admitTensor(row.index,i,admitted);await full.persistTensor(row.index,i,Buffer.alloc(t.byteLength));}
   if(phaseName==='camera'||block<3||block===23){
     const names=phaseName==='camera'?['cameraEmbed']:block===0?['patchEmbed','block0']:['block'+block];
     const tensors=names.map(name=>({name,shape:name==='cameraEmbed'?[768]:[1297,1024],byteLength:name==='cameraEmbed'?3072:1297*1024*4}));
     const checkpoint=await full.admit({kind:'checkpoint',tensors},phase,admitted);
-    tensors.forEach((t,i)=>full.persistTensor(checkpoint.index,i,Buffer.alloc(t.byteLength)));
+    for(const [i,t]of tensors.entries()){await full.admitTensor(checkpoint.index,i,admitted);await full.persistTensor(checkpoint.index,i,Buffer.alloc(t.byteLength));}
   }
 }
 full.assertComplete();assert.equal(full.observations.length,30);
 assert.equal(full.observations.filter(o=>o.kind==='weights').flatMap(o=>o.outputs).length,536);
 const nonfinite=create('nonfinite');await nonfinite.admit(request,phase,admitted);
-const nan=Buffer.alloc(4);nan.writeFloatLE(NaN);
-assert.throws(()=>nonfinite.persistTensor(0,0,nan),/nonfinite/);
-assert.equal(fs.statSync(nonfinite.observations[0].outputs[0].path).size,4,'raw failing bytes retained');
-assert.equal(nonfinite.observations[0].status,'failed');
+await nonfinite.admitTensor(0,0,admitted);await nonfinite.persistTensor(0,0,bytes);
+await nonfinite.admit(checkpoint,phase,admitted);await nonfinite.admitTensor(1,0,admitted);
+const nan=Buffer.alloc(3072);nan.writeFloatLE(NaN);
+await assert.rejects(nonfinite.persistTensor(1,0,nan),/nonfinite/);
+assert.equal(fs.statSync(nonfinite.observations[1].failedDeliveries[0].path).size,3072,'raw failing bytes retained');
+assert.equal(nonfinite.observations[1].status,'failed');
 assert.throws(()=>nonfinite.assertComplete(),/incomplete/);
 console.log('PASS opt-in full-route guard enforcement; diagnostic order/source/new-backing/partial/duplicate/refusal contracts, synthetic only');

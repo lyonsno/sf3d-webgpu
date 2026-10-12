@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
+import {createNativePhaseEvidenceWriter} from './native_phase_journal.mjs';
+import {replayParentPhaseJournal} from './parent_phase_journal.mjs';
+const parent=path.join(os.homedir(),'.local/state/sf3d');fs.mkdirSync(parent,{recursive:true});
+const dir=fs.mkdtempSync(path.join(parent,'test-dino-journal-')),output=path.join(dir,'report.json');
+let serialization=0;
+const row={index:0,toJSON(){serialization++;return {index:0,tensors:['all-retained']};}};
+const report={runId:'dino-journal-fixture',status:'running',phase:'before-dino',requested:{appendPhaseJournal:true,observeDino:true},
+  evidencePaths:{},phaseObservations:[],dinoDiagnostics:{status:'incomplete',observations:[row]}};
+const persist=createNativePhaseEvidenceWriter({reportPath:output,report});
+persist();persist();
+assert.equal(serialization,0,'hot checkpoint must not repeatedly serialize growing diagnostic history');
+assert.equal(JSON.parse(fs.readFileSync(output)).dinoDiagnostics.observations,undefined);
+persist.appendDiagnostic('dino-observation-admission',{index:0,actual:'uncapped'});
+persist.appendDiagnostic('dino-observation-tensor-receiving',{index:0,path:'actual-raw-received'});
+const replay=replayParentPhaseJournal(report.evidencePaths.phaseJournal);
+assert.equal(replay.events.filter(e=>e.type.startsWith('dino-observation-')).length,2);
+report.terminalAt='terminal';report.status='failed';persist();
+const terminal=JSON.parse(fs.readFileSync(output));
+assert.equal(terminal.dinoDiagnostics.observations.length,1);assert.equal(terminal.phaseJournal.diagnosticEventCount,2);
+assert.equal(replayParentPhaseJournal(report.evidencePaths.phaseJournal).hasPartialTail,false);
+assert.throws(()=>persist.appendDiagnostic('dino-observation-admission',{index:1}),/terminal/);
+console.log('PASS diagnostic hot-history omission with uncapped source-linked raw events and complete terminal consolidation');

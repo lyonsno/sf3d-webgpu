@@ -21,7 +21,7 @@ import {startForegroundService} from './foreground_service.mjs';
 import {validateResidentForegroundRequest,prepareResidentForeground,acceptResidentForeground} from './resident_foreground_service.mjs';
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
-import {createNativeDinoObservation} from './native_dino_observation.mjs';
+import {createNativeDinoObservation,loadDinoConversionHashes} from './native_dino_observation.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
 const throughPostProcessor=process.argv.includes('--through-postprocessor');
 const throughFullModel=process.argv.includes('--through-full-model');
@@ -47,6 +47,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     reuseTokenizerSetupStorage:process.argv.includes('--reuse-tokenizer-setup-storage'),
     appendPhaseJournal:process.argv.includes('--append-phase-journal'),
     observeDino:process.argv.includes('--observe-dino'),
+    dinoConversionReplay:arg('--dino-conversion-replay'),dinoConversionReplaySha256:arg('--dino-conversion-replay-sha256'),
     hostHeadroomPolicy:arg('--host-headroom-policy')??'raw-free-pages-v0',
     foreground:foregroundRoot?{repoRoot:foregroundRoot,revision:arg('--foreground-revision'),grid:Number(arg('--foreground-grid')),
       sourceDepth:Number(arg('--foreground-source-depth')),rendererCpuBytes:Number(arg('--foreground-cpu-bytes')),warmupFrames:Number(arg('--foreground-warmup-frames'))}:null,
@@ -68,6 +69,9 @@ try{
     !report.requested.appendPhaseJournal||report.requested.processBudgetBytes!==2147483648||
     report.requested.hostHeadroomPolicy!==AVAILABLE_MEMORY_DIAGNOSTIC_POLICY))
     throw Error('DINO observation requires unchanged explicit full-model and available-memory/process/journal guards');
+  if(report.requested.observeDino&&(!report.requested.dinoConversionReplay||
+    !/^[a-f0-9]{64}$/.test(report.requested.dinoConversionReplaySha256??'')))
+    throw Error('DINO observation requires explicit source-pinned complete conversion replay');
   if(report.requested.appendPhaseJournal&&!throughFullModel)throw Error('append-phase journal requires the explicit full-model diagnostic');
   validateResidentForegroundRequest(report.requested);
   if(throughFullModel){
@@ -118,9 +122,14 @@ try{
   const table=tensorTable=parseFlatWeightHeader(header.buffer.slice(header.byteOffset,header.byteOffset+header.length),source.receipt.byteLength).tensors;
   if(throughFullModel)artifactContract=createArtifactPhaseContract({table,headerBytes:source.receipt.headerBytes});
   if(report.requested.observeDino){
-    dinoObservation=createNativeDinoObservation({table,sourceETag:source.receipt.etag,outputDir:reportPath+'.dino-observations'});
+    const reference=fs.readFileSync(report.requested.dinoConversionReplay);
+    if(digest(reference)!==report.requested.dinoConversionReplaySha256)throw Error('requested conversion replay bytes changed');
+    const expectedWeightHashes=loadDinoConversionHashes(JSON.parse(reference),source.receipt,table);
+    dinoObservation=createNativeDinoObservation({table,sourceETag:source.receipt.etag,outputDir:reportPath+'.dino-observations',expectedWeightHashes,
+      onEvent:(kind,payload)=>persist.appendDiagnostic(kind,payload)});
     report.dinoDiagnostics={scope:'all536 camera/DINO GPU weights before compute; existing camera/patch/block0/1/2/23 features; full model unchanged',
-      status:'incomplete',observations:dinoObservation.observations};
+      status:'incomplete',observations:dinoObservation.observations,
+      conversionReference:{path:report.requested.dinoConversionReplay,bytes:reference.length,sha256:digest(reference),tensors:expectedWeightHashes.size}};
   }
   const image=fs.readFileSync(report.requested.input);
   if(digest(image)!==report.requested.inputSha256||image.toString('ascii',12,16)!=='IHDR')throw Error('canonical PNG input identity required');
@@ -280,10 +289,16 @@ try{
           (phase,demand)=>freshObservation(phase,demand,requestedAt));
         await persist();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(admitted));return;
       }
+      if(name==='/dino-observation-tensor-admission'&&req.method==='POST'){
+        if(!dinoObservation||report.memorySafety)throw Error('actual guarded diagnostic unavailable');
+        const requestedAt=Date.now(),request=JSON.parse((await readBody(req)).toString());
+        const admitted=await dinoObservation.admitTensor(request.observationIndex,request.tensorIndex,
+          (phase,demand)=>freshObservation(phase,demand,requestedAt));
+        await persist();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(admitted));return;
+      }
       if(name==='/dino-observation-tensor'&&req.method==='POST'){
         if(!dinoObservation||report.memorySafety)throw Error('actual guarded diagnostic persistence unavailable');
-        const bytes=await readBody(req);
-        dinoObservation.persistTensor(Number(req.headers['x-observation-index']),Number(req.headers['x-tensor-index']),bytes);
+        await dinoObservation.persistTensor(Number(req.headers['x-observation-index']),Number(req.headers['x-tensor-index']),req);
         await persist();res.writeHead(200).end();return;
       }
       if(name==='/dino-observation-complete'&&req.method==='POST'){
@@ -464,15 +479,19 @@ try{
       const lease=budget.reserveCpu(admitted.demand.rangeCpuBytes,'whole-tensor-diagnostic-persistence');
       let readback,readbackFailure,readbackFailed=false;
       try{
+        readback=device.createBuffer({size:admitted.demand.workGpuBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ,
+          label:'dino-diagnostic-phase-staging'});
         for(let i=0;i<observation.tensors.length;i++){
           const tensor=observation.tensors[i],buffer=tensor.value??tensor.buffer;
-          readback=device.createBuffer({size:buffer.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ,label:'dino-diagnostic-'+tensor.name});
+          const fresh=await fetch('/dino-observation-tensor-admission',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({observationIndex:admitted.index,tensorIndex:i})});
+          if(!fresh.ok)throw Error('fresh diagnostic copy refused: '+await fresh.text());
           const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(buffer,0,readback,0,buffer.size);
           device.queue.submit([encoder.finish()]);await readback.mapAsync(GPUMapMode.READ);
           const persisted=await fetch('/dino-observation-tensor',{method:'POST',
-            headers:{'X-Observation-Index':String(admitted.index),'X-Tensor-Index':String(i)},body:new Uint8Array(readback.getMappedRange())});
+            headers:{'X-Observation-Index':String(admitted.index),'X-Tensor-Index':String(i)},body:new Uint8Array(readback.getMappedRange(0,buffer.size))});
           if(!persisted.ok)throw Error('complete diagnostic persistence failed: '+await persisted.text());
-          readback.unmap();readback.destroy();readback=null;
+          readback.unmap();
         }
       }catch(error){readbackFailed=true;readbackFailure=error;throw error;}
       finally{
