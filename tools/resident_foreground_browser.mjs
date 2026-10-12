@@ -4,6 +4,10 @@ import {connectSf3dForeground} from '/foreground/sf3d-host-device.mjs';
 
 export const sharedGpuBufferRequirements=Object.freeze({maxBufferSize:113246208,maxStorageBufferBindingSize:113246208});
 let acquisition;
+// debugState contains live nested renderer objects. Detach the JSON record at
+// the observation boundary, before admission/transfer awaits let rendering
+// advance. Only these small state records are copied, not the frame history.
+const snapshotVolumeState=prototype=>JSON.parse(JSON.stringify(prototype.debugState()));
 const post=async(url,value)=>{const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)});
   if(!response.ok)throw Error('resident foreground refused: '+await response.text());};
 export async function acquireSharedGpuDevice(adapter,descriptor){
@@ -53,16 +57,16 @@ export async function mountComposition({prototype,sharedGpu,host}){
   let run,finish,before;
   window.__miniResidentForeground={...a,prototype,host,frames,
     snapshot(){return {sameDevice:prototype.foregroundGpuContext().device===a.device&&host.device===a.device,
-      sameQueue:prototype.foregroundGpuContext().queue===a.device.queue,state:prototype.debugState(),budget:a.budget.snapshot(),frames:frames.length,
+      sameQueue:prototype.foregroundGpuContext().queue===a.device.queue,state:snapshotVolumeState(prototype),budget:a.budget.snapshot(),frames:frames.length,
       descriptor:a.descriptor,backend:a.backend};},
     async beginRun(runId){
       if(run||runId!==a.config.runId)throw Error('actual resident run identity mismatch');
-      before=prototype.debugState();run=await service.beginRun(runId);return run;
+      before=snapshotVolumeState(prototype);run=await service.beginRun(runId);return run;
     },
     finishRun(){
       if(!run)throw Error('resident foreground run not begun');
       return finish??=run.finish().then(serviceReport=>({status:'finished',runId:run.runId,sameDevice:true,sameQueue:true,
-        before,after:prototype.debugState(),frames:[...frames],serviceReport,
+        before,after:snapshotVolumeState(prototype),frames:[...frames],serviceReport,
         deviceRetirement:'host remains live until exact owned-browser exit; no logical/physical reclamation credit'}));
     },
   };
