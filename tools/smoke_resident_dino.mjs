@@ -22,6 +22,7 @@ import {validateResidentForegroundRequest,prepareResidentForeground,acceptReside
 import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
 import {createNativeDinoObservation,loadDinoConversionHashes} from './native_dino_observation.mjs';
+import {reconnectModelWithoutNetworkCopies} from './model_connection_custody.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
 const throughPostProcessor=process.argv.includes('--through-postprocessor');
 const throughFullModel=process.argv.includes('--through-full-model');
@@ -412,13 +413,15 @@ try{
   const existingPages=await browser.pages();
   if(existingPages.length!==1||existingPages[0].url()!=='about:blank'||existingPages[0].browser()!==browser)
     throw Error('exact owned single initial blank page required');
-  const page=existingPages[0];
+  let page=existingPages[0];
   report.browserPage={route:'exact-owned-initial-blank-page',initialPageCount:existingPages.length,urlBefore:page.url()};
   await page.setViewport({width:1280,height:960});
+  const recordConsole=message=>fs.appendFileSync(report.evidencePaths.foregroundConsole,JSON.stringify({at:new Date().toISOString(),type:message.type(),text:message.text()})+'\n');
+  const recordPageError=error=>report.foreground.pageErrors.push({message:error.message,stack:error.stack});
   if(foregroundRoot){
     report.foreground.pageErrors=[];report.foreground.captures={};
-    page.on('console',message=>fs.appendFileSync(report.evidencePaths.foregroundConsole,JSON.stringify({at:new Date().toISOString(),type:message.type(),text:message.text()})+'\n'));
-    page.on('pageerror',error=>report.foreground.pageErrors.push({message:error.message,stack:error.stack}));
+    page.on('console',recordConsole);
+    page.on('pageerror',recordPageError);
     let rejectStartup;const startupFailure=new Promise((_resolve,reject)=>{rejectStartup=reject;});
     const failStartup=error=>rejectStartup(Error('actual foreground startup failed: '+error.message));
     const failConsole=message=>{if(message.type()==='error'&&/^(Volume cockpit initialization failed:|Volume route initialization failed:|initScene failed:|composition module failed:)/.test(message.text()))failStartup(Error(message.text()));};
@@ -440,6 +443,15 @@ try{
     const pixels=fs.readFileSync(report.evidencePaths.foregroundBefore);report.foreground.captures.before={path:report.evidencePaths.foregroundBefore,bytes:pixels.length,sha256:digest(pixels),inspection:'not-yet-inspected'};
     await persist();
   }else await page.goto(report.url,{timeout:0});
+  if(report.requested.observeDino){
+    if(foregroundRoot){page.off('console',recordConsole);page.off('pageerror',recordPageError);}
+    try{
+      const resumed=await reconnectModelWithoutNetworkCopies({puppeteer,browser,page,endpoint});
+      browser=resumed.browser;page=resumed.page;report.modelConnection=resumed.receipt;
+      if(foregroundRoot){page.on('console',recordConsole);page.on('pageerror',recordPageError);}
+    }catch(error){report.modelConnection=error.modelConnectionReceipt;throw error;}
+    await persist();
+  }
   report.phase='native-dino';await persist();
   Object.assign(report,await page.evaluate(async config=>{
     const {createLoaderMemoryBudget,runResidentDino,runResidentTwoStream,disposeResidentTwoStream,runResidentPostProcessor,TwoStreamBackbone,preprocessImage,

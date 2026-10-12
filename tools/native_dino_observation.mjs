@@ -13,6 +13,8 @@ for(let block=0;block<24;block++){
 }
 const equalShape=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((v,i)=>v===b[i]);
 function phaseNames(table,phase){
+  exact(typeof phase==='string'&&(phase==='camera'||/^dino-block-(?:[0-9]|1[0-9]|2[0-3])$/.test(phase)),
+    'noncanonical phase reference');
   return [...table.keys()].filter(name=>{
     if(phase==='camera')return name.startsWith('camera_embedder.linear.');
     const block=Number(phase.slice('dino-block-'.length));
@@ -36,7 +38,8 @@ export function loadDinoConversionHashes(replay,canonical,table){
     exact(['mapped','streamed'].includes(row.mode)&&expected.has(row.name),'unknown reference mode or selected tensor');
     const t=table.get(row.name),key=row.mode+'\0'+row.name;
     exact(!modes.has(key)&&phaseNames(table,row.phase).includes(row.name)&&row.bytes===t.size*(t.dtype===1?2:1)&&
-      row.words*4===row.bytes&&/^[a-f0-9]{64}$/.test(row.convertedSHA256)&&/^[a-f0-9]{64}$/.test(row.rawSHA256),
+      Number.isSafeInteger(row.words)&&row.words>=0&&row.words*4===row.bytes&&
+      /^[a-f0-9]{64}$/.test(row.convertedSHA256)&&/^[a-f0-9]{64}$/.test(row.rawSHA256),
       'partial, duplicate or malformed conversion reference');
     modes.set(key,row);
     if(row.mode==='mapped'){rawBytes+=t.size;expandedBytes+=row.bytes;}
@@ -125,7 +128,7 @@ export function createNativeDinoObservation({table,sourceETag,outputDir,expected
         row.nextTensorAdmission?.tensorIndex===tensorIndex;
       const filename=path.join(outputDir,String(index).padStart(2,'0'),'received-'+randomUUID()+'.f32');
       fs.mkdirSync(path.dirname(filename),{recursive:true});
-      const output={name:tensor?.name,path:filename,bytes:0,status:'receiving',
+      const output={name:tensor?.name,path:filename,bytes:0,receivedBytes:0,status:'receiving',
         claimedObservationIndex:index,claimedTensorIndex:tensorIndex,expectedBytes:tensor?.byteLength};
       row.delivering=true;
       let fd,hash=createHash('sha256'),finite=0,carry=Buffer.alloc(4),carryBytes=0;
@@ -136,8 +139,11 @@ export function createNativeDinoObservation({table,sourceETag,outputDir,expected
         for await(const incoming of chunks){
           exact(incoming instanceof Uint8Array,'non-byte diagnostic transport');
           const chunk=Buffer.from(incoming.buffer,incoming.byteOffset,incoming.byteLength);
-          let written=0;while(written<chunk.length){const n=fs.writeSync(fd,chunk,written,chunk.length-written);exact(n>0,'partial raw evidence write');written+=n;}
-          hash.update(chunk);output.bytes+=chunk.length;
+          output.receivedBytes+=chunk.length;
+          let written=0;while(written<chunk.length){
+            const n=fs.writeSync(fd,chunk,written,chunk.length-written);exact(n>0,'partial raw evidence write');
+            hash.update(chunk.subarray(written,written+n));output.bytes+=n;written+=n;
+          }
           // Canonical weight equality is checked by hash, avoiding millions of
           // Buffer scalar conversions and full-body copies in the observer.
           if(row.kind==='checkpoint'){

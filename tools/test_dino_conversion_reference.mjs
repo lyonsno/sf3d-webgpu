@@ -22,6 +22,15 @@ const replay={schema:'sf3d.canonical-dino-conversion-replay.v0',status:'passed',
   source:{wholeSHA256FromNative:canonical.sha256,headerSHA256:canonical.headerSha256,byteLength:canonical.byteLength},
   scope:{phases:25,tensors:536,rawBytes,expandedBytes},rows};
 assert.equal(loadDinoConversionHashes(replay,canonical,table).size,536);
+for(const [label,mutate] of [
+ ['words',r=>r.rows[0].words=String(r.rows[0].words)],
+ ['phase',r=>r.rows.find(x=>x.phase==='dino-block-0').phase='xxxxxxxxxxx0'],
+]){
+ if(process.argv.includes('--phase-only')&&label!=='phase')continue;
+ const damaged=JSON.parse(JSON.stringify(replay));mutate(damaged);
+ assert.throws(()=>loadDinoConversionHashes(damaged,canonical,table),/malformed|canonical phase/,
+   'retyped words and noncanonical phase identity must refuse: '+label);
+}
 for(const mutate of [r=>r.status='running',r=>r.source.headerSHA256='c'.repeat(64),r=>r.rows.pop(),
   r=>r.rows.push(r.rows[0]),r=>r.scope.tensors='536',r=>r.rows[1].mode='fallback',r=>r.rows[0].bytes=1,
   r=>r.rows[0].convertedSHA256='d'.repeat(64),r=>r.scope.rawBytes--,r=>r.rows[1].rawSHA256='e'.repeat(64)]){
