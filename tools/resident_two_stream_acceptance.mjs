@@ -4,7 +4,7 @@ import {acceptResidentDino} from './resident_dino_acceptance.mjs';
 import {phaseHostHeadroomIsAdmitted} from './memory_admission.mjs';
 const D=1024,N=27648,L=3089,I=1297,tri=N*D*4,latent=L*D*4;
 const scratch=rows=>rows*(2*D+3*4096)*4;
-const attention=(q,kv,rows)=>(2*q+2*kv)*D*4+16*rows*kv*4+rows*D*4;
+const attention=(q,kv,rows,queryReuse=false)=>((queryReuse?1:2)*q+2*kv)*D*4+16*rows*kv*4+rows*D*4;
 /** Approved complete1297-token/128-row graph; independently checked against
  * the source planner by test_two_stream_review_contracts. Reporter input is
  * never the authority for a shorter sequence. */
@@ -56,6 +56,8 @@ export function twoStreamPhaseDemand(phase){
     const rows=phase.attentionRowsPerDuty??128,normX=phase.normX??true;
     const reuse=phase.reuseDeadTriplaneStorage??false;
     const residualReuse=phase.reuseAttentionResidualStorage??false;
+    const queryReuse=phase.reuseAttentionQueryStorage===undefined?false:phase.reuseAttentionQueryStorage;
+    if(typeof queryReuse!=='boolean')throw Error('exact boolean attention query storage reuse required');
     const setupReuse=phase.reuseTokenizerSetupStorage??false;
     if(typeof setupReuse!=='boolean'||(setupReuse&&phase.rematerializeTokenizerEmbedding!==true))
       throw Error('exact tokenizer setup reuse with canonical rematerialization required');
@@ -66,10 +68,10 @@ export function twoStreamPhaseDemand(phase){
       case 'fuse-prepare':{
         if(!['in','out'].includes(d.direction))throw Error('exact resident fuse direction required');
         const q=d.direction==='in'?L:N,kv=d.direction==='in'?N:L;
-        work=(q+(normX?kv:0))*D*4+attention(q,kv,rows)+D*4+4096;break;
+        work=(q+(normX?kv:0))*D*4+attention(q,kv,rows,queryReuse)+D*4+4096;break;
       }
-      case 'basic-self-prepare':work=latent+attention(L,L,rows)+4096;break;
-      case 'basic-cross-prepare':work=3*latent+attention(L,I,rows)+4096;break;
+      case 'basic-self-prepare':work=latent+attention(L,L,rows,queryReuse)+4096;break;
+      case 'basic-cross-prepare':work=3*latent+attention(L,I,rows,queryReuse)+4096;break;
       case 'fuse-finish':work=5*latent+scratch(128)+4096;break;
       case 'basic-finish':work=5*latent+scratch(128)+4096;break;
       case 'fuse-attention-linear-range':work=d.rangeIndex===0?tri+4096:0;break;
@@ -118,6 +120,20 @@ export function acceptResidentTwoStream(report){
   const errors=[...base.errors],require=(test,message)=>{if(!test)errors.push(message);};
   const b=report.twoStream,c=b?.cooperative,boundary=c?.boundaries?.[0];
   const rows=report.requested?.attentionRowsPerDuty;
+  const queryReuse=report.requested?.reuseAttentionQueryStorage===undefined?false:report.requested.reuseAttentionQueryStorage;
+  require(typeof queryReuse==='boolean'&&(b?.reuseAttentionQueryStorage??false)===queryReuse&&
+    (c?.adapterTelemetry?.reuseAttentionQueryStorage??false)===queryReuse,
+    'effective attention query storage reuse differs from requested configuration');
+  if(queryReuse===true){
+    const duties=report.phaseObservations?.filter(o=>o.phase.startsWith('two-stream-duty-'))??[];
+    require(duties.length>0&&duties.every(o=>o.descriptor?.reuseAttentionQueryStorage===true),
+      'fresh duty demand lacks effective attention query reuse identity');
+    for(const o of duties)try{
+      const expected=twoStreamPhaseDemand({...o.descriptor,name:'two-stream-duty'});
+      require(['weightGpuBytes','rangeCpuBytes','workGpuBytes','requiredBytes'].every(k=>o.demand?.[k]===expected[k]),
+        'actual query reuse allocation demand missing or underdeclared');
+    }catch(error){errors.push(error.message);}
+  }
   const rematerialize=report.requested?.rematerializeTokenizerEmbedding??false;
   require(typeof rematerialize==='boolean'&&(b?.rematerializeTokenizerEmbedding??false)===rematerialize,
     'effective tokenizer rematerialization differs from requested configuration');

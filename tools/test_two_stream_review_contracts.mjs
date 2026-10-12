@@ -112,6 +112,29 @@ try{
   Object.assign(c.boundaries[0],{completedItems:smallerPlan.length,totalItems:smallerPlan.length,actualRangeCount:smallerPlan.length});
   smaller.expectedPhaseOrder=smallerNames;smaller.phaseObservations=smallerNames.map(observation);
   assert.equal(acceptResidentTwoStream(smaller).ok,true);
+  const queryReuse=structuredClone(smaller);
+  queryReuse.requested.reuseAttentionQueryStorage=true;
+  queryReuse.requested.processBudgetBytes=2147483648;
+  queryReuse.twoStream.reuseAttentionQueryStorage=true;
+  queryReuse.twoStream.cooperative.adapterTelemetry.reuseAttentionQueryStorage=true;
+  for(const o of queryReuse.phaseObservations){
+    o.host.hostFreeBytes=2147483648;
+    if(o.phase.startsWith('two-stream-duty-')){
+      const duty=smallerPlan[Number(o.phase.slice('two-stream-duty-'.length))];
+      o.descriptor={name:o.phase,duty,attentionRowsPerDuty:rows,normX:false,reuseAttentionQueryStorage:true};
+      o.demand=twoStreamPhaseDemand({...o.descriptor,name:'two-stream-duty'});
+    }
+  }
+  assert.equal(acceptResidentTwoStream(queryReuse).ok,true,'full positive effective query reuse fixture');
+  for(const mutate of [r=>delete r.twoStream.reuseAttentionQueryStorage,
+    r=>r.twoStream.cooperative.adapterTelemetry.reuseAttentionQueryStorage=false,
+    r=>r.requested.reuseAttentionQueryStorage='true',
+    r=>delete r.phaseObservations.find(o=>o.phase.startsWith('two-stream-duty-')).descriptor.reuseAttentionQueryStorage,
+    r=>r.phaseObservations.find(o=>o.phase.startsWith('two-stream-duty-')).descriptor.reuseAttentionQueryStorage=false,
+    r=>r.phaseObservations.find(o=>o.phase.startsWith('two-stream-duty-')).demand.requiredBytes=0]){
+    const drift=structuredClone(queryReuse);mutate(drift);
+    assert.equal(acceptResidentTwoStream(drift).ok,false,'requested-only/partial/default effective mode or zero demand cannot claim lower NEW');
+  }
   const rematerialized=structuredClone(smaller),rematerializedNames=[...smallerNames];
   rematerializedNames.splice(rematerializedNames.indexOf('two-stream-final'),0,
     'two-stream-embedding-rematerialize-weights','two-stream-embedding-rematerialize-rearrange');

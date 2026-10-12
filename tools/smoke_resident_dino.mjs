@@ -41,6 +41,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     throughPostProcessor,throughFullModel,postChannelsPerDuty:Number(arg('--post-channels-per-duty')??16),
     reuseDeadTriplaneStorage:process.argv.includes('--reuse-dead-triplane-storage'),
     reuseAttentionResidualStorage:process.argv.includes('--reuse-attention-residual-storage'),
+    reuseAttentionQueryStorage:throughBackbone,
     rematerializeTokenizerEmbedding:process.argv.includes('--rematerialize-tokenizer-embedding'),
     reuseTokenizerSetupStorage:process.argv.includes('--reuse-tokenizer-setup-storage'),
     appendPhaseJournal:process.argv.includes('--append-phase-journal'),
@@ -235,6 +236,7 @@ try{
             if(phase.attentionRowsPerDuty!==report.requested.attentionRowsPerDuty)throw Error('effective attention allocation granule mismatch');
             if(phase.reuseDeadTriplaneStorage!==report.requested.reuseDeadTriplaneStorage)throw Error('effective owned-storage reuse differs from requested demand');
             if(phase.reuseAttentionResidualStorage!==report.requested.reuseAttentionResidualStorage)throw Error('effective attention residual reuse differs from requested demand');
+            if(phase.reuseAttentionQueryStorage!==report.requested.reuseAttentionQueryStorage)throw Error('effective attention query reuse differs from requested demand');
             if(phase.reuseTokenizerSetupStorage!==report.requested.reuseTokenizerSetupStorage||
               phase.rematerializeTokenizerEmbedding!==report.requested.rematerializeTokenizerEmbedding)
               throw Error('effective tokenizer setup reuse or rematerialization differs from requested demand');
@@ -245,7 +247,7 @@ try{
               if(weight!==bias||phase.normX!==weight)throw Error('actual optional normalization differs from canonical complete source metadata');
               normX=weight;
             }
-            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,normX,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage,reuseTokenizerSetupStorage:report.requested.reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding:report.requested.rematerializeTokenizerEmbedding});
+            demand=twoStreamPhaseDemand({name:'two-stream-duty',duty:expected,attentionRowsPerDuty:report.requested.attentionRowsPerDuty,normX,reuseDeadTriplaneStorage:report.requested.reuseDeadTriplaneStorage,reuseAttentionResidualStorage:report.requested.reuseAttentionResidualStorage,reuseAttentionQueryStorage:phase.reuseAttentionQueryStorage,reuseTokenizerSetupStorage:report.requested.reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding:report.requested.rematerializeTokenizerEmbedding});
           }else demand=twoStreamPhaseDemand(phase);
         }else if(phase.name.startsWith('post-processor-')){
           if(!throughPostProcessor)throw Error('requested route does not include postprocessor');
@@ -466,6 +468,7 @@ try{
                   await observe({name:'two-stream-duty-'+duty.dutyIndex,duty,tensors:[],attentionRowsPerDuty:state.attentionRowsPerDuty,
                     reuseDeadTriplaneStorage:state.reuseDeadTriplaneStorage,
                     reuseAttentionResidualStorage:state.reuseAttentionResidualStorage,
+                    reuseAttentionQueryStorage:state.reuseAttentionQueryStorage,
                     reuseTokenizerSetupStorage:state.reuseTokenizerSetupStorage,
                     rematerializeTokenizerEmbedding:state.rematerializeTokenizerEmbedding,
                     ...(duty.kind==='fuse-prepare'?{normX:!!state.weights.mainBlocks[duty.block][duty.direction==='in'?'fuseBlockIn':'fuseBlockOut'].normX}:{})});
