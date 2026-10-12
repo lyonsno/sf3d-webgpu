@@ -57,7 +57,12 @@ export function twoStreamPhaseDemand(phase){
     const reuse=phase.reuseDeadTriplaneStorage??false;
     const residualReuse=phase.reuseAttentionResidualStorage??false;
     const queryReuse=phase.reuseAttentionQueryStorage===undefined?false:phase.reuseAttentionQueryStorage;
+    const projectionReuse=phase.reuseAttentionProjectionStorage??false;
+    const linearRows=phase.linearRowsPerDuty??128;
     if(typeof queryReuse!=='boolean')throw Error('exact boolean attention query storage reuse required');
+    if(typeof projectionReuse!=='boolean'||(projectionReuse&&(!queryReuse||!residualReuse||!reuse||
+      !Number.isSafeInteger(linearRows)||linearRows<=0)))
+      throw Error('exact owned attention projection row reuse and row capacity required');
     const setupReuse=phase.reuseTokenizerSetupStorage??false;
     if(typeof setupReuse!=='boolean'||(setupReuse&&phase.rematerializeTokenizerEmbedding!==true))
       throw Error('exact tokenizer setup reuse with canonical rematerialization required');
@@ -74,7 +79,7 @@ export function twoStreamPhaseDemand(phase){
       case 'basic-cross-prepare':work=3*latent+attention(L,I,rows,queryReuse)+4096;break;
       case 'fuse-finish':work=5*latent+scratch(128)+4096;break;
       case 'basic-finish':work=5*latent+scratch(128)+4096;break;
-      case 'fuse-attention-linear-range':work=d.rangeIndex===0?tri+4096:0;break;
+      case 'fuse-attention-linear-range':work=d.rangeIndex===0?(projectionReuse?2*linearRows*D*4:tri)+4096:0;break;
       case 'fuse-residual-norm':work=(residualReuse?1:2)*tri+4096;break;
       case 'fuse-resident-ffn-range':work=d.rangeIndex===0?(reuse?0:tri)+scratch(128)+4096:0;break;
       case 'fuse-final-residual':work=(reuse?0:tri)+4096;break;
@@ -120,6 +125,28 @@ export function acceptResidentTwoStream(report){
   const errors=[...base.errors],require=(test,message)=>{if(!test)errors.push(message);};
   const b=report.twoStream,c=b?.cooperative,boundary=c?.boundaries?.[0];
   const rows=report.requested?.attentionRowsPerDuty;
+  const projectionReuse=report.requested?.reuseAttentionProjectionStorage??false;
+  require(typeof projectionReuse==='boolean'&&(b?.reuseAttentionProjectionStorage??false)===projectionReuse&&
+    (c?.adapterTelemetry?.reuseAttentionProjectionStorage??false)===projectionReuse,
+    'effective attention projection row reuse differs from requested configuration');
+  if(projectionReuse){
+    const records=c?.adapterTelemetry?.attentionProjectionReuse;
+    const blockDuties=446+7*Math.ceil(L/rows)+Math.ceil(N/rows);
+    require(report.requested.reuseAttentionQueryStorage===true&&report.requested.reuseAttentionResidualStorage===true&&
+      report.requested.reuseDeadTriplaneStorage===true,'owned projection row prerequisites missing');
+    require(records?.length===4&&records.every((r,block)=>r.block===block&&r.bytes===tri&&r.totalRows===N&&
+      r.rowCapacity===128&&r.scratchBytes===2*128*D*4&&
+      r.afterDutyIndex===1+block*blockDuties+11+7*Math.ceil(L/rows)+216+Math.ceil(N/rows)&&
+      r.source==='owned-attention-result-after-each-complete-row-last-read'),
+      'all four complete owned projection row prefixes missing');
+    const duties=report.phaseObservations?.filter(o=>o.phase.startsWith('two-stream-duty-'))??[];
+    require(duties.length>0&&duties.every(o=>o.descriptor?.reuseAttentionProjectionStorage===true&&o.descriptor.linearRowsPerDuty===128),
+      'fresh projection row demand lacks effective mode/capacity');
+    for(const o of duties)try{const d=twoStreamPhaseDemand({...o.descriptor,name:'two-stream-duty'});
+      require(['weightGpuBytes','rangeCpuBytes','workGpuBytes','requiredBytes'].every(k=>o.demand?.[k]===d[k]),
+        'actual projection row backing demand missing or underdeclared');
+    }catch(error){errors.push(error.message);}
+  }
   const queryReuse=report.requested?.reuseAttentionQueryStorage===undefined?false:report.requested.reuseAttentionQueryStorage;
   require(typeof queryReuse==='boolean'&&(b?.reuseAttentionQueryStorage??false)===queryReuse&&
     (c?.adapterTelemetry?.reuseAttentionQueryStorage??false)===queryReuse,

@@ -39,13 +39,15 @@ export function selectTwoStreamPhase(template,stageId){
 export async function runResidentTwoStream({device,backbone,memoryBudget,weightsUrl,expectedWeightBytes,
   expectedSourceETag,imageTokensBuf,N_img,onBeforePhase,onBeforeDuty,onAfterDuty,onProgress,withResult,
   foregroundOpportunities=null,linearRowsPerDuty=128,attentionRowsPerDuty=128,reuseDeadTriplaneStorage=false,
-  reuseAttentionResidualStorage=false,rematerializeTokenizerEmbedding=false,reuseTokenizerSetupStorage=false,onBeforeSourceIntake}){
+  reuseAttentionResidualStorage=false,reuseAttentionProjectionStorage=false,rematerializeTokenizerEmbedding=false,reuseTokenizerSetupStorage=false,onBeforeSourceIntake}){
   if(typeof reuseTokenizerSetupStorage!=='boolean'||(reuseTokenizerSetupStorage&&!rematerializeTokenizerEmbedding))
     throw TypeError('tokenizer setup reuse requires explicit canonical rematerialization');
   if(typeof rematerializeTokenizerEmbedding!=='boolean')throw TypeError('explicit boolean tokenizer rematerialization required');
   if(typeof reuseDeadTriplaneStorage!=='boolean')throw TypeError('explicit boolean dead-triplane reuse required');
   if(typeof reuseAttentionResidualStorage!=='boolean'||(reuseAttentionResidualStorage&&!reuseDeadTriplaneStorage))
     throw TypeError('attention residual reuse requires explicit owned dead-triplane reuse');
+  if(typeof reuseAttentionProjectionStorage!=='boolean'||(reuseAttentionProjectionStorage&&!reuseAttentionResidualStorage))
+    throw TypeError('attention projection row reuse requires owned residual reuse');
   if(!isLoaderMemoryBudget(memoryBudget))throw TypeError('authenticated loader budget required');
   memoryBudget.assertDeviceAcquiredHere(device);
   if(backbone?.device!==device||backbone._residentAdapterOwner)throw Error('owned nonquarantined backbone required');
@@ -78,6 +80,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
       reuseDeadTriplaneStorage,
       reuseAttentionResidualStorage,
       reuseAttentionQueryStorage:true,
+      reuseAttentionProjectionStorage,
       reuseTokenizerSetupStorage,rematerializeTokenizerEmbedding,
       foregroundOpportunities,onProgress,onBeforeDuty,onAfterDuty,
       async withGroupWeights(group,work){
@@ -100,7 +103,8 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
       },
     });
     owner.buffers.add(executed.result.buffer);
-    if(executed.report?.adapterTelemetry?.reuseAttentionQueryStorage!==true)
+    if(executed.report?.adapterTelemetry?.reuseAttentionQueryStorage!==true||
+      (executed.report.adapterTelemetry.reuseAttentionProjectionStorage??false)!==reuseAttentionProjectionStorage)
       throw Error('resident effective attention query reuse mismatch');
     if(executed.result.C!==1024||executed.result.N!==27648||executed.result.planeSize!==96||
       executed.result.buffer.size!==3*1024*96*96*4)throw Error('complete triplane feature shape changed');
@@ -109,7 +113,7 @@ export async function runResidentTwoStream({device,backbone,memoryBudget,weights
     return {value,cooperative:executed.report,loadingReport:source.loadingReport,weightPhases:source.phases,
       shape:[3,1024,96,96],blocks:4,basicBlocks:12,residentFFN:true,linearRowsPerDuty,attentionRowsPerDuty,reuseDeadTriplaneStorage,
       reuseAttentionQueryStorage:executed.report.adapterTelemetry.reuseAttentionQueryStorage,
-      reuseAttentionResidualStorage,rematerializeTokenizerEmbedding,reuseTokenizerSetupStorage,
+      reuseAttentionResidualStorage,reuseAttentionProjectionStorage,rematerializeTokenizerEmbedding,reuseTokenizerSetupStorage,
       tokenizerEmbeddingRetirement,setupTokenizerEmbeddingRetirement};
   }catch(error){failed=true;failure=error;throw error;}
   finally{

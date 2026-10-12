@@ -424,6 +424,10 @@ export class TwoStreamBackbone {
     state.reuseDeadTriplaneStorage=reuse;
     state.reuseAttentionResidualStorage=residualReuse;
     state.reuseAttentionQueryStorage=queryReuse;
+    const projectionReuse=options.reuseAttentionProjectionStorage??false;
+    if(typeof projectionReuse!=='boolean'||(projectionReuse&&(!queryReuse||!residualReuse||!reuse)))
+      throw TypeError('attention projection row reuse requires owned query, residual and dead-triplane reuse');
+    state.reuseAttentionProjectionStorage=projectionReuse;
     state.reuseTokenizerSetupStorage=setupReuse;
     state.rematerializeTokenizerEmbedding=options.rematerializeTokenizerEmbedding??false;
     return state;
@@ -674,6 +678,16 @@ export class TwoStreamBackbone {
     return this._requireFineOperation(state, 'fuse', ownerId);
   }
 
+  _validateFineLinearRange(operation,duty,phase) {
+    if(duty.ownerId!==phase.ownerId)throw Error('linear projection owner changed');
+    if(duty.rangeIndex!==phase.nextRangeIndex||duty.rangeCount!==phase.rangeCount||duty.totalRows!==operation.N_z)
+      throw Error('linear projection range order changed');
+    const range=normalizeLinearRowRange(operation.N_z,duty.rowStart,duty.rowCount);
+    if(duty.rowStart!==phase.nextRowStart||duty.rowEnd!==range.rowEnd)
+      throw Error('linear projection rows are not contiguous');
+    return range;
+  }
+
   _dispatchFineLinearRange(
     encoder,
     operation,
@@ -685,6 +699,7 @@ export class TwoStreamBackbone {
     bias,
     inDim,
     outDim,
+    rowCache=null,
   ) {
     if (duty.ownerId !== phase.ownerId) {
       throw new Error(
@@ -713,7 +728,19 @@ export class TwoStreamBackbone {
         + `${duty.rowStart}-${duty.rowEnd}`,
       );
     }
-    this._dispatchLinearRange(
+    if(rowCache){
+      if(!Number.isSafeInteger(rowCache.capacity)||rowCache.capacity<range.rowCount||
+        rowCache.input.size!==rowCache.capacity*inDim*4||rowCache.output.size!==rowCache.capacity*outDim*4||
+        new Set([rowCache.input,rowCache.output,input,weight,bias]).size!==5||input!==output)
+        throw Error('exact disjoint projection row caches and owned output alias required');
+      // Copy each complete input row before its last read. The same linear
+      // range kernel computes into disjoint storage, then its complete rows
+      // overwrite only those consumed rows of the original attention result.
+      encoder.copyBufferToBuffer(input,range.rowStart*inDim*4,rowCache.input,0,range.rowCount*inDim*4);
+      this._dispatchLinearRange(encoder,rowCache.input,rowCache.output,weight,bias,
+        rowCache.capacity,inDim,outDim,0,range.rowCount);
+      encoder.copyBufferToBuffer(rowCache.output,0,output,range.rowStart*outDim*4,range.rowCount*outDim*4);
+    }else this._dispatchLinearRange(
       encoder,
       input,
       output,
@@ -736,16 +763,37 @@ export class TwoStreamBackbone {
         `attention projection started before all tiles completed for ${operation.ownerId}`,
       );
     }
+    const reuse=state.reuseAttentionProjectionStorage??false;
+    if(typeof reuse!=='boolean')throw Error('exact projection row reuse mode required');
+    const input=operation.attention.attnOutBuf;
+    if(reuse){
+      const owned=this._residentWorkOwner?.buffers,bytes=operation.N_z*operation.D*4;
+      if(!state.residentFFN||!state.reuseAttentionQueryStorage||!state.reuseAttentionResidualStorage||!state.reuseDeadTriplaneStorage||
+        !owned?.has(input)||!owned.has(operation.zBuf)||input!==operation.attention.qBuf||input===operation.zBuf||input.size!==bytes||
+        !Number.isSafeInteger(state.ffnRowsPerTile)||state.ffnRowsPerTile<=0)
+        throw Error('owned complete attention query backing and projection reuse prerequisites required');
+      this._validateFineLinearRange(operation,duty,operation.attentionProjection??{
+        ownerId:`${operation.ownerId}-attention-projection`,nextRangeIndex:0,nextRowStart:0,rangeCount:duty.rangeCount});
+    }
     if (!operation.attentionProjection) {
       operation.attentionProjection = {
         ownerId: `${operation.ownerId}-attention-projection`,
         nextRangeIndex: 0,
         nextRowStart: 0,
         rangeCount: duty.rangeCount,
-        output: createEmptyBuffer(this.device, operation.N_z * operation.D * 4),
+        output: reuse?input:createEmptyBuffer(this.device, operation.N_z * operation.D * 4),
+        reuseAttentionProjectionStorage:reuse,
       };
+      if(reuse){
+        // The phase enters reachable owned state before either allocation can
+        // fail; cooperative capture retains every successful new allocation.
+        const cache=operation.attentionProjection.rowCache={capacity:state.ffnRowsPerTile};
+        cache.input=createEmptyBuffer(this.device,cache.capacity*operation.D*4);
+        cache.output=createEmptyBuffer(this.device,cache.capacity*operation.D*4);
+      }
     }
     const phase = operation.attentionProjection;
+    if(phase.reuseAttentionProjectionStorage!==reuse)throw Error('projection row reuse changed during an active phase');
     this._dispatchFineLinearRange(
       encoder,
       operation,
@@ -757,7 +805,24 @@ export class TwoStreamBackbone {
       operation.attention.attnWeights.proj.bias,
       operation.D,
       operation.D,
+      phase.rowCache??null,
     );
+  }
+
+  _markFineAttentionProjectionReusable(state,duty){
+    const operation=this._requireFineFuseOut(state,duty),phase=operation.attentionProjection,owned=this._residentWorkOwner?.buffers;
+    const bytes=operation.N_z*operation.D*4,cache=phase?.rowCache;
+    if(!state.reuseAttentionProjectionStorage||!phase?.reuseAttentionProjectionStorage||
+      duty.kind!=='fuse-attention-linear-range'||duty.rangeIndex!==duty.rangeCount-1||
+      state.nextFineDutyIndex!==duty.dutyIndex+1||phase.nextRangeIndex!==phase.rangeCount||phase.nextRowStart!==operation.N_z||
+      phase.output!==operation.attention?.attnOutBuf||phase.output!==operation.attention.qBuf||
+      phase.output===operation.zBuf||phase.output.size!==bytes||!owned?.has(phase.output)||
+      !owned.has(cache?.input)||!owned.has(cache?.output))
+      throw Error('owned complete projection row prefix required');
+    phase.completedPrefix={buffer:phase.output,afterDutyIndex:duty.dutyIndex};
+    return {block:duty.block,afterDutyIndex:duty.dutyIndex,bytes,totalRows:operation.N_z,
+      rowCapacity:cache.capacity,scratchBytes:cache.input.size+cache.output.size,
+      source:'owned-attention-result-after-each-complete-row-last-read'};
   }
 
   _dispatchFineFuseResidualNorm(encoder, state, duty) {
@@ -816,7 +881,9 @@ export class TwoStreamBackbone {
       state.nextFineDutyIndex!==duty.dutyIndex+1||!phase||phase.nextRangeIndex!==phase.rangeCount||
       phase.nextRowStart!==operation.N_z||!owned?.has(phase.output)||!owned.has(operation.zBuf)||
       phase.output.size!==bytes||operation.zBuf.size!==bytes||phase.output===operation.zBuf||
-      phase.output===operation.attention?.attnOutBuf)
+      (phase.output===operation.attention?.attnOutBuf&&
+        (!state.reuseAttentionProjectionStorage||phase.completedPrefix?.buffer!==phase.output||
+          phase.completedPrefix.afterDutyIndex!==duty.dutyIndex)))
       throw Error('owned completed attention projection prefix required for residual reuse');
     operation.reusableAttentionResidualStorage={buffer:phase.output,afterDutyIndex:duty.dutyIndex};
     return {block:duty.block,afterDutyIndex:duty.dutyIndex,bytes,

@@ -126,6 +126,33 @@ try{
     }
   }
   assert.equal(acceptResidentTwoStream(queryReuse).ok,true,'full positive effective query reuse fixture');
+  const unprovedProjection=structuredClone(queryReuse);unprovedProjection.requested.reuseAttentionProjectionStorage=true;
+  assert.equal(acceptResidentTwoStream(unprovedProjection).ok,false,'requested projection reuse without effective owned row prefixes cannot certify lower NEW');
+  const projected=structuredClone(queryReuse);
+  Object.assign(projected.requested,{reuseDeadTriplaneStorage:true,reuseAttentionResidualStorage:true,reuseAttentionProjectionStorage:true});
+  Object.assign(projected.twoStream,{reuseDeadTriplaneStorage:true,reuseAttentionResidualStorage:true,reuseAttentionProjectionStorage:true});
+  const pt=projected.twoStream.cooperative.adapterTelemetry;
+  Object.assign(pt,{reuseDeadTriplaneStorage:true,reuseAttentionResidualStorage:true,reuseAttentionProjectionStorage:true});
+  pt.storageReuse=smallerPlan.filter(d=>d.kind==='fuse-residual-norm').map(d=>({block:d.block,afterDutyIndex:d.dutyIndex,
+    bytes:113246208,source:'owned-work-inventory-after-gpu-prefix'}));
+  const completedProjection=smallerPlan.filter(d=>d.kind==='fuse-attention-linear-range'&&d.rangeIndex===d.rangeCount-1);
+  pt.attentionResidualReuse=completedProjection.map(d=>({block:d.block,afterDutyIndex:d.dutyIndex,bytes:113246208,source:'owned-projected-attention-after-gpu-prefix'}));
+  pt.attentionProjectionReuse=completedProjection.map(d=>({block:d.block,afterDutyIndex:d.dutyIndex,bytes:113246208,totalRows:27648,
+    rowCapacity:128,scratchBytes:1048576,source:'owned-attention-result-after-each-complete-row-last-read'}));
+  for(const o of projected.phaseObservations)if(o.phase.startsWith('two-stream-duty-')){
+    Object.assign(o.descriptor,{reuseDeadTriplaneStorage:true,reuseAttentionResidualStorage:true,reuseAttentionProjectionStorage:true,linearRowsPerDuty:128});
+    o.demand=twoStreamPhaseDemand({...o.descriptor,name:'two-stream-duty'});
+  }
+  assert.equal(acceptResidentTwoStream(projected).ok,true,'complete positive owned projection rows with actual reduced NEW');
+  for(const mutate of [r=>r.twoStream.reuseAttentionProjectionStorage=false,r=>r.twoStream.cooperative.adapterTelemetry.attentionProjectionReuse.pop(),
+    r=>r.twoStream.cooperative.adapterTelemetry.attentionProjectionReuse[0].afterDutyIndex--,
+    r=>r.twoStream.cooperative.adapterTelemetry.attentionProjectionReuse[0].scratchBytes=0,
+    r=>r.twoStream.cooperative.adapterTelemetry.attentionProjectionReuse[0].source='requested-only',
+    r=>r.phaseObservations.find(o=>o.phase.startsWith('two-stream-duty-')).descriptor.reuseAttentionProjectionStorage=false,
+    r=>r.phaseObservations.find(o=>o.phase.startsWith('two-stream-duty-')).descriptor.linearRowsPerDuty=1,
+    r=>r.phaseObservations.find(o=>o.phase.startsWith('two-stream-duty-')).demand.requiredBytes=0]){
+    const bad=structuredClone(projected);mutate(bad);assert.equal(acceptResidentTwoStream(bad).ok,false);
+  }
   for(const mutate of [r=>delete r.twoStream.reuseAttentionQueryStorage,
     r=>r.twoStream.cooperative.adapterTelemetry.reuseAttentionQueryStorage=false,
     r=>r.requested.reuseAttentionQueryStorage='true',
