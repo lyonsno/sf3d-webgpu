@@ -40,6 +40,15 @@ export async function prepareResidentForeground({requested,outputDir}){
     dependencies:{[dependency.relative]:dependency.receipt},servedSources:{},dependency};
 }
 
+const freshAuxiliaryIsAdmitted=(report,a,requiredBytes)=>{
+ const p=a?.process,row=p?.lastObservation;
+ return a?.verdict==='admitted'&&a.demand?.requiredBytes===requiredBytes&&phaseHostHeadroomIsAdmitted(report,a)&&
+  a.host?.hostname===report.source?.hostname&&a.host.model==='Mac14,9'&&a.host.processor==='Apple M2 Pro'&&!a.host.observerErrors?.length&&
+  p?.coverage==='sampled-owned-process-tree'&&row?.status==='observed'&&row.runId===report.runId&&row.rootPid===report.rootPid&&
+  p.freshness?.route==='new-probe-after-request'&&p.freshness.requestedAtUnixMs>=a.phaseRequestedAtUnixMs&&
+  row.atUnixMs>=p.freshness.requestedAtUnixMs&&p.freshness.probeAtUnixMs===row.atUnixMs&&p.freshness.observationIndex===p.sampleCount&&
+  row.sampledAggregatePhysicalFootprintBytes+requiredBytes<=report.requested.processBudgetBytes;
+};
 export function acceptResidentForeground(report){
   const errors=[],require=(ok,msg)=>{if(!ok)errors.push(msg);},f=report.foreground,run=report.foregroundRun;
   try{validateResidentForegroundRequest(report.requested);}catch(error){errors.push(error.message);}
@@ -57,6 +66,29 @@ export function acceptResidentForeground(report){
   require(f?.compositionModule?.servedSha256===f?.compositionModule?.sha256&&!!f?.compositionModule?.sha256&&f.compositionModule.sourceRevision===report.source?.revision,
     'actual source-bound resident composition module missing');
   require(f?.before?.sameDevice===true&&f.before.sameQueue===true&&f.after?.sameDevice===true&&f.after.sameQueue===true,'actual same-device/queue foreground missing');
+  const connection=report.modelConnection;
+  if(connection){
+    require(connection.status==='connected'&&connection.effectiveNetworkEnabled===false&&connection.hostReferencesPreserved===true&&
+      connection.targetBefore===connection.targetAfter&&connection.urlBefore===connection.urlAfter&&
+      [connection.viewportBefore,connection.viewportAfter].every(v=>v?.width===1280&&v.height===960)&&
+      [connection.geometryBefore,connection.geometryAfter].every(g=>g?.width===1280&&g.height===960&&Number.isFinite(g.deviceScaleFactor)&&g.deviceScaleFactor>0)&&
+      connection.geometryBefore?.deviceScaleFactor===connection.geometryAfter?.deviceScaleFactor,
+      'original model-phase viewport/geometry and exact live host custody missing');
+  }
+  if(f?.resultEvidence||report.foregroundRunReference){
+    const delivery=f?.resultEvidence,ref=delivery?.reference,received=report.foregroundRunReference,module=f?.resultModule;
+    require(delivery?.status==='retained'&&ref?.schema==='sf3d.native-foreground-run-reference.v0'&&ref.status==='retained'&&
+      ref.runId===report.runId&&Number.isSafeInteger(ref.bytes)&&ref.bytes>0&&path.isAbsolute(ref.path??'')&&/^[a-f0-9]{64}$/.test(ref.sha256??'')&&
+      received?.runId===ref.runId&&received.path===ref.path&&received.bytes===ref.bytes&&received.sha256===ref.sha256,
+      'complete source-linked raw foreground result missing or conflicting');
+    require(module?.sourceRevision===report.source?.revision&&module.servedSha256===module.sha256&&!!module.sha256,
+      'actual foreground transfer module source missing');
+    require(connection&&freshAuxiliaryIsAdmitted(report,delivery?.admission,4*ref?.bytes)&&
+      freshAuxiliaryIsAdmitted(report,f?.resultRestoration,6*ref?.bytes),'fresh serialization/terminal restoration admission missing');
+    const capture=f?.captureAdmission,w=capture?.descriptor?.width,h=capture?.descriptor?.height;
+    require(Number.isSafeInteger(w)&&w>0&&Number.isSafeInteger(h)&&h>0&&Number.isSafeInteger(7*w*h*4)&&
+      freshAuxiliaryIsAdmitted(report,capture,7*w*h*4),'fresh identified post-model capture admission missing');
+  }
   require(run?.status==='finished'&&run.runId===report.runId&&run.sameDevice===true&&run.sameQueue===true,'foreground run did not finish on exact shared device');
   require(f?.warmup?.completedFrameCount>=report.requested?.foreground?.warmupFrames&&
     [f.before,f.after].every(s=>s?.state?.active===true&&!s.state.error&&s.state.controls?.resolution===report.requested.foreground.grid&&s.state.controls?.emitterSourceDepth===report.requested.foreground.sourceDepth),

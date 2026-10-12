@@ -9,7 +9,7 @@ if(!source.includes('await reconnectModelWithoutNetworkCopies(')){
 }
 const {reconnectModelWithoutNetworkCopies}=await import('./model_connection_custody.mjs');
 assert(source.indexOf('await reconnectModelWithoutNetworkCopies(')>source.indexOf('report.foreground.captures.before='));
-assert(source.includes('if(report.requested.observeDino)'));
+assert(source.includes('if(report.requested.observeDino||foregroundRoot)'));
 for(const fault of [null,'endpoint','target','url','globals','pages','connect','viewport','geometry']){
  const events=[],host={},volume={},setup={},originalViewport={width:1280,height:960,deviceScaleFactor:1},
   state={__miniResidentForeground:host,__kaminosVolumePrototype:volume,__kaminosCompositionSetup:setup,innerWidth:1280,innerHeight:960,devicePixelRatio:1};

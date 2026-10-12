@@ -23,6 +23,7 @@ import {dinoPhaseDemand,inspectDinoInputBytes,inspectDinoOutput,acceptResidentDi
 import {twoStreamPhaseDemand,inspectTwoStreamOutput,acceptResidentTwoStream,residentTwoStreamExpectedPhases} from './resident_two_stream_acceptance.mjs';
 import {createNativeDinoObservation,loadDinoConversionHashes} from './native_dino_observation.mjs';
 import {reconnectModelWithoutNetworkCopies} from './model_connection_custody.mjs';
+import {createForegroundResultReceiver} from './native_foreground_result.mjs';
 const throughBackbone=process.argv.includes('--through-backbone');
 const throughPostProcessor=process.argv.includes('--through-postprocessor');
 const throughFullModel=process.argv.includes('--through-full-model');
@@ -59,6 +60,7 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 const persist=report.requested.appendPhaseJournal?createNativePhaseEvidenceWriter({reportPath,report}):()=>writeJsonReportAtomic(reportPath,report);
 let source,monitor,hostMonitor,child,browser,server,profile,safetyStop,foregroundService,foregroundChild,foregroundModule,displayChild,dinoObservation;
+let foregroundResultReceiver,foregroundTransferModule,freshAuxiliaryObservation;
 const stopForSafety=safety=>{
   if(!safetyStop)safetyStop=memoryStopAction({child:()=>child,report,persist})(safety);
   return safetyStop;
@@ -143,7 +145,12 @@ try{
     foregroundModule=fs.readFileSync(path.join(root,'tools/resident_foreground_browser.mjs'));
     if(!foregroundModule.equals(execFileSync('git',['show',report.source.revision+':tools/resident_foreground_browser.mjs'],{cwd:root})))throw Error('resident foreground composition module differs from exact source');
     report.foreground.compositionModule={url:'/resident-foreground-browser.mjs',sha256:digest(foregroundModule),sourceRevision:report.source.revision};
-    Object.assign(report.evidencePaths,{foregroundBefore:reportPath+'.foreground-before.png',foregroundAfter:reportPath+'.foreground-after.png',foregroundConsole:reportPath+'.foreground-console.jsonl'});
+    Object.assign(report.evidencePaths,{foregroundBefore:reportPath+'.foreground-before.png',foregroundAfter:reportPath+'.foreground-after.png',foregroundConsole:reportPath+'.foreground-console.jsonl',foregroundResult:reportPath+'.foreground-result.json'});
+    foregroundTransferModule=fs.readFileSync(path.join(root,'tools/foreground_result_transfer.mjs'));
+    if(!foregroundTransferModule.equals(execFileSync('git',['show',report.source.revision+':tools/foreground_result_transfer.mjs'],{cwd:root})))throw Error('foreground transfer module differs from exact source');
+    report.foreground.resultModule={url:'/foreground-result-transfer.mjs',sha256:digest(foregroundTransferModule),sourceRevision:report.source.revision};
+    foregroundResultReceiver=createForegroundResultReceiver({filename:report.evidencePaths.foregroundResult,runId:report.runId,
+      onState:state=>{report.foreground.resultEvidence=state;persist();}});
     report.claim='complete canonical native model and textured GLB alongside same-device ordinary volume/Three submissions; pixels inspected separately; no ordinary/eager admission or reference-parity claim';
   }
   report.phase='library-build';await persist();
@@ -194,6 +201,7 @@ try{
         processObservation.freshness.probeAtUnixMs===processRow.atUnixMs&&processObservation.freshness.observationIndex===processObservation.sampleCount&&
         processRow.sampledAggregatePhysicalFootprintBytes+demand.requiredBytes<=report.requested.processBudgetBytes&&!report.memorySafety?'admitted':'refused'};
   };
+  freshAuxiliaryObservation=freshObservation;
   server=http.createServer(async(req,res)=>{
     try{
       const name=new URL(req.url,'http://localhost').pathname;
@@ -207,6 +215,23 @@ try{
       if(foregroundRoot&&name==='/resident-foreground-browser.mjs'){
         report.foreground.compositionModule.servedSha256=digest(foregroundModule);
         res.writeHead(200,{'Content-Type':'text/javascript','Cache-Control':'no-store'}).end(foregroundModule);return;
+      }
+      if(foregroundRoot&&name==='/foreground-result-transfer.mjs'){
+        report.foreground.resultModule.servedSha256=digest(foregroundTransferModule);
+        res.writeHead(200,{'Content-Type':'text/javascript','Cache-Control':'no-store'}).end(foregroundTransferModule);return;
+      }
+      if(foregroundRoot&&name==='/foreground-result-admission'&&req.method==='POST'){
+        if(!foregroundResultReceiver||report.memorySafety||report.backend?.isFallbackAdapter!==false||
+          report.foreground.admission?.verdict!=='admitted'||report.phaseObservations.some(o=>o.verdict!=='admitted'))
+          throw Error('actual guarded foreground result route unavailable');
+        const requestedAt=Date.now(),request=JSON.parse((await readBody(req)).toString());
+        const admitted=await foregroundResultReceiver.admit(request,(phase,demand)=>freshObservation(phase,demand,requestedAt));
+        await persist();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(admitted));return;
+      }
+      if(foregroundRoot&&name==='/foreground-result'&&req.method==='POST'){
+        if(!foregroundResultReceiver||report.memorySafety)throw Error('actual guarded foreground raw result unavailable');
+        const ref=await foregroundResultReceiver.receive(req,{runId:req.headers['x-run-id'],bytes:Number(req.headers['x-body-bytes']),sha256:req.headers['x-body-sha256']});
+        await persist();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(ref));return;
       }
       if(foregroundRoot&&name==='/foreground-admission'&&req.method==='POST'){
         const phaseRequestedAtUnixMs=Date.now(),phase=JSON.parse((await readBody(req)).toString()),f=report.requested.foreground;
@@ -443,7 +468,7 @@ try{
     const pixels=fs.readFileSync(report.evidencePaths.foregroundBefore);report.foreground.captures.before={path:report.evidencePaths.foregroundBefore,bytes:pixels.length,sha256:digest(pixels),inspection:'not-yet-inspected'};
     await persist();
   }else await page.goto(report.url,{timeout:0});
-  if(report.requested.observeDino){
+  if(report.requested.observeDino||foregroundRoot){
     if(foregroundRoot){page.off('console',recordConsole);page.off('pageerror',recordPageError);}
     try{
       const resumed=await reconnectModelWithoutNetworkCopies({puppeteer,browser,page,endpoint});
@@ -461,7 +486,7 @@ try{
     const persistTensor=async(url,bytes)=>{const response=await fetch(url,{method:'POST',body:bytes});if(!response.ok)throw Error('complete tensor persistence failed: '+await response.text());};
     const foreground=config.requested.foreground?window.__miniResidentForeground:null;
     if(config.requested.foreground&&!foreground)throw Error('actual resident foreground composition missing; no standalone fallback');
-    let budget,device,backend,foregroundRun,foregroundFinish;
+    let budget,device,backend,foregroundRun,foregroundFinish,foregroundFinishReference;
     if(foreground){
       ({budget,device,backend}=foreground);budget.assertDeviceAcquiredHere(device);
       foregroundRun=await foreground.beginRun(config.runId);
@@ -664,15 +689,23 @@ try{
         'Actual complete canonical model and textured GLB exported; foreground composition not yet witnessed':config.requested.throughPostProcessor?
         'Complete DINO/backbone/postprocessor; mesh/material/GLB not yet run':config.requested.throughBackbone?
         'All24 DINO blocks and complete four-block backbone completed; full mesh/material/GLB not yet run':'All24 DINO blocks completed; full SF3D not yet run';
-      if(foreground)foregroundFinish=await foreground.finishRun();
-      return {backend,dino,twoStream,postProcessor,fullArtifact,decodedGlbImages,upstreamRetirement,inputConsumed,validationError:null,budget:budget.snapshot(),foregroundRun:foregroundFinish};
+      if(foreground){
+        foregroundFinish=await foreground.finishRun();
+        const {sendForegroundResult}=await import('/foreground-result-transfer.mjs');
+        foregroundFinishReference=await sendForegroundResult({value:foregroundFinish,runId:config.runId,fetch,budget});
+      }
+      return {backend,dino,twoStream,postProcessor,fullArtifact,decodedGlbImages,upstreamRetirement,inputConsumed,validationError:null,budget:budget.snapshot(),foregroundRunReference:foregroundFinishReference};
     }catch(error){failed=true;failure=error;throw error;}
     finally{
       bitmap?.close();
       try{
         // Failed foreground settlement quarantines model resources. The outer
         // diagnostic still owns and stops the exact browser on that failure.
-        if(foreground&&!foregroundFinish)foregroundFinish=await foreground.finishRun();
+        if(foreground&&!foregroundFinish){
+          foregroundFinish=await foreground.finishRun();
+          const {sendForegroundResult}=await import('/foreground-result-transfer.mjs');
+          foregroundFinishReference=await sendForegroundResult({value:foregroundFinish,runId:config.runId,fetch,budget});
+        }
         if(artifactHandle)await disposeResidentArtifact(artifactHandle);await device.queue.onSubmittedWorkDone();staging?.destroy();imageLease?.release();
         // A living host still owns this device and all its allocations. Actual
         // owned-browser exit, not false logical-zero credit, retires that host.
@@ -690,17 +723,26 @@ try{
     report.foreground.displayAssertion.aliveAtCapture=displayChild.exitCode===null&&displayChild.signalCode===null;
     if(!report.foreground.displayAssertion.aliveAtCapture)throw Error('owned render display assertion exited before native capture');
     report.foreground.after=await page.evaluate(()=>window.__miniResidentForeground.snapshot());
+    const initialPixels=fs.readFileSync(report.evidencePaths.foregroundBefore);
+    if(digest(initialPixels)!==report.foreground.captures.before.sha256||initialPixels.readUInt32BE(0)!==0x89504e47)
+      throw Error('source-linked initial capture changed before prospective capture admission');
+    const captureWidth=initialPixels.readUInt32BE(16),captureHeight=initialPixels.readUInt32BE(20),rgbaBytes=captureWidth*captureHeight*4;
+    if(!captureWidth||!captureHeight||!Number.isSafeInteger(7*rgbaBytes))throw Error('actual complete capture geometry required');
+    const captureDemand={rangeCpuBytes:4*rgbaBytes,workGpuBytes:3*rgbaBytes,requiredBytes:7*rgbaBytes,
+      authority:'additional compositor/readback/encoding work from actual initial PNG geometry; no retired physical credit'};
+    report.foreground.captureAdmission=await freshObservation({name:'foreground-post-model-capture',width:captureWidth,height:captureHeight},captureDemand,Date.now());
+    await persist();if(report.foreground.captureAdmission.verdict!=='admitted')throw Error('actual post-model capture refused before allocation');
     await page.screenshot({path:report.evidencePaths.foregroundAfter,fromSurface:false});
     const pixels=fs.readFileSync(report.evidencePaths.foregroundAfter);report.foreground.captures.after={path:report.evidencePaths.foregroundAfter,bytes:pixels.length,sha256:digest(pixels),inspection:'not-yet-inspected'};
+    if(pixels.readUInt32BE(16)!==captureWidth||pixels.readUInt32BE(20)!==captureHeight)throw Error('actual post-model capture geometry changed');
     if(report.foreground.pageErrors.length)throw Error('actual foreground browser exception: '+report.foreground.pageErrors[0].message);
   }
   report.output=inspectDinoOutput(report.evidencePaths.output);report.phase='complete';report.status='passed';
 }catch(error){report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};}
 finally{
   report.cleanup={};
-  try{if(hostMonitor)report.hostPressureGuard=await hostMonitor.stop();if(safetyStop)await safetyStop;}
+  try{if(safetyStop)await safetyStop;}
   catch(error){report.cleanup.hostObserverError=error.message;report.status='failed';}
-  try{if(monitor)report.processObservation=await monitor.stop();}catch(error){report.cleanup.observerError=error.message;report.status='failed';}
   try{report.cleanup.browser=child?await stopOwnedBrowser(child):{status:'not-started',exitObserved:true};}catch(error){report.cleanup.browser={error:error.message};report.status='failed';}
   if(foregroundRoot&&report.cleanup.browser?.exitObserved&&report.ownedBrowserPid){
     report.foreground.deviceRetirement={route:'exact-owned-browser-exit',ownedPid:report.ownedBrowserPid,
@@ -709,6 +751,22 @@ finally{
   try{if(foregroundService)report.cleanup.foregroundService=await foregroundService.close();}catch(error){report.cleanup.foregroundServiceError=error.message;report.status='failed';}
   try{if(displayChild)report.cleanup.displayAssertion=await stopOwnedBrowser(displayChild);}catch(error){report.cleanup.displayAssertionError=error.message;report.status='failed';}
   try{if(server)await new Promise(resolve=>server.close(resolve));report.cleanup.server='closed';}catch(error){report.cleanup.serverError=error.message;report.status='failed';}
+  if(foregroundResultReceiver?.state.reference){
+    try{
+      if(report.memorySafety)report.foreground.resultRestoration={status:'withheld-by-sticky-safety',raw:foregroundResultReceiver.state.reference};
+      else{
+        const bytes=foregroundResultReceiver.state.reference.bytes;
+        const demand={rangeCpuBytes:6*bytes,workGpuBytes:0,requiredBytes:6*bytes,
+          authority:'complete terminal JSON read/decode/object expansion after exact owned browser exit; no live host credit'};
+        report.foreground.resultRestoration=await freshAuxiliaryObservation({name:'foreground-result-terminal-restoration',bytes},demand,Date.now());
+        if(report.foreground.resultRestoration.verdict!=='admitted')throw Error('full foreground terminal restoration refused');
+        report.foregroundRun=await foregroundResultReceiver.restore(report.cleanup.browser,report.ownedBrowserPid);
+      }
+    }catch(error){report.status='failed';report.foreground.resultRestorationError={message:error.message,lastTrustworthyPhase:report.phase};}
+  }
+  try{if(hostMonitor)report.hostPressureGuard=await hostMonitor.stop();}
+  catch(error){report.cleanup.hostObserverError=error.message;report.status='failed';}
+  try{if(monitor)report.processObservation=await monitor.stop();}catch(error){report.cleanup.observerError=error.message;report.status='failed';}
   closeCanonicalSource(report,source);
   try{if(profile&&report.cleanup.browser?.exitObserved)await fs.promises.rm(profile,{recursive:true});}catch(error){report.cleanup.profileError=error.message;report.status='failed';}
   report.verdict=throughFullModel?(acceptNativeArtifact?acceptNativeArtifact(report,tensorTable):{ok:false,errors:['full model witness unavailable before graph import completed']}):throughPostProcessor?(postWitness?postWitness.acceptNativeResidentPostProcessor(report):{ok:false,errors:['postprocessor witness unavailable before arguments completed']}):throughBackbone?acceptResidentTwoStream(report):acceptResidentDino(report);

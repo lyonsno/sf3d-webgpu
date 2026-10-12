@@ -11,9 +11,11 @@ const start=source.indexOf('Object.assign(report,await page.evaluate(async confi
 const end=source.indexOf('\n  },{',start);
 assert.ok(start>0&&end>start,'actual native browser callback located');
 const body=source.slice(start,end).replace('Object.assign(report,await page.evaluate(async config=>{','async config=>{')
-  .replace("await import('/dist-lib/sf3d-producer.js')",'globalThis.__bundle')+'\n}';
+  .replace("await import('/dist-lib/sf3d-producer.js')",'globalThis.__bundle')
+  .replaceAll("await import('/foreground-result-transfer.mjs')",'globalThis.__foregroundTransfer')+'\n}';
 let secondAcquisition=0,destroyed=0,restored=0,finished=0;
 let actualBoundary;
+let transferred;
 const options={},opportunities={serviceAtBoundary:async boundary=>{actualBoundary=boundary;}},withForeground=async(_phase,work)=>work();
 const device={queue:{submit(){},async onSubmittedWorkDone(){}},pushErrorScope(){},async popErrorScope(){return null;},destroy(){destroyed++;},
   createCommandEncoder(){return {copyBufferToBuffer(){},finish(){return {};}};},
@@ -31,6 +33,9 @@ const bundle={createLoaderMemoryBudget(){throw Error('second budget forbidden');
   async runResidentArtifact(input){options.artifact=input;return {};},
   async disposeResidentTwoStream(){},async disposeResidentArtifact(){}};
 const callback=vm.runInNewContext('('+body+')',{
+  __foregroundTransfer:{async sendForegroundResult({value,runId,budget:actualBudget}){
+    assert.equal(actualBudget,budget);assert.equal(runId,'owned-run');assert.equal(value.status,'finished');transferred=value;
+    return{schema:'sf3d.native-foreground-run-reference.v0',status:'retained',runId,path:'/owned/full.json'};}},
   __bundle:bundle,window:{__miniResidentForeground:context},navigator:{gpu:{async requestAdapter(){secondAcquisition++;throw Error('unsafe second device acquisition');}}},
   fetch:async()=>({ok:true,async text(){return '';},async blob(){return {};}}),
   createImageBitmap:async()=>({width:503,height:503,close(){}}),document:{querySelector(){return {textContent:''};}},
@@ -46,7 +51,8 @@ assert.equal(options.artifact.withForeground,withForeground,'artifact CPU window
 assert.equal(typeof options.artifact.onAfterDuty,'function','actual CLIP and decoder prefixes service foreground');
 assert.equal(destroyed,0,'borrowed shared host device must survive model teardown');
 assert.equal(restored,0,'live host allocations must not be relabeled retired');
-assert.equal(result.foregroundRun.status,'finished');
+assert.equal(transferred.status,'finished');assert.equal(result.foregroundRunReference.status,'retained');
+assert.equal(result.foregroundRun,undefined,'full history is not returned over CDP while borrowed host is live');
 await options.artifact.onAfterDuty({name:'clip-block-0'});
 const actualService=createWebGpuForegroundService({routeId:'synthetic-wiring',device,queue:device.queue});
 const actualRun=await actualService.beginRun('synthetic-wiring');

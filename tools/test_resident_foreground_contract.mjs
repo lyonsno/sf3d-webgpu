@@ -49,6 +49,38 @@ const report={requested,runId:'fixture-run',rootPid:1,ownedBrowserPid:123,source
     displayAssertion:{route:'owned-caffeinate-process-lifetime',ownedPid:125,aliveAtCapture:true}},
   cleanup:{browser:{exitObserved:true,ownedPid:123},foregroundService:{exitObserved:true,ownedPid:124},displayAssertion:{exitObserved:true,ownedPid:125}}};
 assert.deepEqual(acceptResidentForeground(report).errors,[]);
+// The new complete-consumer branch must constructively accept the same locked
+// Kit receipts, not merely reject broken raw references or changed viewports.
+const transferred=structuredClone(report);
+transferred.modelConnection={status:'connected',effectiveNetworkEnabled:false,hostReferencesPreserved:true,
+ targetBefore:'owned-target',targetAfter:'owned-target',urlBefore:'http://owned/',urlAfter:'http://owned/',
+ viewportBefore:{width:1280,height:960},viewportAfter:{width:1280,height:960},
+ geometryBefore:{width:1280,height:960,deviceScaleFactor:1},geometryAfter:{width:1280,height:960,deviceScaleFactor:1}};
+const raw={schema:'sf3d.native-foreground-run-reference.v0',status:'retained',runId:report.runId,
+ path:'/owned/complete-foreground.json',bytes:4096,sha256:'4'.repeat(64)};
+const auxiliary=(requiredBytes,descriptor)=>({...structuredClone(admission),descriptor,demand:{requiredBytes},
+ hostHeadroom:evaluatePhaseHostHeadroom({host,requiredBytes,policy:requested.hostHeadroomPolicy,requestedAtUnixMs:1000})});
+transferred.foregroundRunReference=structuredClone(raw);
+transferred.foreground.resultModule={sourceRevision:report.source.revision,sha256:'5'.repeat(64),servedSha256:'5'.repeat(64)};
+transferred.foreground.resultEvidence={status:'retained',reference:structuredClone(raw),admission:auxiliary(4*raw.bytes)};
+transferred.foreground.resultRestoration=auxiliary(6*raw.bytes);
+transferred.foreground.captureAdmission=auxiliary(7*1280*960*4,{width:1280,height:960});
+assert.deepEqual(acceptResidentForeground(transferred).errors,[],'complete original-geometry transferred consumer is accepted');
+for(const mutate of [r=>r.foregroundRunReference.sha256='0'.repeat(64),r=>r.foreground.resultModule.servedSha256='wrong',
+ r=>r.foreground.resultEvidence.admission.process.lastObservation.runId='stale',
+ r=>r.foreground.resultRestoration.process.freshness.requestedAtUnixMs=999,
+ r=>r.foreground.resultRestoration.demand.requiredBytes--,r=>r.foreground.captureAdmission.verdict='refused',
+ r=>r.modelConnection.geometryAfter.width=800,r=>r.modelConnection.targetAfter='other']){
+ const bad=structuredClone(transferred);mutate(bad);assert.equal(acceptResidentForeground(bad).ok,false,'transferred consumer authority cannot silently drift');
+}
+for(const hazard of ['viewport','raw-reference']){
+ const bad=structuredClone(report);
+ if(hazard==='viewport')bad.modelConnection={status:'connected',effectiveNetworkEnabled:false,
+  viewportBefore:{width:1280,height:960},viewportAfter:{width:800,height:600},
+  geometryBefore:{width:1280,height:960,deviceScaleFactor:1},geometryAfter:{width:800,height:600,deviceScaleFactor:1}};
+ else{bad.foreground.resultEvidence={status:'failed'};bad.foregroundRunReference={schema:'sf3d.native-foreground-run-reference.v0',status:'retained',runId:'stale'};}
+ assert.equal(acceptResidentForeground(bad).ok,false,'changed viewport or unverified raw handoff cannot close: '+hazard);
+}
 for(const change of [r=>r.foreground.source.revision='other',r=>r.foreground.service.route='copy',r=>r.foreground.admission.verdict='refused',
   r=>r.foreground.admission.process.lastObservation.runId='stale',r=>r.foreground.admission.process.freshness.requestedAtUnixMs=999,
   r=>r.foreground.admission.process.lastObservation.sampledAggregatePhysicalFootprintBytes=2147483648,
