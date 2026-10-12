@@ -61,4 +61,3 @@ try{
   assert.equal(y.budget.snapshot().cpu.liveBytes,0);assert.equal(y.budget.snapshot().gpu.liveBytes,0);y.budget.restore();
 }finally{globalThis.fetch=prior;}
 console.log('PASS complete24-block diagnostic checkpoint/weight custody, explicit mapped mode, invalid options and falsy observer denial; synthetic device only');
-

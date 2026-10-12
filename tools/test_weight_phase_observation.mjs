@@ -43,4 +43,3 @@ try{
   assert.equal(requests,before);budget.restore();
 }finally{globalThis.fetch=prior;}
 console.log('PASS opt-in exact loaded-weight observation precedes consumer; live scope, falsy denial cleanup, borrowed device and invalid callback');
-
