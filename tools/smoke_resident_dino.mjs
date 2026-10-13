@@ -55,11 +55,23 @@ const report={schema:throughFullModel?'sf3d.native-resident-artifact.v0':through
     foreground:foregroundRoot?{repoRoot:foregroundRoot,revision:arg('--foreground-revision'),grid:Number(arg('--foreground-grid')),
       sourceDepth:Number(arg('--foreground-source-depth')),rendererCpuBytes:Number(arg('--foreground-cpu-bytes')),warmupFrames:Number(arg('--foreground-warmup-frames'))}:null,
     cpuBytes:(throughBackbone?256:128)*1024*1024,gpuBytes:(throughBackbone?1024:384)*1024*1024,totalBytes:(throughBackbone?1280:512)*1024*1024},
-  allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V, caller-declared complete-query score scratch and reusable128-row FFN scratch; diagnostic only; unchanged2GiB stop and fresh raw host-free gates':'source-fixed encoder backing',
+  allowanceBasis:throughBackbone?'canonical embedding source56,623,104bytes FP16: response/destination/conversion bound226,492,416CPUbytes; GPU persistent embedding/triplane/latent, one selected stage, Q/K/V, caller-declared complete-query score scratch and reusable128-row FFN scratch; diagnostic only; explicit caller process ceiling and fresh selected host gates':'source-fixed encoder backing',
   evidencePaths:{report:reportPath,input:reportPath+'.input.f32',output:reportPath+'.output.f32',twoStreamOutput:reportPath+'.triplane.f32',process:reportPath+'.process.jsonl',browserLog:reportPath+'.chrome.log'},
   phaseObservations:[]};
 fs.mkdirSync(path.dirname(reportPath),{recursive:true});
 const persist=report.requested.appendPhaseJournal?createNativePhaseEvidenceWriter({reportPath,report}):()=>writeJsonReportAtomic(reportPath,report);
+// Setup has its own durable boundaries: a pending render/capture is not model
+// compute. This observes the original waits; it does not time out or abort work.
+const setForegroundSetupPhase=async name=>{
+  const setup=report.foregroundSetup??={status:'not-started',phases:[]};
+  const at=Date.now(),previous=setup.phases.at(-1);
+  if(previous&&!previous.completedAtUnixMs)previous.completedAtUnixMs=at;
+  report.phase=name;
+  if(name==='native-dino'){setup.status='completed';setup.completedAtUnixMs=at;}
+  else{setup.status='running';setup.phases.push({phase:name,startedAtUnixMs:at});}
+  await persist();
+  console.log(JSON.stringify({kind:'foreground-setup-progress',runId:report.runId,phase:name,atUnixMs:at,setupStatus:setup.status}));
+};
 let source,monitor,hostMonitor,child,browser,server,profile,safetyStop,foregroundService,foregroundChild,foregroundModule,displayChild,dinoObservation;
 let foregroundResultReceiver,foregroundTransferModule,freshAuxiliaryObservation;
 const stopForSafety=safety=>{
@@ -102,7 +114,7 @@ try{
     throw Error('attention projection row reuse requires owned query and residual backbone route');
   if(!['raw-free-pages-v0',AVAILABLE_MEMORY_DIAGNOSTIC_POLICY].includes(report.requested.hostHeadroomPolicy))throw Error('unknown explicit host headroom policy; no fallback');
   if(report.requested.hostHeadroomPolicy===AVAILABLE_MEMORY_DIAGNOSTIC_POLICY){
-    if(!throughBackbone||report.requested.processBudgetBytes!==2147483648)throw Error('available-memory diagnostic requires complete backbone and unchanged2GiB process stop');
+    if(!throughBackbone||![2147483648,2415919104].includes(report.requested.processBudgetBytes))throw Error('available-memory diagnostic requires complete backbone and explicit supported 2 or 2.25GiB process stop');
     report.allowanceBasis+='; explicitly selected OS availability estimate, independent historical24% pressure stop, no ordinary full-route admission';
   }
   if(!root||!report.requested.revision||!report.requested.chrome||!report.requested.input||
@@ -456,24 +468,29 @@ try{
     const failStartup=error=>rejectStartup(Error('actual foreground startup failed: '+error.message));
     const failConsole=message=>{if(message.type()==='error'&&/^(Volume cockpit initialization failed:|Volume route initialization failed:|initScene failed:|composition module failed:)/.test(message.text()))failStartup(Error(message.text()));};
     page.on('pageerror',failStartup);page.on('console',failConsole);
-    report.phase='actual-foreground-navigation';await persist();
+    await setForegroundSetupPhase('actual-foreground-navigation');
     try{
       const response=await Promise.race([page.goto(new URL(report.foreground.route,report.url).href,{waitUntil:'domcontentloaded',timeout:0}),startupFailure]);
       if(!response?.ok())throw Error('actual foreground navigation refused: '+response?.status());
+      await setForegroundSetupPhase('actual-foreground-mount-wait');
       await Promise.race([page.waitForFunction(()=>window.__kaminosCompositionSetup?.status==='mounted'||window.__kaminosCompositionSetup?.status==='failed'||window.__kaminosVolumePrototype?.debugState().error,{timeout:0,polling:100}),startupFailure]);
       const mounted=await page.evaluate(()=>({setup:window.__kaminosCompositionSetup,state:window.__kaminosVolumePrototype?.debugState()}));
       report.foreground.mount=mounted;
       if(mounted.setup?.status!=='mounted'||!mounted.state?.active||mounted.state.error)throw Error('actual ordinary foreground failed to mount: '+JSON.stringify(mounted.setup));
+      await setForegroundSetupPhase('actual-foreground-warmup-wait');
       await Promise.race([page.waitForFunction(frames=>window.__kaminosVolumePrototype.debugState().frameCount>=frames||window.__kaminosVolumePrototype.debugState().error,{timeout:0,polling:100},report.requested.foreground.warmupFrames),startupFailure]);
     }finally{page.off('pageerror',failStartup);page.off('console',failConsole);}
+    await setForegroundSetupPhase('actual-foreground-snapshot');
     report.foreground.before=await page.evaluate(()=>window.__miniResidentForeground.snapshot());
     if(report.foreground.before.state.error||report.foreground.before.state.controls?.emitterSourceDepth!==report.requested.foreground.sourceDepth)throw Error('actual foreground warmup error/effective controls mismatch');
     report.foreground.warmup={requestedFrames:report.requested.foreground.warmupFrames,completedFrameCount:report.foreground.before.state.frameCount};
+    await setForegroundSetupPhase('actual-foreground-first-capture');
     await page.screenshot({path:report.evidencePaths.foregroundBefore,fromSurface:false});
     const pixels=fs.readFileSync(report.evidencePaths.foregroundBefore);report.foreground.captures.before={path:report.evidencePaths.foregroundBefore,bytes:pixels.length,sha256:digest(pixels),inspection:'not-yet-inspected'};
     await persist();
   }else await page.goto(report.url,{timeout:0});
   if(report.requested.observeDino||foregroundRoot){
+    if(foregroundRoot)await setForegroundSetupPhase('actual-foreground-model-reconnect');
     if(foregroundRoot){page.off('console',recordConsole);page.off('pageerror',recordPageError);}
     try{
       const resumed=await reconnectModelWithoutNetworkCopies({puppeteer,browser,page,endpoint});
@@ -482,7 +499,8 @@ try{
     }catch(error){report.modelConnection=error.modelConnectionReceipt;throw error;}
     await persist();
   }
-  report.phase='native-dino';await persist();
+  if(foregroundRoot)await setForegroundSetupPhase('native-dino');
+  else{report.phase='native-dino';await persist();}
   Object.assign(report,await page.evaluate(async config=>{
     const {createLoaderMemoryBudget,runResidentDino,runResidentTwoStream,disposeResidentTwoStream,runResidentPostProcessor,TwoStreamBackbone,preprocessImage,
       preprocessConditionImage,runResidentArtifact,disposeResidentArtifact}=await import('/dist-lib/sf3d-producer.js');
@@ -746,7 +764,13 @@ try{
     if(report.foreground.pageErrors.length)throw Error('actual foreground browser exception: '+report.foreground.pageErrors[0].message);
   }
   report.output=inspectDinoOutput(report.evidencePaths.output);report.phase='complete';report.status='passed';
-}catch(error){report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};}
+}catch(error){
+  if(report.foregroundSetup?.status==='running'){
+    report.foregroundSetup.status='failed';report.foregroundSetup.failedAtUnixMs=Date.now();
+    report.foregroundSetup.phases.at(-1).failedAtUnixMs=report.foregroundSetup.failedAtUnixMs;
+  }
+  report.status='failed';report.error={message:String(error?.message??error),stack:error?.stack,lastTrustworthyPhase:report.phase};
+}
 finally{
   report.cleanup={};
   try{if(safetyStop)await safetyStop;}

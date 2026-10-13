@@ -13,6 +13,9 @@ import {evaluatePhaseHostHeadroom} from './memory_admission.mjs';
 const requested={throughFullModel:true,processBudgetBytes:2147483648,cpuBytes:268435456,gpuBytes:1073741824,totalBytes:1342177280,
   hostHeadroomPolicy:'darwin-available-memory-estimate-v1',foreground:{repoRoot:'/synthetic/kaminos',revision:'1'.repeat(40),grid:32,sourceDepth:0.125,rendererCpuBytes:20971520,warmupFrames:200}};
 validateResidentForegroundRequest(requested);
+validateResidentForegroundRequest({...requested,processBudgetBytes:2415919104});
+for(const processBudgetBytes of [undefined,null,'2415919104',NaN,2415919105,3*1024**3])
+  assert.throws(()=>validateResidentForegroundRequest({...requested,processBudgetBytes}));
 for(const change of [r=>r.throughFullModel=false,r=>r.processBudgetBytes++,r=>r.cpuBytes++,r=>r.gpuBytes++,r=>r.totalBytes++,
   r=>r.hostHeadroomPolicy='raw-free-pages-v0',r=>r.foreground.repoRoot='relative',r=>r.foreground.revision='main',
   r=>r.foreground.grid=160,r=>r.foreground.sourceDepth=0.006,r=>r.foreground.rendererCpuBytes=0,r=>r.foreground.warmupFrames=0]){
@@ -39,6 +42,7 @@ for(let i=1;i<=2;i++){
 const serviceReport=await run.finish();await service.dispose();
 const snapshot={sameDevice:true,sameQueue:true,state:{active:true,error:null,controls:{resolution:32,emitterSourceDepth:0.125}}};
 const report={requested,runId:'fixture-run',rootPid:1,ownedBrowserPid:123,source:{hostname:'fixture',revision:'2'.repeat(40)},
+  processObservation:{maxFootprintBytes:requested.processBudgetBytes},
   hostPressureGuard:{status:'observed',policy:requested.hostHeadroomPolicy,pressureStopFreePercent:24},
   foregroundRun:{status:'finished',runId:'fixture-run',sameDevice:true,sameQueue:true,frames,serviceReport},
   foreground:{source:{repoRoot:requested.foreground.repoRoot,revision:requested.foreground.revision,trackedClean:true},
@@ -49,6 +53,16 @@ const report={requested,runId:'fixture-run',rootPid:1,ownedBrowserPid:123,source
     displayAssertion:{route:'owned-caffeinate-process-lifetime',ownedPid:125,aliveAtCapture:true}},
   cleanup:{browser:{exitObserved:true,ownedPid:123},foregroundService:{exitObserved:true,ownedPid:124},displayAssertion:{exitObserved:true,ownedPid:125}}};
 assert.deepEqual(acceptResidentForeground(report).errors,[]);
+const enlarged=structuredClone(report);
+enlarged.requested.processBudgetBytes=2415919104;
+enlarged.processObservation.maxFootprintBytes=2415919104;
+assert.deepEqual(acceptResidentForeground(enlarged).errors,[],'explicit 2.25-GiB process envelope preserves original live-render guards');
+for(const change of [r=>delete r.processObservation.maxFootprintBytes,r=>r.processObservation.maxFootprintBytes=2147483648,
+  r=>r.processObservation.maxFootprintBytes='2415919104',r=>r.requested.cpuBytes++,r=>r.requested.gpuBytes++,
+  r=>r.requested.totalBytes++,r=>r.hostPressureGuard.pressureStopFreePercent=23,
+  r=>r.foreground.admission.process.lastObservation.sampledAggregatePhysicalFootprintBytes=2415919104]){
+  const bad=structuredClone(enlarged);change(bad);assert.equal(acceptResidentForeground(bad).ok,false,'changed process or other guard cannot close');
+}
 // The new complete-consumer branch must constructively accept the same locked
 // Kit receipts, not merely reject broken raw references or changed viewports.
 const transferred=structuredClone(report);

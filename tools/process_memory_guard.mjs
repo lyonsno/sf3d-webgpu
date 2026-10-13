@@ -16,7 +16,7 @@ export async function startProcessMemory({python,script,rootPid=process.pid,rawP
     const {stdout,stderr}=await execute(python,[script,'--root-pid',String(rootPid),'--run-id',runId],{maxBuffer:Infinity});
     return {stdout,stderr,exitStatus:0};
   });
-  const summary={schema:'sf3d.process-memory.v0',status:'running',runId,rootPid,periodMs,sampleCount:0,
+  const summary={schema:'sf3d.process-memory.v0',status:'running',runId,rootPid,periodMs,maxFootprintBytes,sampleCount:0,
     sampledPeakAggregatePhysicalFootprintBytes:null,processes:{},rawPath,summaryPath,
     unavailableProcessObservations:[],coverage:'sampled-owned-process-tree',
     meaning:'sampled simultaneous owned-process footprint including observer; per-process kernel peaks are not summed; not machine-capacity certification'};

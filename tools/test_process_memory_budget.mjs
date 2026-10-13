@@ -16,6 +16,7 @@ try{
   assert.equal(actions.length,1,'a caller-selected footprint ceiling needs an actual one-shot stop action');
   assert.equal(summary.status,'budget-refused');assert.equal(summary.safety.reason,'process-footprint-budget');
   assert.equal(summary.safety.observedBytes,200);assert.equal(summary.safety.maxFootprintBytes,150);
+  assert.equal(summary.maxFootprintBytes,150,'effective monitored ceiling must be retained even apart from a safety stop');
   assert.equal(JSON.parse(await fs.readFile(summary.summaryPath)).safety.observedBytes,200);
   actions=[];
   await assert.rejects(startProcessMemory({rootPid:42,runId:'budget',rawPath:path.join(out,'initial.jsonl'),

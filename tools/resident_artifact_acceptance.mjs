@@ -219,7 +219,7 @@ export function acceptNativeArtifact(report,table) {
   const errors=[],require=(ok,msg)=>{if(!ok)errors.push(msg);};
   try {
     require(report.requested?.throughFullModel===true&&report.requested.throughPostProcessor===true&&report.requested.throughBackbone===true,'complete effective full-model request missing');
-    require(report.requested.processBudgetBytes===2147483648&&report.requested.cpuBytes===256*1024*1024&&report.requested.gpuBytes===1024*1024*1024&&report.requested.totalBytes===1280*1024*1024,'effective guards changed');
+    require([2147483648,2415919104].includes(report.requested.processBudgetBytes)&&report.processObservation?.maxFootprintBytes===report.requested.processBudgetBytes&&report.requested.cpuBytes===256*1024*1024&&report.requested.gpuBytes===1024*1024*1024&&report.requested.totalBytes===1280*1024*1024,'effective guards changed');
     const prefix=[...residentTwoStreamExpectedPhases(report.requested.attentionRowsPerDuty,report.requested.rematerializeTokenizerEmbedding??false),...postProcessorExpectedPhases(report.requested.postChannelsPerDuty)];
     prefix.unshift('device-acquisition');
     for(const [before,scope]of [['camera','dino'],['two-stream-embedding-weights','two-stream'],['post-processor-output-allocation','post-processor']])
@@ -257,7 +257,7 @@ export function acceptNativeArtifact(report,table) {
         process.lastObservation.rootPid===report.rootPid&&process.lastObservation.status==='observed'&&process.freshness?.route==='new-probe-after-request'&&
         process.freshness.requestedAtUnixMs>=observation.phaseRequestedAtUnixMs&&process.lastObservation.atUnixMs>=process.freshness.requestedAtUnixMs&&
         process.freshness.probeAtUnixMs===process.lastObservation.atUnixMs&&process.freshness.observationIndex===process.sampleCount&&
-        process.lastObservation.sampledAggregatePhysicalFootprintBytes+demand.requiredBytes<=2147483648,'fresh effective actual full-consumer guard join missing');
+        process.lastObservation.sampledAggregatePhysicalFootprintBytes+demand.requiredBytes<=report.requested.processBudgetBytes,'fresh effective actual full-consumer guard join missing');
     }
     require(contract.complete,'actual artifact phase graph incomplete');
     require(report.expectedPhaseOrder?.join(',')===report.phaseObservations?.map(o=>o.phase).join(','),'terminal complete effective phase identity missing');

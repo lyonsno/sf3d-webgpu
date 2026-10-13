@@ -8,7 +8,7 @@ const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 export function validateResidentForegroundRequest(requested){
   if(!requested?.foreground)return;
   const f=requested.foreground;
-  if(!requested.throughFullModel||requested.hostHeadroomPolicy!=='darwin-available-memory-estimate-v1'||requested.processBudgetBytes!==2147483648||
+  if(!requested.throughFullModel||requested.hostHeadroomPolicy!=='darwin-available-memory-estimate-v1'||![2147483648,2415919104].includes(requested.processBudgetBytes)||
     requested.cpuBytes!==268435456||requested.gpuBytes!==1073741824||requested.totalBytes!==1342177280)
     throw Error('resident foreground requires explicit complete model and unchanged available-memory diagnostic guards');
   if(!path.isAbsolute(f.repoRoot??'')||!(/^[a-f0-9]{40}$/).test(f.revision??'')||f.grid!==32||f.sourceDepth!==0.125||f.rendererCpuBytes!==20971520||f.warmupFrames!==200)
@@ -52,6 +52,7 @@ const freshAuxiliaryIsAdmitted=(report,a,requiredBytes)=>{
 export function acceptResidentForeground(report){
   const errors=[],require=(ok,msg)=>{if(!ok)errors.push(msg);},f=report.foreground,run=report.foregroundRun;
   try{validateResidentForegroundRequest(report.requested);}catch(error){errors.push(error.message);}
+  require(report.processObservation?.maxFootprintBytes===report.requested?.processBudgetBytes,'effective process stop differs from explicit requested envelope');
   require(f?.source?.revision===report.requested?.foreground?.revision&&f.source.trackedClean,'exact actual foreground source missing');
   require(f?.service?.route==='owned-actual-kaminos-handler.v0'&&f.service.effective?.source?.repoRoot===f.source?.repoRoot&&
     f.service.effective.source.commit===f.source?.revision&&f.service.effective.source.dirty===false,'actual foreground handler identity missing');
