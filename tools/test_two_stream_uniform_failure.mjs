@@ -31,4 +31,3 @@ for(const destroyFails of [false,true]){
   }
 }
 console.log('uniform initialization rejection, exact retirement, failed destruction quarantine and recovery');
-

@@ -13,7 +13,9 @@ const end=source.indexOf('\n  await new Promise(resolve=>server.listen',start);
 assert.ok(start>0&&end>start,'exercise the actual HTTP handler');
 const observeDeclaration=source.match(/const observe=async phase=>\{[\s\S]*?\};/)?.[0];
 assert.ok(observeDeclaration,'exercise the actual browser phase refusal');
-const catchStart=source.lastIndexOf('}catch(error){report.status=');
+// The outer runner catch starts at column zero. Nested restoration catches
+// must never be selected merely because their first statement sets status.
+const catchStart=source.lastIndexOf('\n}catch(error){')+1;
 const cleanupEnd=source.indexOf('  report.verdict=',catchStart);
 assert.ok(catchStart>0&&cleanupEnd>catchStart,'exercise the actual outer failure and cleanup');
 const parent=path.join(os.homedir(),'.local/state/sf3d');
@@ -56,7 +58,7 @@ try{
       kill(signal){assert.equal(signal,'SIGTERM');queueMicrotask(()=>{child.exitCode=0;child.emit('exit',0,null);});return true;}});
     const cleanup=vm.runInNewContext('(async()=>{try{await pageEvaluate();'+source.slice(catchStart,cleanupEnd)+'}})',{
       report,pageEvaluate:()=>observe({name:'real-phase'}),
-      foregroundRoot:null,foregroundService:null,displayChild:null,
+      foregroundRoot:null,foregroundService:null,displayChild:null,foregroundResultReceiver:null,
       hostMonitor:{async stop(){hostStopped=true;return {status:'stopped'};}},safetyStop:null,
       monitor:{async stop(){processStopped=true;return {status:'observed'};}},
       child,stopOwnedBrowser,server:{close(done){serverClosed=true;done();}},

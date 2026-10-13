@@ -28,4 +28,3 @@ try{
   await assert.rejects(stale.sample({fresh:true}),/fresh|post.request/);await stale.stop();
 }finally{await monitor.stop();await fs.rm(leaf,{recursive:true});}
 console.log('fresh boundary sample waits for coalesced older probe then measures a distinct post-request baseline');
-

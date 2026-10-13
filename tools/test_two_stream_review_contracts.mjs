@@ -237,4 +237,3 @@ try{
   ]){const drift=structuredClone(valid);mutate(drift);assert.equal(acceptResidentTwoStream(drift).ok,false);}
 }finally{fs.rmSync(leaf,{recursive:true});}
 console.log('canonical complete backbone observations, effective route/config and pre-output import failure contracts');
-

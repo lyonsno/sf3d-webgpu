@@ -27,4 +27,3 @@ try{
   assert.equal(twoStreamPhaseDemand(phases[1]).requiredBytes,113246228);
 }finally{globalThis.fetch=prior;device.destroy();budget.restore();}
 console.log('sequential embedding gates retain fresh post-upload baseline and refusal cleanup');
-

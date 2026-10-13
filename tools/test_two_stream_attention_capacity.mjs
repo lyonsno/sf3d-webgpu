@@ -27,4 +27,3 @@ for(const rows of [1,16,32,128,256]){
 for(const rows of [0,-1,1.5,NaN])assert.throws(()=>createTwoStreamAttentionDutyPlan(1297,{attentionRowsPerDuty:rows}),/attentionRowsPerDuty/);
 assert.equal(createTwoStreamAttentionDutyPlan(1297).length,4218,'legacy default remains unchanged');
 console.log('measured smaller query scratch retains complete keys, every query and partial output tail');
-
